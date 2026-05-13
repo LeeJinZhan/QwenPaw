@@ -30,6 +30,7 @@ from .agent_management import (
     spawn_subagent,
 )
 from .delegate_external_agent import delegate_external_agent
+from .bank_assistant import bank_assistant
 
 # Registered via react_agent's hardcoded tool_functions; kept out of
 # __all__ so it's always enabled, not gated on agent config.
@@ -60,4 +61,5 @@ __all__ = [
     "submit_to_agent",
     "check_agent_task",
     "spawn_subagent",
+    "bank_assistant",
 ]
