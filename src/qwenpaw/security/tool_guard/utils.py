@@ -19,6 +19,7 @@ logger = logging.getLogger(__name__)
 _DEFAULT_GUARDED_TOOLS = frozenset(
     {
         "execute_shell_command",
+        "execute_sandboxed_shell_command",
         "read_file",
         "write_file",
         "edit_file",

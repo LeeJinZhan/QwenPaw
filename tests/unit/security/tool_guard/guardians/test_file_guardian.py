@@ -536,6 +536,20 @@ class TestGuard:
         )
         assert len(findings) >= 1
 
+    def test_guard_sandboxed_shell_command_with_sensitive_path(
+        self,
+        guardian,
+        tmp_path,
+    ):
+        secret = str(tmp_path / "secret.key")
+        Path(secret).touch()
+        guardian.add_sensitive_file(secret)
+        findings = guardian.guard(
+            "execute_sandboxed_shell_command",
+            {"command": f"cat {secret}"},
+        )
+        assert len(findings) >= 1
+
     def test_guard_execute_shell_command_safe(self, guardian, tmp_path):
         secret = str(tmp_path / "secret.key")
         Path(secret).touch()

@@ -7,6 +7,7 @@ correctly in a multi-agent environment.
 """
 from contextvars import ContextVar
 from pathlib import Path
+from typing import Any
 
 # Context variable to store the current agent's workspace directory
 current_workspace_dir: ContextVar[Path | None] = ContextVar(
@@ -105,6 +106,22 @@ def set_current_shell_command_executable(executable: str | None) -> None:
         executable: Path to the shell executable (e.g. "/bin/bash").
     """
     current_shell_command_executable.set(executable)
+
+
+current_sandbox_profile: ContextVar[Any | None] = ContextVar(
+    "current_sandbox_profile",
+    default=None,
+)
+
+
+def get_current_sandbox_profile() -> Any | None:
+    """Get the current agent sandbox profile from context."""
+    return current_sandbox_profile.get()
+
+
+def set_current_sandbox_profile(profile: Any | None) -> None:
+    """Set the current agent sandbox profile in context."""
+    current_sandbox_profile.set(profile)
 
 
 # Context variable to store the current session ID for tool functions

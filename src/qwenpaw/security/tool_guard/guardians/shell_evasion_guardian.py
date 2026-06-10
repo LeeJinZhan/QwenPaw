@@ -23,6 +23,13 @@ from . import BaseToolGuardian
 
 logger = logging.getLogger(__name__)
 
+_SHELL_TOOL_NAMES = frozenset(
+    {
+        "execute_shell_command",
+        "execute_sandboxed_shell_command",
+    },
+)
+
 # ── Command substitution patterns ────────────────────────────────────
 # Checked against content outside single quotes.
 _COMMAND_SUBSTITUTION_PATTERNS: list[tuple[re.Pattern[str], str]] = [
@@ -541,7 +548,7 @@ class ShellEvasionGuardian(BaseToolGuardian):
 
     Detects command substitution, flag obfuscation, backslash-escaped
     whitespace/operators, hidden newlines, comment-quote desync, and
-    quoted-newline attacks.  Only fires for ``execute_shell_command``.
+    quoted-newline attacks.  Only fires for configured shell tools.
     """
 
     def __init__(self) -> None:
@@ -557,7 +564,7 @@ class ShellEvasionGuardian(BaseToolGuardian):
         tool_name: str,
         params: dict[str, Any],
     ) -> list[GuardFinding]:
-        if tool_name != "execute_shell_command":
+        if tool_name not in _SHELL_TOOL_NAMES:
             return []
 
         command = params.get("command")

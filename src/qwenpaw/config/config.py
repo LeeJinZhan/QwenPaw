@@ -1100,6 +1100,147 @@ class CodingModeConfig(BaseModel):
     )
 
 
+class SandboxProfileConfig(BaseModel):
+    """Per-agent sandbox configuration for sandbox-aware tools."""
+
+    enabled: bool = Field(
+        default=False,
+        description="Whether sandbox-aware tools should enforce isolation.",
+    )
+    profile_id: str = Field(
+        default="native",
+        description="Selected sandbox profile identifier.",
+    )
+    engine: Literal["none", "bubblewrap"] = Field(
+        default="none",
+        description="Sandbox engine used by sandbox-aware tools.",
+    )
+    allow_network: bool = Field(
+        default=True,
+        description="Whether the sandbox may share host networking.",
+    )
+    writable_roots: List[str] = Field(
+        default_factory=list,
+        description="Host paths mounted writable into the sandbox.",
+    )
+    readonly_roots: List[str] = Field(
+        default_factory=list,
+        description="Additional host paths mounted read-only.",
+    )
+    home_dir: str = Field(
+        default="",
+        description="Host directory mounted as HOME inside the sandbox.",
+    )
+    shell_executable: str = Field(
+        default="/bin/sh",
+        description="Shell executable inside the sandbox.",
+    )
+
+
+class SandboxProfileDefinition(BaseModel):
+    """A selectable sandbox profile definition."""
+
+    id: str
+    name: str
+    description: str = ""
+    sandbox: SandboxProfileConfig = Field(default_factory=SandboxProfileConfig)
+
+
+def _render_sandbox_path(value: str, workspace_dir: str) -> str:
+    """Render supported path placeholders in sandbox profile files."""
+    if not value:
+        return value
+    workspace = str(Path(workspace_dir).expanduser())
+    return value.replace("{workspace_dir}", workspace)
+
+
+def _render_sandbox_profile(
+    profile: SandboxProfileConfig,
+    workspace_dir: str,
+) -> SandboxProfileConfig:
+    """Render workspace-bound paths for a profile selected by an agent."""
+    return profile.model_copy(
+        update={
+            "writable_roots": [
+                _render_sandbox_path(path, workspace_dir)
+                for path in profile.writable_roots
+            ],
+            "readonly_roots": [
+                _render_sandbox_path(path, workspace_dir)
+                for path in profile.readonly_roots
+            ],
+            "home_dir": _render_sandbox_path(profile.home_dir, workspace_dir),
+        },
+    )
+
+
+def _builtin_sandbox_profile_definitions() -> list[SandboxProfileDefinition]:
+    """Return built-in sandbox profiles used when no profile file exists."""
+    return [
+        SandboxProfileDefinition(
+            id="native",
+            name="Native shell",
+            description="Use the host shell without OS-level sandboxing.",
+            sandbox=SandboxProfileConfig(),
+        ),
+        SandboxProfileDefinition(
+            id="linux-bubblewrap-workspace",
+            name="Linux bubblewrap workspace",
+            description=(
+                "Run shell commands in a bubblewrap sandbox with only the "
+                "agent workspace mounted writable and network disabled."
+            ),
+            sandbox=SandboxProfileConfig(
+                enabled=True,
+                profile_id="linux-bubblewrap-workspace",
+                engine="bubblewrap",
+                allow_network=False,
+                writable_roots=["{workspace_dir}"],
+                home_dir="{workspace_dir}/.qwenpaw-sandbox/home",
+                shell_executable="/bin/sh",
+            ),
+        ),
+    ]
+
+
+def load_sandbox_profile_definitions(
+    profiles_file: str | Path | None = None,
+) -> list[SandboxProfileDefinition]:
+    """Load sandbox profiles from a standalone config file.
+
+    The default location is ``WORKING_DIR / "sandbox-profiles.json"``.  When
+    the file is absent, the built-in MVP profiles are returned.
+    """
+    path = Path(profiles_file or WORKING_DIR / "sandbox-profiles.json")
+    if not path.exists():
+        return _builtin_sandbox_profile_definitions()
+
+    data = json.loads(path.read_text(encoding="utf-8"))
+    raw_profiles = data.get("profiles", data) if isinstance(data, dict) else data
+    if not isinstance(raw_profiles, list):
+        raise ValueError("sandbox profiles file must contain a profiles list")
+    return [
+        SandboxProfileDefinition.model_validate(item)
+        for item in raw_profiles
+    ]
+
+
+def build_sandbox_profile_config(
+    profile_id: str | None,
+    workspace_dir: str,
+) -> SandboxProfileConfig:
+    """Build the persisted sandbox profile for a newly created agent."""
+    selected = (profile_id or "native").strip() or "native"
+    for definition in load_sandbox_profile_definitions():
+        if definition.id == selected:
+            profile = _render_sandbox_profile(
+                definition.sandbox,
+                workspace_dir,
+            )
+            return profile.model_copy(update={"profile_id": selected})
+    raise ValueError(f"Unknown sandbox profile: {selected}")
+
+
 class AgentProfileConfig(BaseModel):
     """Complete Agent Profile configuration (stored in workspace/agent.json).
 
@@ -1184,6 +1325,10 @@ class AgentProfileConfig(BaseModel):
     coding_mode: CodingModeConfig = Field(
         default_factory=CodingModeConfig,
         description="Coding Mode configuration for this agent",
+    )
+    sandbox: SandboxProfileConfig = Field(
+        default_factory=SandboxProfileConfig,
+        description="Sandbox profile used by sandbox-aware tools.",
     )
 
 
@@ -1425,6 +1570,13 @@ def _default_builtin_tools() -> Dict[str, BuiltinToolConfig]:
             enabled=True,
             description="Execute shell commands",
             icon="💻",
+        ),
+        "execute_sandboxed_shell_command": BuiltinToolConfig(
+            name="execute_sandboxed_shell_command",
+            enabled=False,
+            description="Execute shell commands inside the configured sandbox",
+            async_execution=True,
+            icon="🧱",
         ),
         "read_file": BuiltinToolConfig(
             name="read_file",

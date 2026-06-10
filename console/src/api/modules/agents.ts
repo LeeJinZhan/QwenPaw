@@ -5,12 +5,17 @@ import type {
   CreateAgentRequest,
   AgentProfileRef,
   ReorderAgentsResponse,
+  SandboxProfileSummary,
 } from "../types/agents";
 
 // Multi-agent management API
 export const agentsApi = {
   // List all agents
   listAgents: () => request<AgentListResponse>("/agents"),
+
+  // List selectable sandbox profiles
+  listSandboxProfiles: () =>
+    request<SandboxProfileSummary[]>("/agents/sandbox-profiles"),
 
   // Get agent details
   getAgent: (agentId: string) =>

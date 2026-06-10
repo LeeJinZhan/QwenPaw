@@ -20,7 +20,11 @@ from ..utils import schedule_agent_reload
 from ...config.config import (
     AgentProfileConfig,
     AgentProfileRef,
+    BuiltinToolConfig,
     ModelSlotConfig,
+    SandboxProfileConfig,
+    build_sandbox_profile_config,
+    load_sandbox_profile_definitions,
     load_agent_config,
     save_agent_config,
     generate_short_agent_id,
@@ -61,6 +65,14 @@ class ReorderAgentsRequest(BaseModel):
     agent_ids: list[str]
 
 
+class SandboxProfileSummary(BaseModel):
+    """Selectable sandbox profile for new agents."""
+
+    id: str
+    name: str
+    description: str = ""
+
+
 class CreateAgentRequest(BaseModel):
     """Request model for creating a new agent.
 
@@ -76,6 +88,7 @@ class CreateAgentRequest(BaseModel):
     language: str | None = None
     skill_names: list[str] | None = None
     active_model: ModelSlotConfig | None = None
+    sandbox_profile_id: str | None = None
 
     @field_validator("id", mode="before")
     @classmethod
@@ -154,6 +167,45 @@ def _read_profile_description(workspace_dir: str) -> str:
         return ""
 
 
+def _sandbox_profile_catalog() -> list[SandboxProfileSummary]:
+    """Return sandbox profiles selectable during agent creation."""
+    return [
+        SandboxProfileSummary(
+            id=profile.id,
+            name=profile.name,
+            description=profile.description,
+        )
+        for profile in load_sandbox_profile_definitions()
+    ]
+
+
+def _apply_sandbox_tool_defaults(
+    tools: "ToolsConfig",
+    sandbox: SandboxProfileConfig,
+) -> None:
+    """Switch shell tools for the selected sandbox profile."""
+    builtin_tools = tools.builtin_tools
+    if "execute_shell_command" not in builtin_tools:
+        builtin_tools["execute_shell_command"] = BuiltinToolConfig(
+            name="execute_shell_command",
+            enabled=True,
+            description="Execute shell commands",
+            icon="💻",
+        )
+    if "execute_sandboxed_shell_command" not in builtin_tools:
+        builtin_tools["execute_sandboxed_shell_command"] = BuiltinToolConfig(
+            name="execute_sandboxed_shell_command",
+            enabled=False,
+            description="Execute shell commands inside the configured sandbox",
+            async_execution=True,
+            icon="🧱",
+        )
+
+    use_sandbox = sandbox.enabled and sandbox.engine == "bubblewrap"
+    builtin_tools["execute_shell_command"].enabled = not use_sandbox
+    builtin_tools["execute_sandboxed_shell_command"].enabled = use_sandbox
+
+
 @router.get(
     "",
     response_model=AgentListResponse,
@@ -203,6 +255,17 @@ async def list_agents() -> AgentListResponse:
             )
 
     return AgentListResponse(agents=agents)
+
+
+@router.get(
+    "/sandbox-profiles",
+    response_model=list[SandboxProfileSummary],
+    summary="List selectable sandbox profiles",
+    description="Get sandbox profiles available when creating a new agent",
+)
+async def list_sandbox_profiles() -> list[SandboxProfileSummary]:
+    """List sandbox profiles supported by this runtime."""
+    return _sandbox_profile_catalog()
 
 
 @router.put(
@@ -315,6 +378,16 @@ async def create_agent(
     language = normalize_agent_language(
         request.language or config.agents.language or "en",
     )
+    try:
+        sandbox = build_sandbox_profile_config(
+            request.sandbox_profile_id,
+            str(workspace_dir),
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+    tools = ToolsConfig()
+    _apply_sandbox_tool_defaults(tools, sandbox)
 
     agent_config = AgentProfileConfig(
         id=new_id,
@@ -325,7 +398,8 @@ async def create_agent(
         channels=ChannelConfig(),
         mcp=MCPConfig(),
         heartbeat=HeartbeatConfig(),
-        tools=ToolsConfig(),
+        tools=tools,
+        sandbox=sandbox,
         active_model=request.active_model,
     )
 
