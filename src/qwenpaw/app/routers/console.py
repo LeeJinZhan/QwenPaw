@@ -32,6 +32,17 @@ class MarkInboxReadRequest(BaseModel):
 
 
 MAX_DEBUG_LOG_LINES = 1000
+RUNTIME_CHANNEL_META_KEYS = (
+    "conversation_id",
+    "runtime_task_id",
+    "trace_id",
+    "runtime_constraints",
+    "execution_sandbox",
+    "policy_search_context",
+    "identity_json",
+    "runtime_governance",
+    "runtime_tool_gateway",
+)
 
 
 def _safe_filename(name: str) -> str:
@@ -93,14 +104,20 @@ def _extract_session_and_payload(request_data: Union[AgentRequest, dict]):
             elif isinstance(content_part, dict) and "content" in content_part:
                 content_parts.extend(content_part["content"] or [])
 
+    channel_meta = {
+        "session_id": session_id,
+        "user_id": sender_id,
+    }
+    if isinstance(request_data, dict):
+        for key in RUNTIME_CHANNEL_META_KEYS:
+            if key in request_data:
+                channel_meta[key] = request_data[key]
+
     native_payload = {
         "channel_id": channel_id,
         "sender_id": sender_id,
         "content_parts": content_parts,
-        "meta": {
-            "session_id": session_id,
-            "user_id": sender_id,
-        },
+        "meta": channel_meta,
     }
     return native_payload
 

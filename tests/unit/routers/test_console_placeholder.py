@@ -10,7 +10,7 @@ labels like ``{"type": ...`` in the session drawer (regression for PR #3).
 """
 from __future__ import annotations
 
-from qwenpaw.app.routers.console import _extract_placeholder_name
+from qwenpaw.app.routers.console import _extract_placeholder_name, _extract_session_and_payload
 
 
 class _TextBlock:
@@ -86,3 +86,46 @@ def test_falsy_first_part_is_media() -> None:
     name, first_text = _extract_placeholder_name([None])
     assert name == "Media Message"
     assert first_text == ""
+
+
+def test_extract_session_payload_preserves_runtime_bank_context_in_meta() -> None:
+    payload = {
+        "channel": "bank-runtime",
+        "user_id": "u001",
+        "session_id": "session-runtime-001",
+        "trace_id": "trace-runtime-001",
+        "runtime_task_id": "task-runtime-001",
+        "identity_json": '{"user_id":"u001","allowed_customer_ids":["cust-001"]}',
+        "runtime_governance": {
+            "task_id": "task-runtime-001",
+            "trace_id": "trace-runtime-001",
+            "user_id": "u001",
+        },
+        "runtime_tool_gateway": {
+            "endpoint": "http://runtime.local/runtime/v1/tool-calls",
+            "allowed_tools": ["ragflow.search_policy"],
+        },
+        "runtime_constraints": {
+            "disabled_tools": ["write_file"],
+        },
+        "input": [
+            {
+                "role": "user",
+                "content": [{"type": "text", "text": "查询客户授信政策"}],
+            },
+        ],
+    }
+
+    native_payload = _extract_session_and_payload(payload)
+
+    assert native_payload["channel_id"] == "bank-runtime"
+    assert native_payload["sender_id"] == "u001"
+    assert native_payload["content_parts"] == [{"type": "text", "text": "查询客户授信政策"}]
+    assert native_payload["meta"]["session_id"] == "session-runtime-001"
+    assert native_payload["meta"]["user_id"] == "u001"
+    assert native_payload["meta"]["trace_id"] == "trace-runtime-001"
+    assert native_payload["meta"]["runtime_task_id"] == "task-runtime-001"
+    assert native_payload["meta"]["identity_json"] == payload["identity_json"]
+    assert native_payload["meta"]["runtime_governance"] == payload["runtime_governance"]
+    assert native_payload["meta"]["runtime_tool_gateway"] == payload["runtime_tool_gateway"]
+    assert native_payload["meta"]["runtime_constraints"] == payload["runtime_constraints"]
