@@ -10,7 +10,18 @@ labels like ``{"type": ...`` in the session drawer (regression for PR #3).
 """
 from __future__ import annotations
 
-from qwenpaw.app.routers.console import _extract_placeholder_name, _extract_session_and_payload
+import asyncio
+
+from agentscope_runtime.engine.schemas.agent_schemas import AgentRequest
+
+from qwenpaw.app.routers.console import (
+    _extract_placeholder_name,
+    _extract_session_and_payload,
+    _is_runtime_native_payload,
+    _is_runtime_terminal_sse,
+    _runtime_completed_sse,
+    _stream_runtime_console_events,
+)
 
 
 class _TextBlock:
@@ -18,6 +29,17 @@ class _TextBlock:
 
     def __init__(self, text: str) -> None:
         self.text = text
+
+
+class _RuntimeConsoleChannel:
+    def __init__(self, events: list[str]) -> None:
+        self.events = events
+        self.seen_payload = None
+
+    async def stream_one(self, payload):
+        self.seen_payload = payload
+        for event in self.events:
+            yield event
 
 
 def test_no_content_parts_returns_new_chat() -> None:
@@ -129,3 +151,95 @@ def test_extract_session_payload_preserves_runtime_bank_context_in_meta() -> Non
     assert native_payload["meta"]["runtime_governance"] == payload["runtime_governance"]
     assert native_payload["meta"]["runtime_tool_gateway"] == payload["runtime_tool_gateway"]
     assert native_payload["meta"]["runtime_constraints"] == payload["runtime_constraints"]
+
+
+def test_extract_agent_request_payload_preserves_runtime_bank_context_in_meta() -> None:
+    request = AgentRequest(
+        channel="bank-runtime",
+        user_id="u001",
+        session_id="session-runtime-001",
+        trace_id="trace-runtime-001",
+        runtime_task_id="task-runtime-001",
+        identity_json={"user_id": "u001", "allowed_customer_ids": ["cust-001"]},
+        runtime_governance={
+            "task_id": "task-runtime-001",
+            "trace_id": "trace-runtime-001",
+            "user_id": "u001",
+        },
+        runtime_tool_gateway={
+            "endpoint": "http://runtime.local/runtime/v1/tool-calls",
+            "allowed_tools": ["workspace.list_outputs"],
+        },
+        runtime_constraints={
+            "disabled_tools": ["execute_shell_command", "write_file"],
+        },
+        input=[
+            {
+                "role": "user",
+                "content": [{"type": "text", "text": "查询客户授信政策"}],
+            },
+        ],
+    )
+
+    native_payload = _extract_session_and_payload(request)
+
+    assert native_payload["channel_id"] == "bank-runtime"
+    assert native_payload["sender_id"] == "u001"
+    assert native_payload["meta"]["session_id"] == "session-runtime-001"
+    assert native_payload["meta"]["user_id"] == "u001"
+    assert native_payload["meta"]["trace_id"] == "trace-runtime-001"
+    assert native_payload["meta"]["runtime_task_id"] == "task-runtime-001"
+    assert native_payload["meta"]["identity_json"] == request.identity_json
+    assert native_payload["meta"]["runtime_governance"] == request.runtime_governance
+    assert native_payload["meta"]["runtime_tool_gateway"] == request.runtime_tool_gateway
+    assert native_payload["meta"]["runtime_constraints"] == request.runtime_constraints
+
+
+def test_runtime_native_payload_detection_accepts_channel_or_runtime_meta() -> None:
+    assert _is_runtime_native_payload({"channel_id": "bank-runtime", "meta": {}})
+    assert _is_runtime_native_payload({"channel_id": "console", "meta": {"runtime_task_id": "task_001"}})
+    assert not _is_runtime_native_payload({"channel_id": "console", "meta": {}})
+
+
+def test_runtime_completed_sse_is_terminal_for_runtime_adapter() -> None:
+    event = _runtime_completed_sse({"meta": {"session_id": "runtime-session-001"}})
+
+    assert event == 'data: {"event": "completed", "chat_id": "runtime-session-001"}\n\n'
+    assert _is_runtime_terminal_sse(event)
+    assert _is_runtime_terminal_sse('data: {"status": "completed", "object": "response"}\n\n')
+    assert not _is_runtime_terminal_sse('data: {"status": "in_progress", "object": "response"}\n\n')
+
+
+def test_runtime_console_events_append_completed_when_upstream_has_no_terminal() -> None:
+    native_payload = {
+        "channel_id": "bank-runtime",
+        "sender_id": "u001",
+        "meta": {"session_id": "runtime-session-001", "runtime_task_id": "task-001"},
+    }
+    channel = _RuntimeConsoleChannel(['data: {"event": "message", "delta": "处理中"}\n\n'])
+
+    events = asyncio.run(_collect_runtime_events(channel, native_payload))
+
+    assert channel.seen_payload == native_payload
+    assert events == [
+        'data: {"event": "message", "delta": "处理中"}\n\n',
+        'data: {"event": "completed", "chat_id": "runtime-session-001"}\n\n',
+    ]
+
+
+def test_runtime_console_events_do_not_duplicate_terminal() -> None:
+    native_payload = {
+        "channel_id": "bank-runtime",
+        "sender_id": "u001",
+        "meta": {"session_id": "runtime-session-001", "runtime_task_id": "task-001"},
+    }
+    terminal = 'data: {"status": "completed", "object": "response"}\n\n'
+    channel = _RuntimeConsoleChannel([terminal])
+
+    events = asyncio.run(_collect_runtime_events(channel, native_payload))
+
+    assert events == [terminal]
+
+
+async def _collect_runtime_events(channel, native_payload: dict) -> list[str]:
+    return [event async for event in _stream_runtime_console_events(channel, native_payload)]

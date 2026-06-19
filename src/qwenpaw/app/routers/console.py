@@ -112,6 +112,11 @@ def _extract_session_and_payload(request_data: Union[AgentRequest, dict]):
         for key in RUNTIME_CHANNEL_META_KEYS:
             if key in request_data:
                 channel_meta[key] = request_data[key]
+    else:
+        for key in RUNTIME_CHANNEL_META_KEYS:
+            value = getattr(request_data, key, None)
+            if value is not None:
+                channel_meta[key] = value
 
     native_payload = {
         "channel_id": channel_id,
@@ -120,6 +125,59 @@ def _extract_session_and_payload(request_data: Union[AgentRequest, dict]):
         "meta": channel_meta,
     }
     return native_payload
+
+
+def _is_runtime_native_payload(native_payload: dict) -> bool:
+    meta = native_payload.get("meta") if isinstance(native_payload, dict) else {}
+    if not isinstance(meta, dict):
+        meta = {}
+    return (
+        native_payload.get("channel_id") == "bank-runtime"
+        or bool(meta.get("runtime_task_id"))
+        or bool(meta.get("runtime_tool_gateway"))
+        or bool(meta.get("runtime_governance"))
+    )
+
+
+def _is_runtime_terminal_sse(event_data: str) -> bool:
+    for raw_line in str(event_data).splitlines():
+        line = raw_line.strip()
+        if not line.startswith("data:"):
+            continue
+        try:
+            payload = json.loads(line.removeprefix("data:").strip())
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        event = str(payload.get("event") or payload.get("event_type") or "").strip()
+        status = str(payload.get("status") or "").strip()
+        if event in {"completed", "done", "success", "agent.completed"}:
+            return True
+        if status == "completed":
+            return True
+    return False
+
+
+def _runtime_completed_sse(native_payload: dict) -> str:
+    meta = native_payload.get("meta") if isinstance(native_payload, dict) else {}
+    if not isinstance(meta, dict):
+        meta = {}
+    chat_id = str(meta.get("session_id") or native_payload.get("session_id") or "")
+    return f"data: {json.dumps({'event': 'completed', 'chat_id': chat_id}, ensure_ascii=False)}\n\n"
+
+
+async def _stream_runtime_console_events(
+    console_channel,
+    native_payload: dict,
+) -> AsyncGenerator[str, None]:
+    terminal_seen = False
+    async for event_data in console_channel.stream_one(native_payload):
+        if _is_runtime_terminal_sse(event_data):
+            terminal_seen = True
+        yield event_data
+    if not terminal_seen:
+        yield _runtime_completed_sse(native_payload)
 
 
 def _tail_text_file(
@@ -210,6 +268,15 @@ async def post_console_chat(
         queue = await tracker.attach(chat.id)
         if queue is None:
             return
+    elif _is_runtime_native_payload(native_payload):
+        return StreamingResponse(
+            _stream_runtime_console_events(console_channel, native_payload),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+            },
+        )
     else:
         queue, _ = await tracker.attach_or_start(
             chat.id,
@@ -221,10 +288,16 @@ async def post_console_chat(
         # Hold iterator so finally can aclose(); guarantees stream_from_queue's
         # finally (detach_subscriber) on client abort / generator teardown.
         stream_it = tracker.stream_from_queue(queue, chat.id)
+        runtime_request = _is_runtime_native_payload(native_payload)
+        terminal_seen = False
         try:
             try:
                 async for event_data in stream_it:
+                    if runtime_request and _is_runtime_terminal_sse(event_data):
+                        terminal_seen = True
                     yield event_data
+                if runtime_request and not terminal_seen:
+                    yield _runtime_completed_sse(native_payload)
             except Exception as e:
                 logger.exception("Console chat stream error")
                 yield f"data: {json.dumps({'error': str(e)})}\n\n"

@@ -13,6 +13,7 @@ pretty-printed to the terminal.
 from __future__ import annotations
 
 import copy
+import json
 import logging
 import os
 import sys
@@ -364,8 +365,15 @@ class ConsoleChannel(BaseChannel):
         try:
             send_meta = getattr(request, "channel_meta", None) or {}
             send_meta.setdefault("bot_prefix", self.bot_prefix)
+            is_runtime_request = (
+                getattr(request, "channel", None) == "bank-runtime"
+                or bool(send_meta.get("runtime_task_id"))
+                or bool(send_meta.get("runtime_tool_gateway"))
+                or bool(send_meta.get("runtime_governance"))
+            )
             last_response = None
             event_count = 0
+            runtime_terminal_sent = False
 
             async for event in self._process(request):
                 event_count += 1
@@ -403,6 +411,8 @@ class ConsoleChannel(BaseChannel):
 
                 data = self._serialize_event_for_sse(event)
                 yield f"data: {data}\n\n"
+                if obj == "response" and status == RunStatus.Completed:
+                    runtime_terminal_sent = True
 
                 if obj == "message" and status == RunStatus.Completed:
                     media_message = await self._extract_media_message(event)
@@ -427,6 +437,12 @@ class ConsoleChannel(BaseChannel):
             err_msg = self._get_response_error_message(last_response)
             if err_msg:
                 self._print_error(err_msg)
+            elif is_runtime_request and not runtime_terminal_sent:
+                yield (
+                    "data: "
+                    f"{json.dumps({'event': 'completed', 'chat_id': session_id}, ensure_ascii=False)}"
+                    "\n\n"
+                )
 
             to_handle = request.user_id or ""
             if self._on_reply_sent:
