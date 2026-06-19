@@ -7,6 +7,7 @@ correctly in a multi-agent environment.
 """
 from contextvars import ContextVar
 from pathlib import Path
+from typing import Any
 
 # Context variable to store the current agent's workspace directory
 current_workspace_dir: ContextVar[Path | None] = ContextVar(
@@ -130,3 +131,21 @@ def set_current_session_id(session_id: str | None) -> None:
         session_id: Session ID to store in context.
     """
     current_session_id.set(session_id)
+
+
+current_runtime_tool_gateway: ContextVar[dict[str, Any] | None] = ContextVar(
+    "current_runtime_tool_gateway",
+    default=None,
+)
+
+
+def get_current_runtime_tool_gateway() -> dict[str, Any] | None:
+    """Get Runtime Tool Gateway metadata for the current tool call."""
+    return current_runtime_tool_gateway.get()
+
+
+def set_current_runtime_tool_gateway(
+    gateway: dict[str, Any] | None,
+) -> None:
+    """Set Runtime Tool Gateway metadata for the current tool call."""
+    current_runtime_tool_gateway.set(gateway)

@@ -526,6 +526,21 @@ class AgentRunner(Runner):
                 "agent_id": self.agent_id,
                 "root_agent_id": self.agent_id,
             }
+            for runtime_meta_key in (
+                "conversation_id",
+                "runtime_task_id",
+                "trace_id",
+                "runtime_constraints",
+                "execution_sandbox",
+                "policy_search_context",
+                "identity_json",
+                "runtime_governance",
+                "runtime_tool_gateway",
+            ):
+                if runtime_meta_key in channel_meta:
+                    base_request_context[runtime_meta_key] = channel_meta[
+                        runtime_meta_key
+                    ]
             payload_context = getattr(request, "request_context", None)
             if isinstance(payload_context, dict):
                 base_request_context.update(payload_context)

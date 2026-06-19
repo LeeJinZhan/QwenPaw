@@ -55,6 +55,7 @@ from .tools import (
     list_agents,
     materialize_skill,
     read_file,
+    runtime_tool_gateway,
     send_file_to_user,
     set_user_timezone,
     view_image,
@@ -78,6 +79,60 @@ logger = logging.getLogger(__name__)
 
 # Valid namesake strategies for tool registration
 NamesakeStrategy = Literal["override", "skip", "raise", "rename"]
+
+
+def _build_runtime_tool_gateway_context(request_context: dict[str, Any]) -> str:
+    """Render Runtime Tool Gateway instructions for bank-runtime calls."""
+    gateway = request_context.get("runtime_tool_gateway")
+    if not isinstance(gateway, dict):
+        return ""
+    allowed_tools = [
+        str(item).strip()
+        for item in gateway.get("allowed_tools", [])
+        if str(item).strip()
+    ]
+    if not allowed_tools:
+        return ""
+    constraints = request_context.get("runtime_constraints")
+    disabled_tools: list[str] = []
+    if isinstance(constraints, dict):
+        disabled_tools = [
+            str(item).strip()
+            for item in constraints.get("disabled_tools", [])
+            if str(item).strip()
+        ]
+    task_id = str(gateway.get("task_id", "")).strip()
+    lines = [
+        "Runtime Tool Gateway is enabled for this request.",
+        "- Use the QwenPaw tool `runtime_tool_gateway` for Runtime actions.",
+        "- Allowed Runtime tool ids: " + ", ".join(allowed_tools),
+        "- Do not use native shell, file, browser, or desktop tools to "
+        "simulate these Runtime actions.",
+    ]
+    if "workspace.list_outputs" in allowed_tools and task_id:
+        lines.append(
+            "- For `workspace.list_outputs`, call "
+            "`runtime_tool_gateway` with "
+            f"`tool_id=\"workspace.list_outputs\"` and "
+            f"`input={{\"task_id\":\"{task_id}\"}}`.",
+        )
+    if disabled_tools:
+        lines.append("- Disabled native tools: " + ", ".join(disabled_tools))
+    return "\n".join(lines)
+
+
+def _runtime_disabled_tools_from_context(
+    request_context: dict[str, Any],
+) -> set[str]:
+    """Return native tools disabled by Runtime constraints."""
+    constraints = request_context.get("runtime_constraints")
+    if not isinstance(constraints, dict):
+        return set()
+    return {
+        str(item).strip()
+        for item in constraints.get("disabled_tools", [])
+        if str(item).strip()
+    }
 
 
 class QwenPawAgent(CodingModeMixin, ToolGuardMixin, ReActAgent):
@@ -295,6 +350,11 @@ class QwenPawAgent(CodingModeMixin, ToolGuardMixin, ReActAgent):
             "view_video": view_video,
             "send_file_to_user": send_file_to_user,
             "get_current_time": get_current_time,
+            **(
+                {"runtime_tool_gateway": runtime_tool_gateway}
+                if self._runtime_tool_gateway_enabled()
+                else {}
+            ),
             "set_user_timezone": set_user_timezone,
             "get_token_usage": get_token_usage,
             "delegate_external_agent": delegate_external_agent,
@@ -330,7 +390,13 @@ class QwenPawAgent(CodingModeMixin, ToolGuardMixin, ReActAgent):
                     )
 
         # Register tools with appropriate defaults
+        runtime_disabled_tools = _runtime_disabled_tools_from_context(
+            self._request_context,
+        )
         for tool_name, tool_func in tool_functions.items():
+            if tool_name in runtime_disabled_tools:
+                logger.debug("Skipped Runtime-disabled tool: %s", tool_name)
+                continue
             # For plugin tools: skip if not in config (security)
             # For hardcoded tools: default to enabled (backward compatibility)
             if tool_name in plugin_tools:
@@ -476,7 +542,22 @@ class QwenPawAgent(CodingModeMixin, ToolGuardMixin, ReActAgent):
         if self._env_context is not None:
             sys_prompt = sys_prompt + "\n\n" + self._env_context
 
+        runtime_gateway_context = _build_runtime_tool_gateway_context(
+            self._request_context,
+        )
+        if runtime_gateway_context:
+            sys_prompt = sys_prompt + "\n\n" + runtime_gateway_context
+
         return sys_prompt
+
+    def _runtime_tool_gateway_enabled(self) -> bool:
+        gateway = self._request_context.get("runtime_tool_gateway")
+        if not isinstance(gateway, dict):
+            return False
+        allowed_tools = gateway.get("allowed_tools")
+        return isinstance(allowed_tools, list) and any(
+            str(item).strip() for item in allowed_tools
+        )
 
     def _register_hooks(self) -> None:
         """Register pre-reasoning and pre-acting hooks."""
@@ -1419,6 +1500,7 @@ class QwenPawAgent(CodingModeMixin, ToolGuardMixin, ReActAgent):
             set_current_workspace_dir,
             set_current_recent_max_bytes,
             set_current_session_id,
+            set_current_runtime_tool_gateway,
             set_current_shell_command_timeout,
             set_current_shell_command_executable,
         )
@@ -1427,6 +1509,15 @@ class QwenPawAgent(CodingModeMixin, ToolGuardMixin, ReActAgent):
         set_current_session_id(
             self._request_context.get("session_id") or None,
         )
+        gateway = self._request_context.get("runtime_tool_gateway")
+        if isinstance(gateway, dict):
+            gateway = dict(gateway)
+            for key in ("trace_id",):
+                if self._request_context.get(key) and not gateway.get(key):
+                    gateway[key] = self._request_context[key]
+            set_current_runtime_tool_gateway(gateway)
+        else:
+            set_current_runtime_tool_gateway(None)
         light_ctx = self._agent_config.running.light_context_config
         pruning_config = light_ctx.tool_result_pruning_config
         set_current_recent_max_bytes(
