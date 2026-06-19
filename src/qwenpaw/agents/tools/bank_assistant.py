@@ -64,9 +64,6 @@ def _parse_identity(identity_json: str) -> tuple[BankIdentity | None, str | None
     if not identity_json.strip():
         return None, "缺少可信银行员工身份，无法调用银行助手。"
 
-    if BankIdentity is None:
-        return None, "银行助手服务未安装，无法解析可信银行员工身份。"
-
     try:
         payload = json.loads(identity_json)
     except json.JSONDecodeError:
@@ -74,6 +71,9 @@ def _parse_identity(identity_json: str) -> tuple[BankIdentity | None, str | None
 
     if not isinstance(payload, dict):
         return None, "员工身份格式无效，无法调用银行助手。"
+
+    if BankIdentity is None:
+        return None, "银行助手服务未安装，无法解析可信银行员工身份。"
 
     try:
         identity = BankIdentity(
