@@ -154,7 +154,7 @@ def _is_runtime_terminal_sse(event_data: str) -> bool:
         status = str(payload.get("status") or "").strip()
         if event in {"completed", "done", "success", "agent.completed"}:
             return True
-        if status == "completed":
+        if payload.get("object") == "response" and status == "completed":
             return True
     return False
 

@@ -208,6 +208,8 @@ def test_runtime_completed_sse_is_terminal_for_runtime_adapter() -> None:
     assert _is_runtime_terminal_sse(event)
     assert _is_runtime_terminal_sse('data: {"status": "completed", "object": "response"}\n\n')
     assert not _is_runtime_terminal_sse('data: {"status": "in_progress", "object": "response"}\n\n')
+    assert not _is_runtime_terminal_sse('data: {"status": "completed", "object": "content", "type": "text"}\n\n')
+    assert not _is_runtime_terminal_sse('data: {"status": "completed", "object": "message", "type": "plugin_call_output"}\n\n')
 
 
 def test_runtime_console_events_append_completed_when_upstream_has_no_terminal() -> None:
@@ -223,6 +225,23 @@ def test_runtime_console_events_append_completed_when_upstream_has_no_terminal()
     assert channel.seen_payload == native_payload
     assert events == [
         'data: {"event": "message", "delta": "处理中"}\n\n',
+        'data: {"event": "completed", "chat_id": "runtime-session-001"}\n\n',
+    ]
+
+
+def test_runtime_console_events_append_completed_after_content_completed_only() -> None:
+    native_payload = {
+        "channel_id": "bank-runtime",
+        "sender_id": "u001",
+        "meta": {"session_id": "runtime-session-001", "runtime_task_id": "task-001"},
+    }
+    content_completed = 'data: {"object": "content", "status": "completed", "type": "text"}\n\n'
+    channel = _RuntimeConsoleChannel([content_completed])
+
+    events = asyncio.run(_collect_runtime_events(channel, native_payload))
+
+    assert events == [
+        content_completed,
         'data: {"event": "completed", "chat_id": "runtime-session-001"}\n\n',
     ]
 
