@@ -18,7 +18,7 @@ from ...config.context import get_current_runtime_tool_gateway
 
 async def runtime_tool_gateway(
     tool_id: str,
-    input: dict[str, Any] | None = None,  # pylint: disable=redefined-builtin
+    input: dict[str, Any] | str | None = None,  # pylint: disable=redefined-builtin
     request_id: str = "",
     idempotency_key: str = "",
 ) -> ToolResponse:
@@ -54,7 +54,7 @@ async def runtime_tool_gateway(
     if not token:
         return _text_response("Runtime Tool Gateway token is missing.")
 
-    input_payload = input if isinstance(input, dict) else {}
+    input_payload = _input_payload(input)
     payload = {
         "request_id": request_id
         or f"qwenpaw-{uuid.uuid4().hex}",
@@ -173,6 +173,23 @@ def _timeout_seconds(gateway: dict[str, Any]) -> float:
         return max(float(gateway.get("timeout_seconds", 30)), 0.1)
     except (TypeError, ValueError):
         return 30.0
+
+
+def _input_payload(input_value: dict[str, Any] | str | None) -> dict[str, Any]:
+    if isinstance(input_value, dict):
+        return input_value
+    if not isinstance(input_value, str):
+        return {}
+    stripped = input_value.strip()
+    if not stripped:
+        return {}
+    try:
+        parsed = json.loads(stripped)
+    except json.JSONDecodeError:
+        return {}
+    if isinstance(parsed, dict):
+        return parsed
+    return {}
 
 
 def _string_list(value: Any) -> list[str]:

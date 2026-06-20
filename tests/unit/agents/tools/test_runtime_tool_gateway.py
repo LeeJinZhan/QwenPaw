@@ -129,6 +129,45 @@ async def test_runtime_tool_gateway_posts_allowed_tool_with_skill_context(monkey
 
 
 @pytest.mark.asyncio
+async def test_runtime_tool_gateway_parses_json_string_input(monkeypatch) -> None:
+    captured: dict = {}
+
+    def fake_post_json(url: str, token: str, payload: dict, timeout_seconds: float):
+        captured["payload"] = payload
+        return {
+            "status": "success",
+            "tool_call_id": "tool_call_001",
+            "result": {"tool_id": "file.parse_document", "file_id": "file_001"},
+        }
+
+    monkeypatch.setattr(
+        runtime_tool_gateway_module,
+        "_post_runtime_tool_gateway",
+        fake_post_json,
+    )
+    set_current_runtime_tool_gateway(
+        {
+            "base_url": "http://127.0.0.1:8765",
+            "endpoint": "/runtime/v1/tool-calls",
+            "token": "worker-session-token",
+            "task_id": "task_001",
+            "session_id": "sess_001",
+            "policy_snapshot_id": "ps_001",
+            "tool_session_id": "wts_001",
+            "allowed_tools": ["file.parse_document"],
+        }
+    )
+
+    response = await runtime_tool_gateway(
+        tool_id="file.parse_document",
+        input='{"file_id":"file_001"}',
+    )
+
+    assert captured["payload"]["input"] == {"file_id": "file_001"}
+    assert "file.parse_document" in _text(response)
+
+
+@pytest.mark.asyncio
 async def test_runtime_tool_gateway_rejects_unlisted_tool(monkeypatch) -> None:
     called = False
 
