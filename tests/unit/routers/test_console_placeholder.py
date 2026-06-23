@@ -127,6 +127,14 @@ def test_extract_session_payload_preserves_runtime_bank_context_in_meta() -> Non
             "endpoint": "http://runtime.local/runtime/v1/tool-calls",
             "allowed_tools": ["ragflow.search_policy"],
         },
+        "attachments_manifest": [
+            {
+                "file_id": "file_001",
+                "original_name": "客户材料.md",
+                "read_url": "http://runtime.local/runtime/internal/file-grants/file_grant_001/content",
+                "required_headers": {"X-File-Access-Token": "grant-token"},
+            }
+        ],
         "runtime_constraints": {
             "disabled_tools": ["write_file"],
         },
@@ -150,6 +158,7 @@ def test_extract_session_payload_preserves_runtime_bank_context_in_meta() -> Non
     assert native_payload["meta"]["identity_json"] == payload["identity_json"]
     assert native_payload["meta"]["runtime_governance"] == payload["runtime_governance"]
     assert native_payload["meta"]["runtime_tool_gateway"] == payload["runtime_tool_gateway"]
+    assert native_payload["meta"]["attachments_manifest"] == payload["attachments_manifest"]
     assert native_payload["meta"]["runtime_constraints"] == payload["runtime_constraints"]
 
 

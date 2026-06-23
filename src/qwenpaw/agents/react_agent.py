@@ -55,6 +55,7 @@ from .tools import (
     list_agents,
     materialize_skill,
     read_file,
+    runtime_attachment_read,
     runtime_tool_gateway,
     send_file_to_user,
     set_user_timezone,
@@ -114,8 +115,9 @@ def _build_runtime_tool_gateway_context(request_context: dict[str, Any]) -> str:
         lines.append("- Allowed Runtime tool ids: " + ", ".join(allowed_tools))
     else:
         lines.append(
-            "- No Runtime tool ids are currently allowed; answer without "
-            "tools or explain that the requested capability is unavailable.",
+            "- No Runtime Tool Gateway tool ids are currently allowed; "
+            "answer without gateway tools or explain that the requested "
+            "capability is unavailable.",
         )
     if "workspace.list_outputs" in allowed_tools and task_id:
         lines.append(
@@ -126,11 +128,66 @@ def _build_runtime_tool_gateway_context(request_context: dict[str, Any]) -> str:
         )
     if disabled_tools:
         lines.append("- Disabled native tools: " + ", ".join(disabled_tools))
+    attachment_lines = _build_runtime_attachments_context(request_context)
+    if attachment_lines:
+        lines.extend(attachment_lines)
     lines.append(
         "- Native QwenPaw memory tools, including `memory_search`, are "
         "disabled in Runtime-governed requests.",
     )
     return "\n".join(lines)
+
+
+def _build_runtime_attachments_context(
+    request_context: dict[str, Any],
+) -> list[str]:
+    """Render safe Runtime attachment hints without grant URLs or tokens."""
+    manifest = _runtime_attachments_manifest(request_context)
+    if not manifest:
+        return []
+    lines = [
+        "- Runtime has issued short-lived read grants for uploaded "
+        "attachments. Use only `runtime_attachment_read(file_id=...)` to "
+        "read them.",
+        "- Do not request, reveal, copy, or summarize Runtime attachment "
+        "grant URLs, headers, tokens, object keys, or local paths.",
+    ]
+    safe_items: list[str] = []
+    for item in manifest:
+        file_id = str(item.get("file_id", "")).strip()
+        if not file_id:
+            continue
+        original_name = str(item.get("original_name", "")).strip()
+        content_type = str(item.get("content_type", "")).strip()
+        size_bytes = str(item.get("size_bytes", "")).strip()
+        expires_at = str(item.get("expires_at", "")).strip()
+        summary = f"  - file_id={file_id}"
+        if original_name:
+            summary += f", name={original_name}"
+        if content_type:
+            summary += f", content_type={content_type}"
+        if size_bytes:
+            summary += f", size_bytes={size_bytes}"
+        if expires_at:
+            summary += f", expires_at={expires_at}"
+        safe_items.append(summary)
+    if safe_items:
+        lines.append("- Authorized Runtime attachments:")
+        lines.extend(safe_items)
+    return lines
+
+
+def _runtime_attachments_manifest(
+    request_context: dict[str, Any],
+) -> list[dict[str, Any]]:
+    manifest = request_context.get("attachments_manifest")
+    if not isinstance(manifest, list):
+        return []
+    return [item for item in manifest if isinstance(item, dict)]
+
+
+def _runtime_attachments_available(request_context: dict[str, Any]) -> bool:
+    return bool(_runtime_attachments_manifest(request_context))
 
 
 def _runtime_disabled_tools_from_context(
@@ -339,6 +396,12 @@ class QwenPawAgent(CodingModeMixin, ToolGuardMixin, ReActAgent):
             )
 
         runtime_gateway_enabled = self._runtime_tool_gateway_enabled()
+        runtime_allowed_native_tools = {"runtime_tool_gateway"}
+        runtime_attachment_available = _runtime_attachments_available(
+            self._request_context,
+        )
+        if runtime_attachment_available:
+            runtime_allowed_native_tools.add("runtime_attachment_read")
 
         # Map of tool functions (hardcoded builtin tools)
         tool_functions = {
@@ -357,6 +420,11 @@ class QwenPawAgent(CodingModeMixin, ToolGuardMixin, ReActAgent):
             **(
                 {"runtime_tool_gateway": runtime_tool_gateway}
                 if runtime_gateway_enabled
+                else {}
+            ),
+            **(
+                {"runtime_attachment_read": runtime_attachment_read}
+                if runtime_gateway_enabled and runtime_attachment_available
                 else {}
             ),
             "set_user_timezone": set_user_timezone,
@@ -399,7 +467,7 @@ class QwenPawAgent(CodingModeMixin, ToolGuardMixin, ReActAgent):
         )
         registered_tool_names: set[str] = set()
         for tool_name, tool_func in tool_functions.items():
-            if runtime_gateway_enabled and tool_name != "runtime_tool_gateway":
+            if runtime_gateway_enabled and tool_name not in runtime_allowed_native_tools:
                 logger.debug(
                     "Skipped native tool while Runtime Tool Gateway is "
                     "enabled: %s",
@@ -1533,6 +1601,7 @@ class QwenPawAgent(CodingModeMixin, ToolGuardMixin, ReActAgent):
             set_current_workspace_dir,
             set_current_recent_max_bytes,
             set_current_session_id,
+            set_current_runtime_attachments_manifest,
             set_current_runtime_tool_gateway,
             set_current_shell_command_timeout,
             set_current_shell_command_executable,
@@ -1551,6 +1620,10 @@ class QwenPawAgent(CodingModeMixin, ToolGuardMixin, ReActAgent):
             set_current_runtime_tool_gateway(gateway)
         else:
             set_current_runtime_tool_gateway(None)
+        manifest = self._request_context.get("attachments_manifest")
+        set_current_runtime_attachments_manifest(
+            manifest if isinstance(manifest, list) else None,
+        )
         light_ctx = self._agent_config.running.light_context_config
         pruning_config = light_ctx.tool_result_pruning_config
         set_current_recent_max_bytes(

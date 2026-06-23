@@ -536,6 +536,7 @@ class AgentRunner(Runner):
                 "identity_json",
                 "runtime_governance",
                 "runtime_tool_gateway",
+                "attachments_manifest",
             ):
                 if runtime_meta_key in channel_meta:
                     base_request_context[runtime_meta_key] = channel_meta[

@@ -149,3 +149,21 @@ def set_current_runtime_tool_gateway(
 ) -> None:
     """Set Runtime Tool Gateway metadata for the current tool call."""
     current_runtime_tool_gateway.set(gateway)
+
+
+current_runtime_attachments_manifest: ContextVar[list[dict[str, Any]] | None] = ContextVar(
+    "current_runtime_attachments_manifest",
+    default=None,
+)
+
+
+def get_current_runtime_attachments_manifest() -> list[dict[str, Any]] | None:
+    """Get Runtime-issued attachment grants for the current request."""
+    return current_runtime_attachments_manifest.get()
+
+
+def set_current_runtime_attachments_manifest(
+    manifest: list[dict[str, Any]] | None,
+) -> None:
+    """Set Runtime-issued attachment grants for the current request."""
+    current_runtime_attachments_manifest.set(manifest)

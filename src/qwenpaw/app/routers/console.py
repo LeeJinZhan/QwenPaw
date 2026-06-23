@@ -42,6 +42,7 @@ RUNTIME_CHANNEL_META_KEYS = (
     "identity_json",
     "runtime_governance",
     "runtime_tool_gateway",
+    "attachments_manifest",
 )
 
 
@@ -215,7 +216,7 @@ def _tail_text_file(
     "Use body.reconnect=true to attach to a running stream.",
 )
 async def post_console_chat(
-    request_data: Union[AgentRequest, dict],
+    request_data: dict,
     request: Request,
 ) -> StreamingResponse:
     """Stream agent response. Run continues in background after disconnect.
