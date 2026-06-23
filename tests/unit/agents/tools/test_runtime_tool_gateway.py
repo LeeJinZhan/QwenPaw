@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import importlib
+from types import SimpleNamespace
 
 import pytest
 
 from qwenpaw.config.context import set_current_runtime_tool_gateway
 from qwenpaw.agents.react_agent import (
+    QwenPawAgent,
     _build_runtime_tool_gateway_context,
     _runtime_disabled_tools_from_context,
 )
@@ -54,6 +56,7 @@ def test_build_runtime_tool_gateway_context_guides_controlled_tool_usage() -> No
     assert "workspace.list_outputs" in context
     assert "execute_shell_command" in context
     assert "Do not use native shell" in context
+    assert "memory_search" in context
 
 
 def test_runtime_disabled_tools_from_context_filters_native_tools() -> None:
@@ -66,6 +69,135 @@ def test_runtime_disabled_tools_from_context_filters_native_tools() -> None:
     )
 
     assert disabled == {"execute_shell_command", "write_file"}
+
+
+def test_runtime_gateway_enabled_registers_only_gateway_tool() -> None:
+    fake_agent = SimpleNamespace()
+    fake_agent._agent_config = SimpleNamespace(
+        tools=SimpleNamespace(builtin_tools={}),
+    )
+    fake_agent._request_context = {
+        "runtime_tool_gateway": {
+            "base_url": "http://127.0.0.1:8765",
+            "endpoint": "/runtime/v1/tool-calls",
+            "task_id": "task_001",
+            "allowed_tools": ["workspace.list_outputs"],
+        },
+        "runtime_constraints": {"disabled_tools": []},
+    }
+    fake_agent._runtime_tool_gateway_enabled = lambda: True
+    fake_agent._register_coding_mode_tools = lambda *_, **__: None
+
+    toolkit = QwenPawAgent._create_toolkit(fake_agent, effective_skills=[])
+
+    assert "runtime_tool_gateway" in toolkit.tools
+    assert "get_current_time" not in toolkit.tools
+    assert "read_file" not in toolkit.tools
+    assert "execute_shell_command" not in toolkit.tools
+
+
+def test_runtime_gateway_empty_allowlist_still_disables_native_tools() -> None:
+    fake_agent = SimpleNamespace()
+    fake_agent._agent_config = SimpleNamespace(
+        tools=SimpleNamespace(builtin_tools={}),
+    )
+    fake_agent._request_context = {
+        "runtime_tool_gateway": {
+            "base_url": "http://127.0.0.1:8765",
+            "endpoint": "/runtime/v1/tool-calls",
+            "task_id": "task_001",
+            "allowed_tools": [],
+        },
+        "runtime_constraints": {"disabled_tools": []},
+    }
+    fake_agent._runtime_tool_gateway_enabled = (
+        lambda: QwenPawAgent._runtime_tool_gateway_enabled(fake_agent)
+    )
+    fake_agent._register_coding_mode_tools = lambda *_, **__: None
+
+    context = _build_runtime_tool_gateway_context(fake_agent._request_context)
+    toolkit = QwenPawAgent._create_toolkit(fake_agent, effective_skills=[])
+
+    assert "No Runtime tool ids are currently allowed" in context
+    assert "runtime_tool_gateway" in toolkit.tools
+    assert "get_current_time" not in toolkit.tools
+    assert "read_file" not in toolkit.tools
+
+
+def test_runtime_gateway_skips_native_memory_tools() -> None:
+    def memory_search():
+        return "memory"
+
+    class FakeMemoryManager:
+        def list_memory_tools(self):
+            return [memory_search]
+
+    class FakeToolkit:
+        def __init__(self):
+            self.registered: list[str] = []
+
+        def register_tool_function(self, tool_fn, **_kwargs):
+            self.registered.append(tool_fn.__name__)
+
+    fake_agent = SimpleNamespace()
+    fake_agent._request_context = {
+        "runtime_tool_gateway": {
+            "base_url": "http://127.0.0.1:8765",
+            "endpoint": "/runtime/v1/tool-calls",
+            "task_id": "task_001",
+            "allowed_tools": ["workspace.list_outputs"],
+        }
+    }
+    fake_agent._runtime_tool_gateway_enabled = (
+        lambda: QwenPawAgent._runtime_tool_gateway_enabled(fake_agent)
+    )
+    fake_agent.memory_manager = FakeMemoryManager()
+    fake_agent.toolkit = FakeToolkit()
+    fake_agent._namesake_strategy = "skip"
+
+    QwenPawAgent._register_memory_tools(fake_agent)
+
+    assert fake_agent.toolkit.registered == []
+
+
+def test_runtime_gateway_builds_prompt_without_native_memory_manager(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+    memory_manager = object()
+
+    def fake_build_system_prompt_from_working_dir(**kwargs):
+        captured["memory_manager"] = kwargs.get("memory_manager")
+        return "base prompt"
+
+    monkeypatch.setattr(
+        "qwenpaw.agents.react_agent.build_system_prompt_from_working_dir",
+        fake_build_system_prompt_from_working_dir,
+    )
+    monkeypatch.setattr(
+        "qwenpaw.agents.react_agent.build_multimodal_hint",
+        lambda: "",
+    )
+    fake_agent = SimpleNamespace()
+    fake_agent._request_context = {
+        "runtime_tool_gateway": {
+            "base_url": "http://127.0.0.1:8765",
+            "endpoint": "/runtime/v1/tool-calls",
+            "task_id": "task_001",
+            "allowed_tools": ["workspace.list_outputs"],
+        }
+    }
+    fake_agent._agent_config = SimpleNamespace(heartbeat=None)
+    fake_agent._workspace_dir = None
+    fake_agent._language = "zh"
+    fake_agent._env_context = None
+    fake_agent.memory_manager = memory_manager
+    fake_agent._runtime_tool_gateway_enabled = (
+        lambda: QwenPawAgent._runtime_tool_gateway_enabled(fake_agent)
+    )
+
+    prompt = QwenPawAgent._build_sys_prompt(fake_agent)
+
+    assert captured["memory_manager"] is None
+    assert "Runtime Tool Gateway is enabled" in prompt
 
 
 @pytest.mark.asyncio
