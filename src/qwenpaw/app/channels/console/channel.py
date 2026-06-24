@@ -212,6 +212,13 @@ class ConsoleChannel(BaseChannel):
             return content_parts
 
         def resolve_one(part: Any) -> Optional[OutgoingContentPart]:
+            if isinstance(part, dict):
+                content_type = part.get("type")
+                if content_type == ContentType.TEXT:
+                    return TextContent(
+                        type=ContentType.TEXT,
+                        text=str(part.get("text") or ""),
+                    )
             content_type = getattr(part, "type", None)
             if content_type == ContentType.IMAGE:
                 url = getattr(part, "image_url", None)
@@ -338,7 +345,9 @@ class ConsoleChannel(BaseChannel):
                 payload.get("sender_id") or "",
                 payload.get("meta"),
             )
-            content_parts = payload.get("content_parts") or []
+            content_parts = self._resolve_console_upload_refs(
+                payload.get("content_parts") or [],
+            )
             should_process, merged = self._apply_no_text_debounce(
                 session_id,
                 content_parts,
