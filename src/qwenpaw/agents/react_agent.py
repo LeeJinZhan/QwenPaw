@@ -63,6 +63,7 @@ from .tools import (
     view_video,
     write_file,
 )
+from .tools import runtime_sandbox_oss
 from .utils import process_file_and_media_blocks_in_message
 from ..constant import (
     MEDIA_UNSUPPORTED_PLACEHOLDER,
@@ -143,14 +144,16 @@ def _build_runtime_attachments_context(
 ) -> list[str]:
     """Render safe Runtime attachment hints without grant URLs or tokens."""
     manifest = _runtime_attachments_manifest(request_context)
-    if not manifest:
+    sandbox_context = request_context.get("sandbox_context")
+    if not manifest or not isinstance(sandbox_context, dict):
         return []
     lines = [
-        "- Runtime has issued short-lived read grants for uploaded "
-        "attachments. Use only `runtime_attachment_read(file_id=...)` to "
+        "- Runtime has authorized uploaded attachments for this sandbox. "
+        "Use only `runtime_attachment_read(file_id=...)` to "
         "read them.",
         "- Do not request, reveal, copy, or summarize Runtime attachment "
-        "grant URLs, headers, tokens, object keys, or local paths.",
+        "URLs, headers, tokens, object keys, storage locations, credentials, or "
+        "local paths.",
     ]
     safe_items: list[str] = []
     for item in manifest:
@@ -187,7 +190,58 @@ def _runtime_attachments_manifest(
 
 
 def _runtime_attachments_available(request_context: dict[str, Any]) -> bool:
-    return bool(_runtime_attachments_manifest(request_context))
+    return bool(_runtime_attachments_manifest(request_context)) and isinstance(
+        request_context.get("sandbox_context"),
+        dict,
+    )
+
+
+def _runtime_current_task_attachment_ids(request_context: dict[str, Any]) -> list[str]:
+    file_ids: list[str] = []
+    for item in _runtime_attachments_manifest(request_context):
+        if str(item.get("source", "")).strip() != "current_task":
+            continue
+        if str(item.get("access_mode", "")).strip() != "sandbox_oss":
+            continue
+        file_id = str(item.get("file_id", "")).strip()
+        if file_id:
+            file_ids.append(file_id)
+    return file_ids
+
+
+def _append_runtime_attachment_content_parts(
+    msg: Msg | list[Msg] | None,
+    request_context: dict[str, Any],
+) -> Msg | list[Msg] | None:
+    sandbox_context = request_context.get("sandbox_context")
+    if msg is None or not isinstance(sandbox_context, dict):
+        return msg
+    file_ids = _runtime_current_task_attachment_ids(request_context)
+    if not file_ids:
+        return msg
+    target = msg[-1] if isinstance(msg, list) and msg else msg
+    if not isinstance(target, Msg):
+        return msg
+    if isinstance(target.content, list):
+        content_parts = target.content
+    else:
+        content_parts = [{"type": "text", "text": target.get_text_content()}]
+        target.content = content_parts
+    cache = runtime_sandbox_oss._DEFAULT_TASK_ATTACHMENT_CACHE
+    for file_id in file_ids:
+        try:
+            prepared = cache.prepare_file(file_id, sandbox_context)
+        except RuntimeError:
+            logger.debug(
+                "runtime attachment prepare failed file_id=%s",
+                file_id,
+                exc_info=True,
+            )
+            continue
+        content_parts.append(
+            runtime_sandbox_oss.content_part_for_prepared_file(prepared),
+        )
+    return msg
 
 
 def _runtime_disabled_tools_from_context(
@@ -1602,6 +1656,7 @@ class QwenPawAgent(CodingModeMixin, ToolGuardMixin, ReActAgent):
             set_current_recent_max_bytes,
             set_current_session_id,
             set_current_runtime_attachments_manifest,
+            set_current_runtime_sandbox_context,
             set_current_runtime_tool_gateway,
             set_current_shell_command_timeout,
             set_current_shell_command_executable,
@@ -1624,6 +1679,10 @@ class QwenPawAgent(CodingModeMixin, ToolGuardMixin, ReActAgent):
         set_current_runtime_attachments_manifest(
             manifest if isinstance(manifest, list) else None,
         )
+        sandbox_context = self._request_context.get("sandbox_context")
+        set_current_runtime_sandbox_context(
+            sandbox_context if isinstance(sandbox_context, dict) else None,
+        )
         light_ctx = self._agent_config.running.light_context_config
         pruning_config = light_ctx.tool_result_pruning_config
         set_current_recent_max_bytes(
@@ -1638,6 +1697,10 @@ class QwenPawAgent(CodingModeMixin, ToolGuardMixin, ReActAgent):
 
         # Process file and media blocks in messages
         if msg is not None:
+            msg = _append_runtime_attachment_content_parts(
+                msg,
+                self._request_context,
+            )
             await process_file_and_media_blocks_in_message(msg)
 
         # Check if message is a system command

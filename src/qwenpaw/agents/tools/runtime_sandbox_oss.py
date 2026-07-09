@@ -398,6 +398,40 @@ class SandboxedOssClient:
         raise RuntimeError("Unsupported sandbox attachment storage provider.")
 
 
+def content_part_for_prepared_file(prepared: PreparedSandboxFile) -> dict[str, Any]:
+    """Convert a prepared task-local file into a QwenPaw content part."""
+    url = prepared.local_path.resolve().as_uri()
+    content_type = prepared.content_type.lower()
+    runtime_fields = {
+        "_runtime_sandbox_attachment": True,
+        "_runtime_attachment_file_id": prepared.file_id,
+    }
+    if content_type.startswith("image/"):
+        return {
+            "type": "image",
+            "source": {"type": "url", "url": url},
+            **runtime_fields,
+        }
+    if content_type.startswith("video/"):
+        return {
+            "type": "video",
+            "source": {"type": "url", "url": url},
+            **runtime_fields,
+        }
+    if content_type.startswith("audio/"):
+        return {
+            "type": "audio",
+            "source": {"type": "url", "url": url},
+            **runtime_fields,
+        }
+    return {
+        "type": "file",
+        "filename": prepared.original_name,
+        "source": {"type": "url", "url": url},
+        **runtime_fields,
+    }
+
+
 def _runtime_base_url_from_context_or_env() -> str:
     for key in (
         "QWENPAW_RUNTIME_BASE_URL",

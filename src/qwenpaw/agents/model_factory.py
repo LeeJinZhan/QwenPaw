@@ -658,6 +658,8 @@ def _fix_image_mime_types(messages: list[dict]) -> None:
 
 
 _MEDIA_BLOCK_TYPES = ("image", "audio", "video")
+_RUNTIME_SANDBOX_ATTACHMENT_FIELD = "_runtime_sandbox_attachment"
+_RUNTIME_ATTACHMENT_FILE_ID_FIELD = "_runtime_attachment_file_id"
 
 # Block types that the upstream agentscope OpenAI / Gemini formatters
 # silently drop. We track them here so we can predict which assistant
@@ -665,6 +667,28 @@ _MEDIA_BLOCK_TYPES = ("image", "audio", "video")
 # Keep this in sync with the `else: logger.warning("Unsupported block
 # type ...")` branch in agentscope's _openai_formatter.
 _FORMATTER_SKIPPED_TYPES = frozenset({"thinking", "file"})
+
+
+def _runtime_attachment_file_text(block: dict) -> str:
+    filename = str(block.get("filename") or block.get("name") or "file").strip()
+    file_id = str(block.get(_RUNTIME_ATTACHMENT_FILE_ID_FIELD) or "").strip()
+    if file_id:
+        return (
+            f"Runtime attachment '{filename}' is authorized for this task "
+            f"as file_id '{file_id}'. Use "
+            f"`runtime_attachment_read(file_id=\"{file_id}\")` if you need "
+            "the file content."
+        )
+    return (
+        f"Runtime attachment '{filename}' is authorized for this task. "
+        "Use `runtime_attachment_read` with the provided file_id if you need "
+        "the file content."
+    )
+
+
+def _drop_runtime_attachment_fields(block: dict) -> None:
+    block.pop(_RUNTIME_SANDBOX_ATTACHMENT_FIELD, None)
+    block.pop(_RUNTIME_ATTACHMENT_FILE_ID_FIELD, None)
 
 
 def _fixup_media_list(items: list) -> None:
@@ -709,7 +733,15 @@ def _fixup_media_list(items: list) -> None:
                         f" — file deleted from disk]"
                     ),
                 }
+            else:
+                _drop_runtime_attachment_fields(block)
         elif btype == "file":
+            if block.get(_RUNTIME_SANDBOX_ATTACHMENT_FIELD):
+                items[i] = {
+                    "type": "text",
+                    "text": _runtime_attachment_file_text(block),
+                }
+                continue
             source = block.get("source") or {}
             file_url = (
                 source.get("url", "") if isinstance(source, dict) else ""

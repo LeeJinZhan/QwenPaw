@@ -19,6 +19,7 @@ from ...config import load_config
 from .file_handling import download_file_from_base64, download_file_from_url
 
 logger = logging.getLogger(__name__)
+_RUNTIME_SANDBOX_ATTACHMENT_FIELD = "_runtime_sandbox_attachment"
 
 
 async def _process_single_file_block(
@@ -408,7 +409,7 @@ async def process_file_and_media_blocks_in_message(msg) -> None:
                 continue
 
             local_path = await _process_single_block(message.content, i, block)
-            if local_path:
+            if local_path and not block.get(_RUNTIME_SANDBOX_ATTACHMENT_FIELD):
                 downloaded_files.append((i, local_path))
 
         if downloaded_files:

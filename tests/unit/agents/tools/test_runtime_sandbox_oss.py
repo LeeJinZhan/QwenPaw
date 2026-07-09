@@ -12,6 +12,7 @@ import threading
 import time
 
 import pytest
+from agentscope.message import Msg
 
 runtime_sandbox_oss_module = importlib.import_module(
     "qwenpaw.agents.tools.runtime_sandbox_oss",
@@ -694,3 +695,279 @@ def test_safe_filename_sanitizes_path_traversal_to_task_local_path(tmp_path) -> 
     assert ".." not in prepared.local_path.parts
     assert prepared.local_path.is_relative_to(tmp_path)
     assert prepared.local_path.read_bytes() == b"secret"
+
+
+def test_prepared_image_becomes_image_content(tmp_path) -> None:
+    local_path = tmp_path / "photo.png"
+    local_path.write_bytes(b"png")
+    prepared = runtime_sandbox_oss_module.PreparedSandboxFile(
+        file_id="file_001",
+        local_path=local_path,
+        content_type="image/png",
+        size_bytes=3,
+        original_name="photo.png",
+        expires_at="2999-01-01T00:00:00+08:00",
+    )
+
+    content_part = runtime_sandbox_oss_module.content_part_for_prepared_file(prepared)
+
+    assert content_part["type"] == "image"
+    assert content_part["source"]["type"] == "url"
+    assert content_part["source"]["url"] == local_path.resolve().as_uri()
+    assert content_part["_runtime_sandbox_attachment"] is True
+    assert content_part["_runtime_attachment_file_id"] == "file_001"
+
+
+def test_prepared_markdown_becomes_file_content(tmp_path) -> None:
+    local_path = tmp_path / "cline-rules.md"
+    local_path.write_text("# rules", encoding="utf-8")
+    prepared = runtime_sandbox_oss_module.PreparedSandboxFile(
+        file_id="file_001",
+        local_path=local_path,
+        content_type="text/markdown",
+        size_bytes=7,
+        original_name="cline-rules.md",
+        expires_at="2999-01-01T00:00:00+08:00",
+    )
+
+    content_part = runtime_sandbox_oss_module.content_part_for_prepared_file(prepared)
+
+    assert content_part["type"] == "file"
+    assert content_part["filename"] == "cline-rules.md"
+    assert content_part["source"]["type"] == "url"
+    assert content_part["source"]["url"] == local_path.resolve().as_uri()
+    assert content_part["_runtime_sandbox_attachment"] is True
+    assert content_part["_runtime_attachment_file_id"] == "file_001"
+
+
+@pytest.mark.parametrize(
+    ("content_type", "expected_type", "filename"),
+    [
+        ("video/mp4", "video", "clip.mp4"),
+        ("audio/wav", "audio", "voice.wav"),
+    ],
+)
+def test_prepared_media_becomes_matching_media_content(
+    tmp_path,
+    content_type,
+    expected_type,
+    filename,
+) -> None:
+    local_path = tmp_path / filename
+    local_path.write_bytes(b"media")
+    prepared = runtime_sandbox_oss_module.PreparedSandboxFile(
+        file_id="file_001",
+        local_path=local_path,
+        content_type=content_type,
+        size_bytes=5,
+        original_name=filename,
+        expires_at="2999-01-01T00:00:00+08:00",
+    )
+
+    content_part = runtime_sandbox_oss_module.content_part_for_prepared_file(prepared)
+
+    assert content_part["type"] == expected_type
+    assert content_part["source"]["type"] == "url"
+    assert content_part["source"]["url"] == local_path.resolve().as_uri()
+
+
+def test_runtime_attachment_prompt_does_not_show_local_paths() -> None:
+    react_agent = importlib.import_module("qwenpaw.agents.react_agent")
+    context = {
+        "sandbox_context": {"task_id": "task_001"},
+        "attachments_manifest": [
+            {
+                "file_id": "file_001",
+                "original_name": "cline-rules.md",
+                "content_type": "text/markdown",
+                "size_bytes": 8,
+                "access_mode": "sandbox_oss",
+            }
+        ],
+    }
+
+    prompt = "\n".join(react_agent._build_runtime_attachments_context(context))
+
+    assert "runtime_attachment_read" in prompt
+    assert "file_001" in prompt
+    assert "file://" not in prompt
+    assert "object_key" not in prompt
+    assert "bucket" not in prompt
+
+
+def test_append_runtime_attachment_content_parts_adds_current_task_files(monkeypatch, tmp_path) -> None:
+    react_agent = importlib.import_module("qwenpaw.agents.react_agent")
+    local_path = tmp_path / "photo.png"
+    local_path.write_bytes(b"png")
+    prepared = runtime_sandbox_oss_module.PreparedSandboxFile(
+        file_id="file_001",
+        local_path=local_path,
+        content_type="image/png",
+        size_bytes=3,
+        original_name="photo.png",
+        expires_at="2999-01-01T00:00:00+08:00",
+    )
+    captured: dict[str, object] = {}
+
+    class FakeTaskAttachmentCache:
+        def prepare_file(self, file_id: str, sandbox_context: dict):
+            captured["file_id"] = file_id
+            captured["sandbox_context"] = dict(sandbox_context)
+            return prepared
+
+    monkeypatch.setattr(
+        react_agent.runtime_sandbox_oss,
+        "_DEFAULT_TASK_ATTACHMENT_CACHE",
+        FakeTaskAttachmentCache(),
+    )
+    message = Msg("user", "识别一下图片", "user")
+    request_context = {
+        "sandbox_context": {"task_id": "task_001", "context_id": "ctx_001"},
+        "attachments_manifest": [
+            {
+                "file_id": "file_001",
+                "original_name": "photo.png",
+                "content_type": "image/png",
+                "access_mode": "sandbox_oss",
+                "source": "current_task",
+            },
+            {
+                "file_id": "file_002",
+                "original_name": "history.png",
+                "content_type": "image/png",
+                "access_mode": "sandbox_oss",
+                "source": "discovered",
+            },
+        ],
+    }
+
+    updated = react_agent._append_runtime_attachment_content_parts(message, request_context)
+
+    assert updated is message
+    assert captured["file_id"] == "file_001"
+    assert captured["sandbox_context"] == request_context["sandbox_context"]
+    assert isinstance(message.content, list)
+    assert message.content[0] == {"type": "text", "text": "识别一下图片"}
+    assert message.content[1]["type"] == "image"
+    assert message.content[1]["source"]["url"] == local_path.resolve().as_uri()
+
+
+def test_append_runtime_attachment_content_parts_ignores_missing_source(monkeypatch, tmp_path) -> None:
+    react_agent = importlib.import_module("qwenpaw.agents.react_agent")
+    local_path = tmp_path / "legacy.png"
+    local_path.write_bytes(b"png")
+    prepared = runtime_sandbox_oss_module.PreparedSandboxFile(
+        file_id="file_legacy",
+        local_path=local_path,
+        content_type="image/png",
+        size_bytes=3,
+        original_name="legacy.png",
+        expires_at="2999-01-01T00:00:00+08:00",
+    )
+    captured: dict[str, object] = {}
+
+    class FakeTaskAttachmentCache:
+        def prepare_file(self, file_id: str, sandbox_context: dict):
+            captured["file_id"] = file_id
+            return prepared
+
+    monkeypatch.setattr(
+        react_agent.runtime_sandbox_oss,
+        "_DEFAULT_TASK_ATTACHMENT_CACHE",
+        FakeTaskAttachmentCache(),
+    )
+    message = Msg("user", "识别一下图片", "user")
+    request_context = {
+        "sandbox_context": {"task_id": "task_001", "context_id": "ctx_001"},
+        "attachments_manifest": [
+            {
+                "file_id": "file_legacy",
+                "original_name": "legacy.png",
+                "content_type": "image/png",
+                "access_mode": "sandbox_oss",
+            },
+        ],
+    }
+
+    updated = react_agent._append_runtime_attachment_content_parts(message, request_context)
+
+    assert updated is message
+    assert captured == {}
+    assert message.content == "识别一下图片"
+
+
+@pytest.mark.asyncio
+async def test_runtime_attachment_media_processing_does_not_insert_local_path(tmp_path) -> None:
+    message_processing = importlib.import_module(
+        "qwenpaw.agents.utils.message_processing",
+    )
+    local_path = tmp_path / "photo.png"
+    local_path.write_bytes(b"png")
+    message = Msg(
+        "user",
+        [
+            {"type": "text", "text": "识别一下图片"},
+            {
+                "type": "image",
+                "source": {"type": "url", "url": local_path.resolve().as_uri()},
+                "_runtime_sandbox_attachment": True,
+                "_runtime_attachment_file_id": "file_001",
+            },
+        ],
+        "user",
+    )
+
+    await message_processing.process_file_and_media_blocks_in_message(message)
+
+    assert isinstance(message.content, list)
+    assert not any(
+        isinstance(block, dict)
+        and block.get("type") == "text"
+        and str(local_path) in str(block.get("text", ""))
+        for block in message.content
+    )
+
+
+def test_runtime_attachment_file_fixup_uses_file_id_without_local_path(tmp_path) -> None:
+    model_factory = importlib.import_module("qwenpaw.agents.model_factory")
+    local_path = tmp_path / "cline-rules.md"
+    local_path.write_text("# rules", encoding="utf-8")
+    items = [
+        {
+            "type": "file",
+            "filename": "cline-rules.md",
+            "source": {"type": "url", "url": local_path.resolve().as_uri()},
+            "_runtime_sandbox_attachment": True,
+            "_runtime_attachment_file_id": "file_001",
+        },
+    ]
+
+    model_factory._fixup_media_list(items)
+
+    assert items[0]["type"] == "text"
+    assert "cline-rules.md" in items[0]["text"]
+    assert "file_001" in items[0]["text"]
+    assert "runtime_attachment_read" in items[0]["text"]
+    assert str(local_path) not in items[0]["text"]
+    assert "file://" not in items[0]["text"]
+
+
+def test_runtime_attachment_media_fixup_drops_internal_markers(tmp_path) -> None:
+    model_factory = importlib.import_module("qwenpaw.agents.model_factory")
+    local_path = tmp_path / "photo.png"
+    local_path.write_bytes(b"png")
+    items = [
+        {
+            "type": "image",
+            "source": {"type": "url", "url": local_path.resolve().as_uri()},
+            "_runtime_sandbox_attachment": True,
+            "_runtime_attachment_file_id": "file_001",
+        },
+    ]
+
+    model_factory._fixup_media_list(items)
+
+    assert items[0]["type"] == "image"
+    assert items[0]["source"]["url"] == str(local_path.resolve())
+    assert "_runtime_sandbox_attachment" not in items[0]
+    assert "_runtime_attachment_file_id" not in items[0]
