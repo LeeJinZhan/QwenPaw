@@ -1,21 +1,19 @@
 # -*- coding: utf-8 -*-
-"""Read Runtime-issued attachment grants by file_id only."""
+"""Read Runtime-authorized sandbox attachments by file_id only."""
 from __future__ import annotations
 
 import asyncio
 import json
-import urllib.error
-import urllib.request
 from typing import Any
-from urllib.parse import urlparse
 
 from agentscope.message import TextBlock
 from agentscope.tool import ToolResponse
 
 from ...config.context import (
     get_current_runtime_attachments_manifest,
-    get_current_runtime_tool_gateway,
+    get_current_runtime_sandbox_context,
 )
+from .runtime_sandbox_oss import SandboxedObjectContent, SandboxedOssClient
 
 
 DEFAULT_MAX_BYTES = 8192
@@ -28,9 +26,10 @@ async def runtime_attachment_read(
 ) -> ToolResponse:
     """Read an attachment that Runtime already authorized for this request.
 
-    The caller can only select a ``file_id`` from the hidden
-    ``attachments_manifest``. The grant URL, headers and tokens are never
-    accepted as tool arguments and are never returned in tool output.
+    The caller can only select a ``file_id`` from the hidden manifest.
+    Runtime re-authorizes the read with the request sandbox context, and
+    locators, object keys, URLs, headers and credentials are never accepted as
+    tool arguments or returned in tool output.
     """
     normalized_file_id = str(file_id or "").strip()
     if not normalized_file_id:
@@ -40,32 +39,39 @@ async def runtime_attachment_read(
         return _text_response(
             f"Runtime attachment '{normalized_file_id}' is not available.",
         )
-    read_url = str(entry.get("read_url", "")).strip()
-    if not _safe_runtime_attachment_url(read_url, entry):
+    if str(entry.get("access_mode", "")).strip() != "sandbox_oss":
         return _text_response(
             f"Runtime attachment '{normalized_file_id}' is not readable.",
         )
-    headers = _string_dict(entry.get("required_headers"))
+    sandbox_context = get_current_runtime_sandbox_context()
+    if not isinstance(sandbox_context, dict):
+        return _text_response(
+            f"Runtime attachment '{normalized_file_id}' is not readable.",
+        )
     limit = _bounded_max_bytes(max_bytes)
     try:
-        content, content_type = await asyncio.to_thread(
-            _download_runtime_attachment,
-            read_url,
-            headers,
-            _timeout_seconds(entry),
+        sandboxed_content = await asyncio.to_thread(
+            SandboxedOssClient().read_file,
+            normalized_file_id,
+            sandbox_context,
+            max_bytes=limit + 1,
         )
     except RuntimeError:
         return _text_response(
             f"Runtime attachment '{normalized_file_id}' could not be read.",
         )
-    preview = content[:limit].decode("utf-8", errors="replace")
-    truncated = len(content) > limit
+    content = sandboxed_content.content
+    preview_content = content[:limit]
+    preview = preview_content.decode("utf-8", errors="replace")
+    truncated = sandboxed_content.size_bytes > limit
     result = {
         "file_id": normalized_file_id,
         "original_name": str(entry.get("original_name", "")).strip(),
-        "content_type": str(entry.get("content_type") or content_type).strip(),
-        "size_bytes": len(content),
-        "preview_bytes": min(len(content), limit),
+        "content_type": str(
+            entry.get("content_type") or sandboxed_content.content_type,
+        ).strip(),
+        "size_bytes": sandboxed_content.size_bytes,
+        "preview_bytes": len(preview_content),
         "truncated": truncated,
         "content_preview": preview,
     }
@@ -84,89 +90,12 @@ def _manifest_entry(file_id: str) -> dict[str, Any] | None:
     return None
 
 
-def _download_runtime_attachment(
-    url: str,
-    headers: dict[str, str],
-    timeout_seconds: float,
-) -> tuple[bytes, str]:
-    request = urllib.request.Request(
-        url,
-        method="GET",
-        headers=headers,
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
-            content = response.read()
-            content_type = str(response.headers.get("Content-Type") or "")
-            return content, content_type
-    except urllib.error.HTTPError as exc:
-        raise RuntimeError("Runtime attachment read was rejected.") from exc
-    except urllib.error.URLError as exc:
-        raise RuntimeError("Runtime attachment read endpoint is unreachable.") from exc
-
-
-def _safe_runtime_attachment_url(url: str, entry: dict[str, Any]) -> bool:
-    parsed = urlparse(url)
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-        return False
-    access_mode = str(entry.get("access_mode", "")).strip()
-    if access_mode not in {"", "runtime_read_url"}:
-        return False
-    if parsed.path.startswith("/runtime/internal/file-grants/") and parsed.path.endswith("/content"):
-        return _same_origin(parsed, _runtime_origin())
-    return False
-
-
-def _runtime_origin() -> tuple[str, str, int] | None:
-    gateway = get_current_runtime_tool_gateway()
-    if not isinstance(gateway, dict):
-        return None
-    endpoint = str(gateway.get("endpoint", "")).strip()
-    if urlparse(endpoint).scheme in {"http", "https"}:
-        return _origin_tuple(urlparse(endpoint))
-    base_url = str(gateway.get("base_url") or gateway.get("runtime_base_url") or "").strip()
-    if not base_url:
-        return None
-    return _origin_tuple(urlparse(base_url))
-
-
-def _same_origin(parsed_url, origin: tuple[str, str, int] | None) -> bool:
-    if origin is None:
-        return False
-    parsed_origin = _origin_tuple(parsed_url)
-    return parsed_origin == origin
-
-
-def _origin_tuple(parsed_url) -> tuple[str, str, int]:
-    scheme = str(parsed_url.scheme or "").lower()
-    host = str(parsed_url.hostname or "").lower()
-    port = parsed_url.port or (443 if scheme == "https" else 80)
-    return scheme, host, port
-
-
-def _string_dict(value: Any) -> dict[str, str]:
-    if not isinstance(value, dict):
-        return {}
-    return {
-        str(key): str(item)
-        for key, item in value.items()
-        if str(key).strip() and str(item).strip()
-    }
-
-
 def _bounded_max_bytes(value: int) -> int:
     try:
         parsed = int(value)
     except (TypeError, ValueError):
         parsed = DEFAULT_MAX_BYTES
     return min(max(parsed, 1), MAX_BYTES_LIMIT)
-
-
-def _timeout_seconds(entry: dict[str, Any]) -> float:
-    try:
-        return max(float(entry.get("timeout_seconds", 30)), 0.1)
-    except (TypeError, ValueError):
-        return 30.0
 
 
 def _text_response(text: str) -> ToolResponse:

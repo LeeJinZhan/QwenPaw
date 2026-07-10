@@ -131,10 +131,18 @@ def test_extract_session_payload_preserves_runtime_bank_context_in_meta() -> Non
             {
                 "file_id": "file_001",
                 "original_name": "客户材料.md",
-                "read_url": "http://runtime.local/runtime/internal/file-grants/file_grant_001/content",
-                "required_headers": {"X-File-Access-Token": "grant-token"},
+                "access_mode": "sandbox_oss",
             }
         ],
+        "sandbox_context": {
+            "context_id": "ctx_001",
+            "task_id": "task-runtime-001",
+            "user_id": "u001",
+            "assistant_id": "general_assistant",
+            "scope": {"file_scope": "current_user_current_assistant"},
+            "expires_at": "2026-07-02T12:00:00+08:00",
+            "signature": "signed",
+        },
         "runtime_constraints": {
             "disabled_tools": ["write_file"],
         },
@@ -159,6 +167,7 @@ def test_extract_session_payload_preserves_runtime_bank_context_in_meta() -> Non
     assert native_payload["meta"]["runtime_governance"] == payload["runtime_governance"]
     assert native_payload["meta"]["runtime_tool_gateway"] == payload["runtime_tool_gateway"]
     assert native_payload["meta"]["attachments_manifest"] == payload["attachments_manifest"]
+    assert native_payload["meta"]["sandbox_context"] == payload["sandbox_context"]
     assert native_payload["meta"]["runtime_constraints"] == payload["runtime_constraints"]
 
 

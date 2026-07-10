@@ -201,43 +201,49 @@ def _runtime_current_task_attachment_ids(request_context: dict[str, Any]) -> lis
     for item in _runtime_attachments_manifest(request_context):
         if str(item.get("source", "")).strip() != "current_task":
             continue
-        if str(item.get("access_mode", "")).strip() != "sandbox_oss":
-            continue
         file_id = str(item.get("file_id", "")).strip()
         if file_id:
             file_ids.append(file_id)
     return file_ids
 
 
-def _append_runtime_attachment_content_parts(
+async def _append_runtime_attachment_content_parts(
     msg: Msg | list[Msg] | None,
     request_context: dict[str, Any],
 ) -> Msg | list[Msg] | None:
-    sandbox_context = request_context.get("sandbox_context")
-    if msg is None or not isinstance(sandbox_context, dict):
+    if msg is None:
         return msg
     file_ids = _runtime_current_task_attachment_ids(request_context)
     if not file_ids:
         return msg
+    sandbox_context = request_context.get("sandbox_context")
+    if not isinstance(sandbox_context, dict):
+        raise runtime_sandbox_oss.RuntimeAttachmentPreparationError(
+            file_ids[0],
+            "SANDBOX_CONTEXT_INVALID",
+        )
     target = msg[-1] if isinstance(msg, list) and msg else msg
     if not isinstance(target, Msg):
         return msg
+    try:
+        prepared_files = await asyncio.to_thread(
+            runtime_sandbox_oss._DEFAULT_TASK_ATTACHMENT_CACHE.prepare_files,
+            file_ids,
+            sandbox_context,
+        )
+    except runtime_sandbox_oss.RuntimeAttachmentPreparationError:
+        raise
+    except Exception as exc:
+        raise runtime_sandbox_oss.RuntimeAttachmentPreparationError(
+            file_ids[0],
+            "ATTACHMENT_READ_FAILED",
+        ) from exc
     if isinstance(target.content, list):
         content_parts = target.content
     else:
         content_parts = [{"type": "text", "text": target.get_text_content()}]
         target.content = content_parts
-    cache = runtime_sandbox_oss._DEFAULT_TASK_ATTACHMENT_CACHE
-    for file_id in file_ids:
-        try:
-            prepared = cache.prepare_file(file_id, sandbox_context)
-        except RuntimeError:
-            logger.debug(
-                "runtime attachment prepare failed file_id=%s",
-                file_id,
-                exc_info=True,
-            )
-            continue
+    for prepared in prepared_files:
         content_parts.append(
             runtime_sandbox_oss.content_part_for_prepared_file(prepared),
         )
@@ -1697,7 +1703,7 @@ class QwenPawAgent(CodingModeMixin, ToolGuardMixin, ReActAgent):
 
         # Process file and media blocks in messages
         if msg is not None:
-            msg = _append_runtime_attachment_content_parts(
+            msg = await _append_runtime_attachment_content_parts(
                 msg,
                 self._request_context,
             )

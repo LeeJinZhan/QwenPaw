@@ -43,6 +43,7 @@ RUNTIME_CHANNEL_META_KEYS = (
     "runtime_governance",
     "runtime_tool_gateway",
     "attachments_manifest",
+    "sandbox_context",
 )
 
 
@@ -153,9 +154,22 @@ def _is_runtime_terminal_sse(event_data: str) -> bool:
             continue
         event = str(payload.get("event") or payload.get("event_type") or "").strip()
         status = str(payload.get("status") or "").strip()
-        if event in {"completed", "done", "success", "agent.completed"}:
+        if event in {
+            "completed",
+            "done",
+            "success",
+            "agent.completed",
+            "failed",
+            "error",
+            "agent.failed",
+            "answer.failed",
+        }:
             return True
-        if payload.get("object") == "response" and status == "completed":
+        if payload.get("object") == "response" and status in {
+            "completed",
+            "failed",
+            "error",
+        }:
             return True
     return False
 

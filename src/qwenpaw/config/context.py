@@ -167,3 +167,21 @@ def set_current_runtime_attachments_manifest(
 ) -> None:
     """Set Runtime-issued attachment grants for the current request."""
     current_runtime_attachments_manifest.set(manifest)
+
+
+current_runtime_sandbox_context: ContextVar[dict[str, Any] | None] = ContextVar(
+    "current_runtime_sandbox_context",
+    default=None,
+)
+
+
+def get_current_runtime_sandbox_context() -> dict[str, Any] | None:
+    """Get Runtime-issued sandbox context for the current request."""
+    return current_runtime_sandbox_context.get()
+
+
+def set_current_runtime_sandbox_context(
+    sandbox_context: dict[str, Any] | None,
+) -> None:
+    """Set Runtime-issued sandbox context for the current request."""
+    current_runtime_sandbox_context.set(sandbox_context)

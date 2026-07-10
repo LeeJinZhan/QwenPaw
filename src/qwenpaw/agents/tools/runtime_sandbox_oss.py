@@ -13,7 +13,7 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import urljoin, urlparse, urlunparse
 
 from ...config.context import get_current_runtime_tool_gateway
@@ -53,6 +53,19 @@ class TaskMarker:
     expires_at_epoch: float
 
 
+class RuntimeAttachmentPreparationError(RuntimeError):
+    """Typed failure while preparing an explicit Runtime attachment."""
+
+    def __init__(self, file_id: str, reason_code: str) -> None:
+        self.file_id = str(file_id or "").strip()
+        self.reason_code = (
+            str(reason_code or "").strip() or "ATTACHMENT_READ_FAILED"
+        )
+        super().__init__(
+            f"Runtime attachment preparation failed: {self.reason_code}",
+        )
+
+
 class TaskAttachmentCache:
     """Prepare Runtime-authorized attachments in task-local directories."""
 
@@ -72,6 +85,11 @@ class TaskAttachmentCache:
         self._markers: dict[str, TaskMarker] = {}
         self._lock = threading.RLock()
         self._download_locks: dict[tuple[str, str, str], threading.Lock] = {}
+        self._batch_locks: dict[tuple[str, str], threading.Lock] = {}
+        self._batch_lock_users: dict[tuple[str, str], int] = {}
+        self._cleanup_locks: dict[str, threading.Lock] = {}
+        self._cleanup_users: dict[str, int] = {}
+        self._batch_condition = threading.Condition(self._lock)
         self._cleaning_tasks: set[str] = set()
 
     def prepare_file(
@@ -82,16 +100,269 @@ class TaskAttachmentCache:
         client: "SandboxedOssClient | None" = None,
     ) -> PreparedSandboxFile:
         """Authorize, download once, and return the task-local file path."""
+        reader = client or SandboxedOssClient()
+        safe_file_id = _safe_cache_id(file_id, "file_id")
+        self.sweep_expired()
+        return self._prepare_with_locator_provider(
+            safe_file_id,
+            sandbox_context,
+            reader,
+            lambda: reader.authorize_file(safe_file_id, sandbox_context),
+        )
+
+    def prepare_files(
+        self,
+        file_ids: list[str],
+        sandbox_context: dict[str, Any],
+        *,
+        client: "SandboxedOssClient | None" = None,
+    ) -> list[PreparedSandboxFile]:
+        """Batch-authorize cache misses and prepare files in manifest order."""
+        fallback_file_id = ""
+        try:
+            if not isinstance(file_ids, list):
+                raise RuntimeError("Sandbox attachment file_ids are invalid.")
+            if file_ids:
+                fallback_file_id = str(file_ids[0] or "").strip()
+            ordered = list(
+                dict.fromkeys(
+                    _safe_cache_id(file_id, "file_id")
+                    for file_id in file_ids
+                ),
+            )
+        except (RuntimeError, TypeError, ValueError) as exc:
+            raise RuntimeAttachmentPreparationError(
+                fallback_file_id,
+                "ATTACHMENT_INPUT_INVALID",
+            ) from exc
+        if not ordered:
+            return []
+        if not isinstance(sandbox_context, dict):
+            raise RuntimeAttachmentPreparationError(
+                ordered[0],
+                "SANDBOX_CONTEXT_INVALID",
+            )
+        try:
+            task_id = _safe_cache_id(
+                sandbox_context.get("task_id"),
+                "task_id",
+            )
+            context_id = _safe_cache_id(
+                sandbox_context.get("context_id")
+                or sandbox_context.get("sandbox_context_id"),
+                "sandbox_context_id",
+            )
+        except RuntimeError as exc:
+            raise RuntimeAttachmentPreparationError(
+                ordered[0],
+                "SANDBOX_CONTEXT_INVALID",
+            ) from exc
+        self.sweep_expired()
+        batch_key = (task_id, context_id)
+        batch_lock = self._register_batch_lock_user(
+            batch_key,
+            ordered[0],
+        )
+        batch_lock.acquire()
+        try:
+            return self._prepare_files_with_batch_lock(
+                ordered,
+                sandbox_context,
+                task_id=task_id,
+                context_id=context_id,
+                client=client,
+            )
+        finally:
+            batch_lock.release()
+            self._unregister_batch_lock_user(batch_key)
+
+    def _register_batch_lock_user(
+        self,
+        batch_key: tuple[str, str],
+        file_id: str,
+    ) -> threading.Lock:
+        with self._lock:
+            if batch_key[0] in self._cleaning_tasks:
+                raise RuntimeAttachmentPreparationError(
+                    file_id,
+                    "ATTACHMENT_CACHE_UNAVAILABLE",
+                )
+            batch_lock = self._batch_locks.setdefault(
+                batch_key,
+                threading.Lock(),
+            )
+            self._batch_lock_users[batch_key] = (
+                self._batch_lock_users.get(batch_key, 0) + 1
+            )
+            return batch_lock
+
+    def _unregister_batch_lock_user(
+        self,
+        batch_key: tuple[str, str],
+    ) -> None:
+        with self._batch_condition:
+            remaining = self._batch_lock_users.get(batch_key, 0) - 1
+            if remaining > 0:
+                self._batch_lock_users[batch_key] = remaining
+            else:
+                self._batch_lock_users.pop(batch_key, None)
+            self._batch_condition.notify_all()
+
+    def _prepare_files_with_batch_lock(
+        self,
+        ordered: list[str],
+        sandbox_context: dict[str, Any],
+        *,
+        task_id: str,
+        context_id: str,
+        client: "SandboxedOssClient | None",
+    ) -> list[PreparedSandboxFile]:
+        with self._lock:
+            if task_id in self._cleaning_tasks:
+                raise RuntimeAttachmentPreparationError(
+                    ordered[0],
+                    "ATTACHMENT_CACHE_UNAVAILABLE",
+                )
+            cached = {
+                file_id: prepared
+                for file_id in ordered
+                if (
+                    (prepared := self._prepared.get(
+                        (task_id, context_id, file_id),
+                    ))
+                    is not None
+                    and prepared.local_path.is_file()
+                )
+            }
+        misses = [file_id for file_id in ordered if file_id not in cached]
+        if not misses:
+            return [cached[file_id] for file_id in ordered]
+
+        reader = client or SandboxedOssClient()
+        try:
+            authorization = reader.authorize_files(misses, sandbox_context)
+        except RuntimeAttachmentPreparationError:
+            raise
+        except Exception as exc:
+            raise RuntimeAttachmentPreparationError(
+                misses[0],
+                "ATTACHMENT_AUTHORIZATION_FAILED",
+            ) from exc
+        if not isinstance(authorization, dict):
+            raise RuntimeAttachmentPreparationError(
+                misses[0],
+                "ATTACHMENT_AUTHORIZATION_FAILED",
+            )
+        authorized_items = authorization.get("authorized", [])
+        denied_items = authorization.get("denied", [])
+        if not isinstance(authorized_items, list) or not isinstance(
+            denied_items,
+            list,
+        ):
+            raise RuntimeAttachmentPreparationError(
+                misses[0],
+                "ATTACHMENT_AUTHORIZATION_FAILED",
+            )
+
+        denied = {
+            str(item.get("file_id", "")).strip(): str(
+                item.get("reason_code") or "ATTACHMENT_READ_FAILED",
+            ).strip()
+            for item in denied_items
+            if isinstance(item, dict)
+        }
+        for file_id in misses:
+            if file_id in denied:
+                raise RuntimeAttachmentPreparationError(
+                    file_id,
+                    denied[file_id],
+                )
+
+        locators: dict[str, dict[str, Any]] = {}
+        for item in authorized_items:
+            if not isinstance(item, dict):
+                continue
+            try:
+                authorized_file_id = _safe_cache_id(
+                    item.get("file_id"),
+                    "file_id",
+                )
+            except RuntimeError:
+                continue
+            if authorized_file_id in misses:
+                locators[authorized_file_id] = item
+        for file_id in misses:
+            if file_id not in locators:
+                raise RuntimeAttachmentPreparationError(
+                    file_id,
+                    "ATTACHMENT_AUTHORIZATION_MISSING",
+                )
+
+        prepared_by_id = dict(cached)
+        for file_id in misses:
+            try:
+                prepared_by_id[file_id] = self._prepare_authorized_file_no_sweep(
+                    locators[file_id],
+                    sandbox_context,
+                    client=reader,
+                )
+            except RuntimeAttachmentPreparationError:
+                raise
+            except Exception as exc:
+                raise RuntimeAttachmentPreparationError(
+                    file_id,
+                    "ATTACHMENT_READ_FAILED",
+                ) from exc
+        return [prepared_by_id[file_id] for file_id in ordered]
+
+    def prepare_authorized_file(
+        self,
+        locator: dict[str, Any],
+        sandbox_context: dict[str, Any],
+        *,
+        client: "SandboxedOssClient | None" = None,
+    ) -> PreparedSandboxFile:
+        """Download one already-authorized locator without re-authorizing."""
+        self.sweep_expired()
+        return self._prepare_authorized_file_no_sweep(
+            locator,
+            sandbox_context,
+            client=client,
+        )
+
+    def _prepare_authorized_file_no_sweep(
+        self,
+        locator: dict[str, Any],
+        sandbox_context: dict[str, Any],
+        *,
+        client: "SandboxedOssClient | None" = None,
+    ) -> PreparedSandboxFile:
+        if not isinstance(locator, dict):
+            raise RuntimeError("Runtime returned invalid attachment locator.")
+        safe_file_id = _safe_cache_id(locator.get("file_id"), "file_id")
+        reader = client or SandboxedOssClient()
+        return self._prepare_with_locator_provider(
+            safe_file_id,
+            sandbox_context,
+            reader,
+            lambda: locator,
+        )
+
+    def _prepare_with_locator_provider(
+        self,
+        safe_file_id: str,
+        sandbox_context: dict[str, Any],
+        reader: "SandboxedOssClient",
+        locator_provider: Callable[[], dict[str, Any]],
+    ) -> PreparedSandboxFile:
         if not isinstance(sandbox_context, dict):
             raise RuntimeError("Sandbox context is invalid.")
-        safe_file_id = _safe_cache_id(file_id, "file_id")
         task_id = _safe_cache_id(sandbox_context.get("task_id"), "task_id")
         context_id = _safe_cache_id(
             sandbox_context.get("context_id")
             or sandbox_context.get("sandbox_context_id"),
             "sandbox_context_id",
         )
-        self.sweep_expired()
         cache_key = (task_id, context_id, safe_file_id)
         with self._lock:
             if task_id in self._cleaning_tasks:
@@ -113,8 +384,19 @@ class TaskAttachmentCache:
                     return prepared
 
             try:
-                reader = client or SandboxedOssClient()
-                locator = reader.authorize_file(safe_file_id, sandbox_context)
+                locator = locator_provider()
+                if not isinstance(locator, dict):
+                    raise RuntimeError(
+                        "Runtime returned invalid attachment locator.",
+                    )
+                locator_file_id = _safe_cache_id(
+                    locator.get("file_id"),
+                    "file_id",
+                )
+                if locator_file_id != safe_file_id:
+                    raise RuntimeError(
+                        "Runtime returned mismatched attachment locator.",
+                    )
                 _assert_locator_within_size_limit(locator)
                 original_name = _safe_original_name(locator.get("original_name"))
                 task_root = self._task_root(task_id)
@@ -162,9 +444,53 @@ class TaskAttachmentCache:
     def cleanup_task(self, task_id: str) -> None:
         """Delete a task-local cache directory and forget prepared entries."""
         safe_task_id = _safe_cache_id(task_id, "task_id")
+        cleanup_lock = self._register_cleanup_user(safe_task_id)
+        cleanup_lock.acquire()
+        try:
+            self._cleanup_task_serialized(safe_task_id)
+        finally:
+            cleanup_lock.release()
+            self._unregister_cleanup_user(safe_task_id, cleanup_lock)
+
+    def _register_cleanup_user(self, task_id: str) -> threading.Lock:
+        with self._batch_condition:
+            cleanup_lock = self._cleanup_locks.setdefault(
+                task_id,
+                threading.Lock(),
+            )
+            self._cleanup_users[task_id] = self._cleanup_users.get(task_id, 0) + 1
+            self._cleaning_tasks.add(task_id)
+            self._batch_condition.notify_all()
+            return cleanup_lock
+
+    def _unregister_cleanup_user(
+        self,
+        task_id: str,
+        cleanup_lock: threading.Lock,
+    ) -> None:
+        with self._batch_condition:
+            remaining = self._cleanup_users.get(task_id, 0) - 1
+            if remaining > 0:
+                self._cleanup_users[task_id] = remaining
+            else:
+                self._cleanup_users.pop(task_id, None)
+                self._cleaning_tasks.discard(task_id)
+                if self._cleanup_locks.get(task_id) is cleanup_lock:
+                    self._cleanup_locks.pop(task_id, None)
+            self._batch_condition.notify_all()
+
+    def _cleanup_task_serialized(self, safe_task_id: str) -> None:
         locks_to_wait: list[threading.Lock]
-        with self._lock:
-            self._cleaning_tasks.add(safe_task_id)
+        with self._batch_condition:
+            self._batch_condition.wait_for(
+                lambda: not any(
+                    batch_key[0] == safe_task_id
+                    for batch_key in self._batch_lock_users
+                ),
+            )
+            for batch_key in list(self._batch_locks):
+                if batch_key[0] == safe_task_id:
+                    self._batch_locks.pop(batch_key, None)
             locks_to_wait = [
                 lock
                 for cache_key, lock in self._download_locks.items()
@@ -187,8 +513,6 @@ class TaskAttachmentCache:
         finally:
             for download_lock in reversed(locks_to_wait):
                 download_lock.release()
-            with self._lock:
-                self._cleaning_tasks.discard(safe_task_id)
 
     def sweep_expired(self, now_epoch: float | None = None) -> None:
         """Delete expired task-local cache directories."""
@@ -329,6 +653,8 @@ class SandboxedOssClient:
         self,
         file_id: str,
         sandbox_context: dict[str, Any],
+        *,
+        max_bytes: int | None = None,
     ) -> SandboxedObjectContent:
         """Authorize then read one file in the current user-assistant sandbox."""
         prepared = _DEFAULT_TASK_ATTACHMENT_CACHE.prepare_file(
@@ -336,11 +662,24 @@ class SandboxedOssClient:
             sandbox_context,
             client=self,
         )
-        content = prepared.local_path.read_bytes()
+        size_bytes = prepared.local_path.stat().st_size
+        if max_bytes is None:
+            read_limit = None
+        else:
+            try:
+                read_limit = int(max_bytes)
+            except (TypeError, ValueError) as exc:
+                raise RuntimeError(
+                    "Sandbox attachment read limit is invalid.",
+                ) from exc
+            if read_limit < 0:
+                raise RuntimeError("Sandbox attachment read limit is invalid.")
+        with prepared.local_path.open("rb") as handle:
+            content = handle.read() if read_limit is None else handle.read(read_limit)
         return SandboxedObjectContent(
             content=content,
             content_type=prepared.content_type,
-            size_bytes=len(content),
+            size_bytes=size_bytes,
         )
 
     def authorize_file(
@@ -348,18 +687,58 @@ class SandboxedOssClient:
         file_id: str,
         sandbox_context: dict[str, Any],
     ) -> dict[str, Any]:
+        parsed = self._post_json(
+            "/runtime/internal/sandbox/attachments/authorize",
+            {
+                "file_id": str(file_id or "").strip(),
+                "sandbox_context": sandbox_context,
+            },
+        )
+        return _extract_locator(parsed)
+
+    def authorize_files(
+        self,
+        file_ids: list[str],
+        sandbox_context: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Authorize multiple sandbox files in one Runtime request."""
+        ordered = list(
+            dict.fromkeys(
+                _safe_cache_id(file_id, "file_id")
+                for file_id in file_ids
+            ),
+        )
+        parsed = self._post_json(
+            "/runtime/internal/sandbox/attachments/batch-authorize",
+            {
+                "sandbox_context": sandbox_context,
+                "file_ids": ordered,
+            },
+        )
+        data = parsed.get("data", parsed)
+        if not isinstance(data, dict):
+            raise RuntimeError("Runtime returned invalid batch authorization.")
+        authorized = data.get("authorized", [])
+        denied = data.get("denied", [])
+        if not isinstance(authorized, list) or not isinstance(denied, list):
+            raise RuntimeError("Runtime returned invalid batch authorization.")
+        if not all(isinstance(item, dict) for item in authorized + denied):
+            raise RuntimeError("Runtime returned invalid batch authorization.")
+        return {"authorized": authorized, "denied": denied}
+
+    def _post_json(
+        self,
+        path: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
         if not self.runtime_base_url:
             raise RuntimeError("Runtime base URL is unavailable.")
         if not self.service_token:
             raise RuntimeError("Runtime service token is unavailable.")
-        payload = {
-            "file_id": str(file_id or "").strip(),
-            "sandbox_context": sandbox_context,
-        }
         request = urllib.request.Request(
             urljoin(
                 self.runtime_base_url.rstrip("/") + "/",
-                "runtime/internal/sandbox/attachments/authorize",
+                str(path or "").lstrip("/"),
             ),
             data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
             method="POST",
@@ -381,8 +760,10 @@ class SandboxedOssClient:
         try:
             parsed = json.loads(body) if body else {}
         except json.JSONDecodeError as exc:
-            raise RuntimeError("Runtime returned invalid attachment locator.") from exc
-        return _extract_locator(parsed)
+            raise RuntimeError("Runtime returned invalid JSON.") from exc
+        if not isinstance(parsed, dict):
+            raise RuntimeError("Runtime returned invalid JSON.")
+        return parsed
 
     def read_authorized_locator(
         self,

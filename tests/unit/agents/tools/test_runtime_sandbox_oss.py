@@ -2,6 +2,7 @@
 """Tests for Runtime-authorized sandbox object access."""
 from __future__ import annotations
 
+import asyncio
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 import hashlib
 import importlib
@@ -60,6 +61,244 @@ def test_sandboxed_oss_client_unwraps_runtime_authorize_envelope(monkeypatch) ->
     assert captured["url"] == "http://runtime.local/runtime/internal/sandbox/attachments/authorize"
     assert captured["timeout"] == 3
     assert captured["headers"]["Authorization"] == "Bearer service-token"
+
+
+def test_sandboxed_oss_client_batch_authorizes_once(monkeypatch) -> None:
+    captured: dict[str, object] = {"calls": 0}
+    authorized = [
+        {
+            "file_id": "file_a",
+            "storage_provider": "local",
+            "object_key": "runtime/file_a",
+        },
+        {
+            "file_id": "file_b",
+            "storage_provider": "local",
+            "object_key": "runtime/file_b",
+        },
+    ]
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def read(self):
+            return json.dumps(
+                {"data": {"authorized": authorized, "denied": []}},
+            ).encode("utf-8")
+
+    def fake_urlopen(request, timeout):
+        captured["calls"] = int(captured["calls"]) + 1
+        captured["url"] = request.full_url
+        captured["payload"] = json.loads(request.data.decode("utf-8"))
+        captured["timeout"] = timeout
+        return FakeResponse()
+
+    monkeypatch.setattr(runtime_sandbox_oss_module.urllib.request, "urlopen", fake_urlopen)
+    client = runtime_sandbox_oss_module.SandboxedOssClient(
+        runtime_base_url="http://runtime.local",
+        service_token="service-token",
+        timeout_seconds=3,
+    )
+    sandbox_context = {"task_id": "task_a", "context_id": "ctx_a"}
+
+    result = client.authorize_files(
+        ["file_a", "file_b", "file_a"],
+        sandbox_context,
+    )
+
+    assert result == {"authorized": authorized, "denied": []}
+    assert captured["calls"] == 1
+    assert captured["url"] == (
+        "http://runtime.local/runtime/internal/sandbox/attachments/batch-authorize"
+    )
+    assert captured["payload"] == {
+        "sandbox_context": sandbox_context,
+        "file_ids": ["file_a", "file_b"],
+    }
+    assert captured["timeout"] == 3
+
+
+def test_sandboxed_oss_client_reads_only_requested_prefix(tmp_path, monkeypatch) -> None:
+    local_path = tmp_path / "large.txt"
+    local_path.write_bytes(b"0123456789" * 10)
+
+    class FakeTaskAttachmentCache:
+        def prepare_file(self, file_id: str, sandbox_context: dict, *, client):
+            return runtime_sandbox_oss_module.PreparedSandboxFile(
+                file_id=file_id,
+                local_path=local_path,
+                content_type="text/plain",
+                size_bytes=100,
+                original_name="large.txt",
+                expires_at="2999-01-01T00:00:00+08:00",
+            )
+
+    monkeypatch.setattr(
+        runtime_sandbox_oss_module,
+        "_DEFAULT_TASK_ATTACHMENT_CACHE",
+        FakeTaskAttachmentCache(),
+    )
+    client = runtime_sandbox_oss_module.SandboxedOssClient()
+
+    content = client.read_file(
+        "file_large",
+        {"task_id": "task_a", "context_id": "ctx_a"},
+        max_bytes=13,
+    )
+
+    assert content.content == b"0123456789012"
+    assert content.size_bytes == 100
+
+
+def test_prepare_files_authorizes_manifest_once_and_preserves_order(tmp_path) -> None:
+    class FakeBatchClient:
+        def __init__(self):
+            self.batch_calls: list[list[str]] = []
+            self.read_calls: list[str] = []
+
+        def authorize_files(self, file_ids: list[str], sandbox_context: dict):
+            self.batch_calls.append(list(file_ids))
+            return {
+                "authorized": [
+                    {
+                        "file_id": file_id,
+                        "storage_provider": "local",
+                        "object_key": f"runtime/{file_id}",
+                        "content_type": "text/plain",
+                        "size_bytes": len(file_id),
+                        "original_name": f"{file_id}.txt",
+                    }
+                    for file_id in file_ids
+                ],
+                "denied": [],
+            }
+
+        def authorize_file(self, *_args, **_kwargs):
+            raise AssertionError("batch preparation must not authorize per file")
+
+        def read_authorized_locator(self, locator: dict):
+            file_id = str(locator["file_id"])
+            self.read_calls.append(file_id)
+            content = file_id.encode("utf-8")
+            return runtime_sandbox_oss_module.SandboxedObjectContent(
+                content=content,
+                content_type="text/plain",
+                size_bytes=len(content),
+            )
+
+    client = FakeBatchClient()
+    cache = runtime_sandbox_oss_module.TaskAttachmentCache(root=tmp_path)
+    sandbox_context = {"task_id": "task_a", "context_id": "ctx_a"}
+
+    prepared = cache.prepare_files(
+        ["file_a", "file_b", "file_a"],
+        sandbox_context,
+        client=client,
+    )
+
+    assert [item.file_id for item in prepared] == ["file_a", "file_b"]
+    assert client.batch_calls == [["file_a", "file_b"]]
+    assert client.read_calls == ["file_a", "file_b"]
+
+
+def test_prepare_files_batch_authorizes_only_cache_misses(tmp_path) -> None:
+    class FakeBatchClient:
+        def __init__(self):
+            self.batch_calls: list[list[str]] = []
+            self.read_calls: list[str] = []
+
+        def authorize_files(self, file_ids: list[str], sandbox_context: dict):
+            self.batch_calls.append(list(file_ids))
+            return {
+                "authorized": [
+                    {
+                        "file_id": file_id,
+                        "storage_provider": "local",
+                        "object_key": f"runtime/{file_id}",
+                        "content_type": "text/plain",
+                        "size_bytes": len(file_id),
+                        "original_name": f"{file_id}.txt",
+                    }
+                    for file_id in file_ids
+                ],
+                "denied": [],
+            }
+
+        def read_authorized_locator(self, locator: dict):
+            file_id = str(locator["file_id"])
+            self.read_calls.append(file_id)
+            content = file_id.encode("utf-8")
+            return runtime_sandbox_oss_module.SandboxedObjectContent(
+                content=content,
+                content_type="text/plain",
+                size_bytes=len(content),
+            )
+
+    client = FakeBatchClient()
+    cache = runtime_sandbox_oss_module.TaskAttachmentCache(root=tmp_path)
+    sandbox_context = {"task_id": "task_a", "context_id": "ctx_a"}
+
+    first = cache.prepare_files(["file_a"], sandbox_context, client=client)
+    second = cache.prepare_files(
+        ["file_a", "file_b"],
+        sandbox_context,
+        client=client,
+    )
+
+    assert [item.file_id for item in first] == ["file_a"]
+    assert [item.file_id for item in second] == ["file_a", "file_b"]
+    assert client.batch_calls == [["file_a"], ["file_b"]]
+    assert client.read_calls == ["file_a", "file_b"]
+
+
+def test_prepare_files_denial_raises_typed_error_before_download(tmp_path) -> None:
+    class DenyingBatchClient:
+        def __init__(self):
+            self.read_called = False
+
+        def authorize_files(self, file_ids: list[str], sandbox_context: dict):
+            return {
+                "authorized": [
+                    {
+                        "file_id": "file_a",
+                        "storage_provider": "local",
+                        "object_key": "runtime/file_a",
+                        "content_type": "text/plain",
+                        "size_bytes": 1,
+                        "original_name": "a.txt",
+                    },
+                ],
+                "denied": [
+                    {
+                        "file_id": "file_b",
+                        "reason_code": "FILE_ACCESS_DENIED",
+                    },
+                ],
+            }
+
+        def read_authorized_locator(self, _locator: dict):
+            self.read_called = True
+            raise AssertionError("denied manifest must fail before download")
+
+    client = DenyingBatchClient()
+    cache = runtime_sandbox_oss_module.TaskAttachmentCache(root=tmp_path)
+
+    with pytest.raises(
+        runtime_sandbox_oss_module.RuntimeAttachmentPreparationError,
+    ) as exc_info:
+        cache.prepare_files(
+            ["file_a", "file_b"],
+            {"task_id": "task_a", "context_id": "ctx_a"},
+            client=client,
+        )
+
+    assert exc_info.value.file_id == "file_b"
+    assert exc_info.value.reason_code == "FILE_ACCESS_DENIED"
+    assert client.read_called is False
 
 
 def test_task_attachment_cache_downloads_once_per_task(tmp_path) -> None:
@@ -258,6 +497,276 @@ def test_task_attachment_cache_concurrent_duplicate_prepare_downloads_once(tmp_p
     assert first.local_path == second.local_path
     assert client.authorize_calls == [("file_001", sandbox_context)]
     assert len(client.read_calls) == 1
+
+
+def test_prepare_files_concurrent_duplicate_batch_authorizes_once(tmp_path) -> None:
+    class BlockingBatchClient:
+        def __init__(self):
+            self.authorize_calls = 0
+            self.read_calls = 0
+            self._lock = threading.Lock()
+            self.first_authorization_started = threading.Event()
+            self.allow_authorization_to_finish = threading.Event()
+
+        def authorize_files(self, file_ids: list[str], sandbox_context: dict):
+            with self._lock:
+                self.authorize_calls += 1
+            self.first_authorization_started.set()
+            assert self.allow_authorization_to_finish.wait(timeout=2)
+            return {
+                "authorized": [
+                    {
+                        "file_id": file_ids[0],
+                        "storage_provider": "local",
+                        "object_key": f"runtime/{file_ids[0]}",
+                        "content_type": "text/plain",
+                        "size_bytes": 7,
+                        "original_name": "customer.txt",
+                    },
+                ],
+                "denied": [],
+            }
+
+        def read_authorized_locator(self, locator: dict):
+            with self._lock:
+                self.read_calls += 1
+            return runtime_sandbox_oss_module.SandboxedObjectContent(
+                content=b"cached\n",
+                content_type=str(locator["content_type"]),
+                size_bytes=7,
+            )
+
+    client = BlockingBatchClient()
+    cache = runtime_sandbox_oss_module.TaskAttachmentCache(root=tmp_path)
+    sandbox_context = {"task_id": "task_001", "context_id": "ctx_001"}
+    start = threading.Barrier(3)
+
+    def prepare():
+        start.wait(timeout=2)
+        return cache.prepare_files(
+            ["file_001"],
+            sandbox_context,
+            client=client,
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first_future = executor.submit(prepare)
+        second_future = executor.submit(prepare)
+        start.wait(timeout=2)
+        assert client.first_authorization_started.wait(timeout=2)
+        time.sleep(0.1)
+        client.allow_authorization_to_finish.set()
+        first = first_future.result(timeout=2)
+        second = second_future.result(timeout=2)
+
+    assert first[0].local_path == second[0].local_path
+    assert client.authorize_calls == 1
+    assert client.read_calls == 1
+
+
+def test_cleanup_waits_for_active_batch_authorization(tmp_path) -> None:
+    class BlockingBatchClient:
+        def __init__(self):
+            self.authorization_started = threading.Event()
+            self.allow_authorization_to_finish = threading.Event()
+
+        def authorize_files(self, file_ids: list[str], sandbox_context: dict):
+            self.authorization_started.set()
+            assert self.allow_authorization_to_finish.wait(timeout=2)
+            return {
+                "authorized": [
+                    {
+                        "file_id": file_ids[0],
+                        "storage_provider": "local",
+                        "object_key": f"runtime/{file_ids[0]}",
+                        "content_type": "text/plain",
+                        "size_bytes": 7,
+                        "original_name": "customer.txt",
+                    },
+                ],
+                "denied": [],
+            }
+
+        def read_authorized_locator(self, locator: dict):
+            return runtime_sandbox_oss_module.SandboxedObjectContent(
+                content=b"cached\n",
+                content_type=str(locator["content_type"]),
+                size_bytes=7,
+            )
+
+    client = BlockingBatchClient()
+    cache = runtime_sandbox_oss_module.TaskAttachmentCache(root=tmp_path)
+    sandbox_context = {"task_id": "task_001", "context_id": "ctx_001"}
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        prepare_future = executor.submit(
+            cache.prepare_files,
+            ["file_001"],
+            sandbox_context,
+            client=client,
+        )
+        assert client.authorization_started.wait(timeout=2)
+        cleanup_future = executor.submit(cache.cleanup_task, "task_001")
+        with pytest.raises(FutureTimeoutError):
+            cleanup_future.result(timeout=0.05)
+
+        client.allow_authorization_to_finish.set()
+        with pytest.raises(
+            runtime_sandbox_oss_module.RuntimeAttachmentPreparationError,
+        ):
+            prepare_future.result(timeout=2)
+        cleanup_future.result(timeout=2)
+
+    assert not any(key[0] == "task_001" for key in cache._batch_locks)
+    assert not any(key[0] == "task_001" for key in cache._download_locks)
+
+
+def test_prepare_files_does_not_deadlock_when_marker_expires_inside_batch(
+    tmp_path,
+) -> None:
+    class SlowBatchClient:
+        def authorize_files(self, file_ids: list[str], sandbox_context: dict):
+            time.sleep(0.3)
+            return {
+                "authorized": [
+                    {
+                        "file_id": file_ids[0],
+                        "storage_provider": "local",
+                        "object_key": f"runtime/{file_ids[0]}",
+                        "content_type": "text/plain",
+                        "size_bytes": 7,
+                        "original_name": "customer.txt",
+                    },
+                ],
+                "denied": [],
+            }
+
+        def read_authorized_locator(self, locator: dict):
+            return runtime_sandbox_oss_module.SandboxedObjectContent(
+                content=b"cached\n",
+                content_type=str(locator["content_type"]),
+                size_bytes=7,
+            )
+
+    cache = runtime_sandbox_oss_module.TaskAttachmentCache(root=tmp_path)
+    now = time.time()
+    cache._markers["task_001"] = runtime_sandbox_oss_module.TaskMarker(
+        task_id="task_001",
+        sandbox_context_id="ctx_001",
+        created_at_epoch=now,
+        expires_at_epoch=now + 0.2,
+    )
+    result: dict[str, object] = {}
+
+    def prepare() -> None:
+        try:
+            result["prepared"] = cache.prepare_files(
+                ["file_001"],
+                {"task_id": "task_001", "context_id": "ctx_001"},
+                client=SlowBatchClient(),
+            )
+        except BaseException as exc:  # pragma: no cover - diagnostic capture
+            result["error"] = exc
+
+    worker = threading.Thread(target=prepare, daemon=True)
+    worker.start()
+    worker.join(timeout=1)
+
+    assert worker.is_alive() is False, "prepare_files deadlocked during TTL cleanup"
+    assert "error" not in result
+    assert result["prepared"][0].file_id == "file_001"
+
+
+def test_concurrent_cleanup_keeps_task_blocked_until_last_cleanup_finishes(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    cache = runtime_sandbox_oss_module.TaskAttachmentCache(root=tmp_path)
+    first_cleanup_entered = threading.Event()
+    second_cleanup_entered = threading.Event()
+    allow_first_cleanup = threading.Event()
+    allow_second_cleanup = threading.Event()
+    cleanup_calls = 0
+    cleanup_calls_lock = threading.Lock()
+
+    def blocking_rmtree(*_args, **_kwargs):
+        nonlocal cleanup_calls
+        with cleanup_calls_lock:
+            cleanup_calls += 1
+            call_number = cleanup_calls
+        if call_number == 1:
+            first_cleanup_entered.set()
+            assert allow_first_cleanup.wait(timeout=2)
+        elif call_number == 2:
+            second_cleanup_entered.set()
+            assert allow_second_cleanup.wait(timeout=2)
+
+    monkeypatch.setattr(
+        runtime_sandbox_oss_module.shutil,
+        "rmtree",
+        blocking_rmtree,
+    )
+
+    class ProbeBatchClient:
+        def __init__(self):
+            self.authorize_calls = 0
+
+        def authorize_files(self, *_args, **_kwargs):
+            self.authorize_calls += 1
+            raise AssertionError("new batch must be rejected during cleanup")
+
+    probe_client = ProbeBatchClient()
+    first = threading.Thread(target=cache.cleanup_task, args=("task_001",), daemon=True)
+    second = threading.Thread(target=cache.cleanup_task, args=("task_001",), daemon=True)
+    first.start()
+    assert first_cleanup_entered.wait(timeout=2)
+    second.start()
+
+    try:
+        deadline = time.time() + 1
+        while (
+            getattr(cache, "_cleanup_users", {}).get("task_001", 0) < 2
+            and time.time() < deadline
+        ):
+            time.sleep(0.01)
+        assert cache._cleanup_users["task_001"] == 2
+        assert "task_001" in cache._cleaning_tasks
+        with pytest.raises(
+            runtime_sandbox_oss_module.RuntimeAttachmentPreparationError,
+        ):
+            cache.prepare_files(
+                ["file_001"],
+                {"task_id": "task_001", "context_id": "ctx_001"},
+                client=probe_client,
+            )
+
+        allow_first_cleanup.set()
+        assert second_cleanup_entered.wait(timeout=2)
+        first.join(timeout=2)
+        assert first.is_alive() is False
+        assert "task_001" in cache._cleaning_tasks
+        assert cache._cleanup_users["task_001"] == 1
+        with pytest.raises(
+            runtime_sandbox_oss_module.RuntimeAttachmentPreparationError,
+        ):
+            cache.prepare_files(
+                ["file_001"],
+                {"task_id": "task_001", "context_id": "ctx_001"},
+                client=probe_client,
+            )
+    finally:
+        allow_first_cleanup.set()
+        allow_second_cleanup.set()
+        first.join(timeout=2)
+        second.join(timeout=2)
+
+    assert first.is_alive() is False
+    assert second.is_alive() is False
+    assert probe_client.authorize_calls == 0
+    assert "task_001" not in cache._cleaning_tasks
+    assert "task_001" not in cache._cleanup_users
+    assert "task_001" not in cache._cleanup_locks
+    assert not any(key[0] == "task_001" for key in cache._batch_locks)
 
 
 def test_task_attachment_cache_cleanup_removes_failed_download_lock(tmp_path) -> None:
@@ -795,7 +1304,11 @@ def test_runtime_attachment_prompt_does_not_show_local_paths() -> None:
     assert "bucket" not in prompt
 
 
-def test_append_runtime_attachment_content_parts_adds_current_task_files(monkeypatch, tmp_path) -> None:
+@pytest.mark.asyncio
+async def test_append_runtime_attachment_content_parts_adds_current_task_files(
+    monkeypatch,
+    tmp_path,
+) -> None:
     react_agent = importlib.import_module("qwenpaw.agents.react_agent")
     local_path = tmp_path / "photo.png"
     local_path.write_bytes(b"png")
@@ -810,10 +1323,10 @@ def test_append_runtime_attachment_content_parts_adds_current_task_files(monkeyp
     captured: dict[str, object] = {}
 
     class FakeTaskAttachmentCache:
-        def prepare_file(self, file_id: str, sandbox_context: dict):
-            captured["file_id"] = file_id
+        def prepare_files(self, file_ids: list[str], sandbox_context: dict):
+            captured["file_ids"] = list(file_ids)
             captured["sandbox_context"] = dict(sandbox_context)
-            return prepared
+            return [prepared]
 
     monkeypatch.setattr(
         react_agent.runtime_sandbox_oss,
@@ -841,10 +1354,13 @@ def test_append_runtime_attachment_content_parts_adds_current_task_files(monkeyp
         ],
     }
 
-    updated = react_agent._append_runtime_attachment_content_parts(message, request_context)
+    updated = await react_agent._append_runtime_attachment_content_parts(
+        message,
+        request_context,
+    )
 
     assert updated is message
-    assert captured["file_id"] == "file_001"
+    assert captured["file_ids"] == ["file_001"]
     assert captured["sandbox_context"] == request_context["sandbox_context"]
     assert isinstance(message.content, list)
     assert message.content[0] == {"type": "text", "text": "识别一下图片"}
@@ -852,7 +1368,99 @@ def test_append_runtime_attachment_content_parts_adds_current_task_files(monkeyp
     assert message.content[1]["source"]["url"] == local_path.resolve().as_uri()
 
 
-def test_append_runtime_attachment_content_parts_ignores_missing_source(monkeypatch, tmp_path) -> None:
+@pytest.mark.asyncio
+async def test_current_task_attachment_denial_is_not_silently_ignored(
+    monkeypatch,
+) -> None:
+    react_agent = importlib.import_module("qwenpaw.agents.react_agent")
+
+    class DenyingTaskAttachmentCache:
+        def prepare_files(self, file_ids: list[str], sandbox_context: dict):
+            raise runtime_sandbox_oss_module.RuntimeAttachmentPreparationError(
+                file_ids[0],
+                "FILE_ACCESS_DENIED",
+            )
+
+    monkeypatch.setattr(
+        react_agent.runtime_sandbox_oss,
+        "_DEFAULT_TASK_ATTACHMENT_CACHE",
+        DenyingTaskAttachmentCache(),
+    )
+    message = Msg("user", "识别一下图片", "user")
+    request_context = {
+        "sandbox_context": {"task_id": "task_001", "context_id": "ctx_001"},
+        "attachments_manifest": [
+            {
+                "file_id": "file_denied",
+                "original_name": "denied.png",
+                "content_type": "image/png",
+                "access_mode": "sandbox_oss",
+                "source": "current_task",
+            },
+        ],
+    }
+
+    with pytest.raises(
+        runtime_sandbox_oss_module.RuntimeAttachmentPreparationError,
+    ):
+        await react_agent._append_runtime_attachment_content_parts(
+            message,
+            request_context,
+        )
+
+    assert message.content == "识别一下图片"
+
+
+@pytest.mark.asyncio
+async def test_current_task_attachment_requires_sandbox_context() -> None:
+    react_agent = importlib.import_module("qwenpaw.agents.react_agent")
+    message = Msg("user", "识别一下图片", "user")
+    request_context = {
+        "attachments_manifest": [
+            {
+                "file_id": "file_current",
+                "source": "current_task",
+            },
+        ],
+    }
+
+    with pytest.raises(
+        runtime_sandbox_oss_module.RuntimeAttachmentPreparationError,
+    ) as exc_info:
+        await react_agent._append_runtime_attachment_content_parts(
+            message,
+            request_context,
+        )
+
+    assert exc_info.value.file_id == "file_current"
+    assert exc_info.value.reason_code == "SANDBOX_CONTEXT_INVALID"
+    assert message.content == "识别一下图片"
+
+
+def test_current_task_attachment_selection_uses_source_not_access_metadata() -> None:
+    react_agent = importlib.import_module("qwenpaw.agents.react_agent")
+
+    file_ids = react_agent._runtime_current_task_attachment_ids(
+        {
+            "attachments_manifest": [
+                {"file_id": "file_current", "source": "current_task"},
+                {
+                    "file_id": "file_discovered",
+                    "source": "discovered",
+                    "access_mode": "sandbox_oss",
+                },
+            ],
+        },
+    )
+
+    assert file_ids == ["file_current"]
+
+
+@pytest.mark.asyncio
+async def test_append_runtime_attachment_content_parts_ignores_missing_source(
+    monkeypatch,
+    tmp_path,
+) -> None:
     react_agent = importlib.import_module("qwenpaw.agents.react_agent")
     local_path = tmp_path / "legacy.png"
     local_path.write_bytes(b"png")
@@ -889,11 +1497,101 @@ def test_append_runtime_attachment_content_parts_ignores_missing_source(monkeypa
         ],
     }
 
-    updated = react_agent._append_runtime_attachment_content_parts(message, request_context)
+    updated = await react_agent._append_runtime_attachment_content_parts(
+        message,
+        request_context,
+    )
 
     assert updated is message
     assert captured == {}
     assert message.content == "识别一下图片"
+
+
+@pytest.mark.asyncio
+async def test_runtime_attachment_preload_does_not_block_event_loop(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    react_agent = importlib.import_module("qwenpaw.agents.react_agent")
+    local_path = tmp_path / "photo.png"
+    local_path.write_bytes(b"png")
+    prepared = runtime_sandbox_oss_module.PreparedSandboxFile(
+        file_id="file_001",
+        local_path=local_path,
+        content_type="image/png",
+        size_bytes=3,
+        original_name="photo.png",
+        expires_at="2999-01-01T00:00:00+08:00",
+    )
+    preparation_started = threading.Event()
+    release_preparation = threading.Event()
+    observed: dict[str, bool] = {}
+
+    class BlockingTaskAttachmentCache:
+        def prepare_files(self, file_ids: list[str], sandbox_context: dict):
+            preparation_started.set()
+            observed["released_by_event_loop"] = release_preparation.wait(
+                timeout=0.5,
+            )
+            return [prepared]
+
+    monkeypatch.setattr(
+        react_agent.runtime_sandbox_oss,
+        "_DEFAULT_TASK_ATTACHMENT_CACHE",
+        BlockingTaskAttachmentCache(),
+    )
+    message = Msg("user", "识别一下图片", "user")
+    request_context = {
+        "sandbox_context": {"task_id": "task_001", "context_id": "ctx_001"},
+        "attachments_manifest": [
+            {"file_id": "file_001", "source": "current_task"},
+        ],
+    }
+
+    async def release_from_event_loop() -> None:
+        while not preparation_started.is_set():
+            await asyncio.sleep(0)
+        release_preparation.set()
+
+    release_task = asyncio.create_task(release_from_event_loop())
+    updated = await react_agent._append_runtime_attachment_content_parts(
+        message,
+        request_context,
+    )
+    await release_task
+
+    assert updated is message
+    assert observed["released_by_event_loop"] is True
+
+
+@pytest.mark.asyncio
+async def test_runtime_attachment_preload_preserves_cancelled_error(
+    monkeypatch,
+) -> None:
+    react_agent = importlib.import_module("qwenpaw.agents.react_agent")
+
+    class CancelledTaskAttachmentCache:
+        def prepare_files(self, *_args, **_kwargs):
+            raise asyncio.CancelledError()
+
+    monkeypatch.setattr(
+        react_agent.runtime_sandbox_oss,
+        "_DEFAULT_TASK_ATTACHMENT_CACHE",
+        CancelledTaskAttachmentCache(),
+    )
+    message = Msg("user", "识别一下图片", "user")
+    request_context = {
+        "sandbox_context": {"task_id": "task_001", "context_id": "ctx_001"},
+        "attachments_manifest": [
+            {"file_id": "file_001", "source": "current_task"},
+        ],
+    }
+
+    with pytest.raises(asyncio.CancelledError):
+        await react_agent._append_runtime_attachment_content_parts(
+            message,
+            request_context,
+        )
 
 
 @pytest.mark.asyncio

@@ -27,6 +27,9 @@ from agentscope_runtime.engine.schemas.agent_schemas import (
     RunStatus,
 )
 
+from ....agents.tools.runtime_sandbox_oss import (
+    RuntimeAttachmentPreparationError,
+)
 from ....config.config import ConsoleConfig as ConsoleChannelConfig
 from ...console_push_store import append as push_store_append
 from ....constant import DEFAULT_MEDIA_DIR
@@ -371,6 +374,7 @@ class ConsoleChannel(BaseChannel):
                     return
                 if merged and hasattr(request.input[0], "content"):
                     request.input[0].content = merged
+        is_runtime_request = False
         try:
             send_meta = getattr(request, "channel_meta", None) or {}
             send_meta.setdefault("bot_prefix", self.bot_prefix)
@@ -461,6 +465,19 @@ class ConsoleChannel(BaseChannel):
                     request.session_id or f"{self.channel}:{to_handle}",
                 )
 
+        except RuntimeAttachmentPreparationError as e:
+            logger.warning(
+                "runtime attachment preparation failed reason_code=%s",
+                e.reason_code,
+            )
+            err_msg = "附件读取失败"
+            self._print_error(err_msg)
+            if is_runtime_request:
+                yield (
+                    "data: "
+                    f"{json.dumps({'event': 'failed', 'status': 'failed', 'chat_id': session_id, 'error': err_msg, 'reason_code': e.reason_code}, ensure_ascii=False)}"
+                    "\n\n"
+                )
         except Exception as e:
             logger.exception("console process/reply failed")
             err_msg = str(e).strip() or "An error occurred while processing."
