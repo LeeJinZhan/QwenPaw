@@ -130,14 +130,9 @@ def _extract_session_and_payload(request_data: Union[AgentRequest, dict]):
 
 
 def _is_runtime_native_payload(native_payload: dict) -> bool:
-    meta = native_payload.get("meta") if isinstance(native_payload, dict) else {}
-    if not isinstance(meta, dict):
-        meta = {}
     return (
-        native_payload.get("channel_id") == "bank-runtime"
-        or bool(meta.get("runtime_task_id"))
-        or bool(meta.get("runtime_tool_gateway"))
-        or bool(meta.get("runtime_governance"))
+        isinstance(native_payload, dict)
+        and native_payload.get("channel_id") == "bank-runtime"
     )
 
 
@@ -159,6 +154,7 @@ def _is_runtime_terminal_sse(event_data: str) -> bool:
             "done",
             "success",
             "agent.completed",
+            "answer.completed",
             "failed",
             "error",
             "agent.failed",
@@ -174,18 +170,19 @@ def _is_runtime_terminal_sse(event_data: str) -> bool:
     return False
 
 
-def _runtime_completed_sse(native_payload: dict) -> str:
-    meta = native_payload.get("meta") if isinstance(native_payload, dict) else {}
-    if not isinstance(meta, dict):
-        meta = {}
-    chat_id = str(meta.get("session_id") or native_payload.get("session_id") or "")
-    return f"data: {json.dumps({'event': 'completed', 'chat_id': chat_id}, ensure_ascii=False)}\n\n"
+def _runtime_missing_terminal_sse(native_payload: dict) -> str:
+    del native_payload
+    return (
+        "data: "
+        f"{json.dumps({'event': 'answer.failed', 'status': 'failed', 'message': '回答生成失败'}, ensure_ascii=False)}"
+        "\n\n"
+    )
 
 
 def _runtime_invalid_sandbox_sse() -> str:
     return (
         "data: "
-        f"{json.dumps({'event': 'failed', 'status': 'failed', 'error': 'Runtime sandbox context is invalid.', 'reason_code': 'SANDBOX_CONTEXT_INVALID'}, ensure_ascii=False)}"
+        f"{json.dumps({'event': 'answer.failed', 'status': 'failed', 'message': '回答生成失败'}, ensure_ascii=False)}"
         "\n\n"
     )
 
@@ -246,7 +243,7 @@ async def _stream_runtime_console_events(
                 terminal_seen = True
             yield event_data
         if not terminal_seen:
-            yield _runtime_completed_sse(native_payload)
+            yield _runtime_missing_terminal_sse(native_payload)
     finally:
         if lifetime_reservation is not None:
             lifetime_reservation.release()
@@ -402,7 +399,7 @@ async def post_console_chat(
                         terminal_seen = True
                     yield event_data
                 if runtime_request and not terminal_seen:
-                    yield _runtime_completed_sse(native_payload)
+                    yield _runtime_missing_terminal_sse(native_payload)
             except Exception as e:
                 logger.exception("Console chat stream error")
                 yield f"data: {json.dumps({'error': str(e)})}\n\n"

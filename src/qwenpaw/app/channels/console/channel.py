@@ -12,6 +12,7 @@ pretty-printed to the terminal.
 
 from __future__ import annotations
 
+import asyncio
 import copy
 import json
 import logging
@@ -33,6 +34,10 @@ from ....agents.tools.runtime_sandbox_oss import (
 from ....config.config import ConsoleConfig as ConsoleChannelConfig
 from ...console_push_store import append as push_store_append
 from ....constant import DEFAULT_MEDIA_DIR
+from .runtime_event_projection import (
+    RuntimeEventProjector,
+    should_project_runtime_events,
+)
 from ..base import (
     BaseChannel,
     AudioContent,
@@ -58,10 +63,195 @@ _YELLOW = "\033[33m" if _USE_COLOR else ""
 _RED = "\033[31m" if _USE_COLOR else ""
 _BOLD = "\033[1m" if _USE_COLOR else ""
 _RESET = "\033[0m" if _USE_COLOR else ""
+_RUNTIME_PROJECTION_TICK = object()
+_CLEANUP_TIMEOUT_SECONDS = 1.0
+_CLEANUP_CANCEL_GRACE_SECONDS = 0.1
 
 
 def _ts() -> str:
     return datetime.now().strftime("%H:%M:%S")
+
+
+def _log_cleanup_failure(message: str, error: BaseException) -> None:
+    logger.warning(
+        message,
+        exc_info=(type(error), error, error.__traceback__),
+    )
+
+
+def _observe_late_cleanup(
+    cleanup_task: asyncio.Future,
+    description: str,
+) -> None:
+    try:
+        cleanup_task.result()
+    except asyncio.CancelledError:
+        return
+    except Exception as error:  # pylint: disable=broad-exception-caught
+        _log_cleanup_failure(f"{description} failed", error)
+
+
+async def _await_protected_cleanup(
+    cleanup_task: asyncio.Future,
+    description: str,
+) -> Any:
+    caller_cancelled: asyncio.CancelledError | None = None
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + _CLEANUP_TIMEOUT_SECONDS
+    timed_out = False
+
+    while not cleanup_task.done():
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            timed_out = True
+            break
+        try:
+            done, _ = await asyncio.wait(
+                {cleanup_task},
+                timeout=remaining,
+            )
+        except asyncio.CancelledError as error:
+            caller_cancelled = error
+            continue
+        if not done:
+            timed_out = True
+            break
+
+    if timed_out and not cleanup_task.done():
+        logger.warning("%s timed out; cancelling cleanup", description)
+        cleanup_task.cancel()
+        cancel_deadline = loop.time() + _CLEANUP_CANCEL_GRACE_SECONDS
+        while not cleanup_task.done():
+            remaining = cancel_deadline - loop.time()
+            if remaining <= 0:
+                break
+            try:
+                done, _ = await asyncio.wait(
+                    {cleanup_task},
+                    timeout=remaining,
+                )
+            except asyncio.CancelledError as error:
+                caller_cancelled = error
+                continue
+            if not done:
+                break
+
+    result = None
+    if cleanup_task.done():
+        try:
+            result = cleanup_task.result()
+        except asyncio.CancelledError as error:
+            if not timed_out:
+                _log_cleanup_failure(f"{description} failed", error)
+        except Exception as error:  # pylint: disable=broad-exception-caught
+            _log_cleanup_failure(f"{description} failed", error)
+    else:
+        logger.error("%s remains pending after cancellation", description)
+        cleanup_task.add_done_callback(
+            lambda task: _observe_late_cleanup(task, description),
+        )
+
+    if caller_cancelled is not None:
+        raise caller_cancelled
+    return result
+
+
+async def _gather_pending_native_event(
+    pending: asyncio.Task,
+) -> None:
+    results = await asyncio.gather(pending, return_exceptions=True)
+    for result in results:
+        if isinstance(result, asyncio.CancelledError):
+            continue
+        if isinstance(result, BaseException):
+            _log_cleanup_failure(
+                "runtime pending native event cleanup failed",
+                result,
+            )
+
+
+async def _cancel_pending_native_event(
+    pending: asyncio.Task | None,
+) -> None:
+    if pending is None:
+        return
+    if not pending.done():
+        pending.cancel()
+    cleanup_task = asyncio.create_task(
+        _gather_pending_native_event(pending),
+    )
+    await _await_protected_cleanup(
+        cleanup_task,
+        "runtime pending native event gather",
+    )
+
+
+async def _aclose_safely(iterator: Any, description: str) -> None:
+    close = getattr(iterator, "aclose", None)
+    if not callable(close):
+        return
+    try:
+        cleanup_task = asyncio.ensure_future(close())
+    except Exception as error:  # pylint: disable=broad-exception-caught
+        _log_cleanup_failure(
+            f"{description} aclose failed",
+            error,
+        )
+        return
+    await _await_protected_cleanup(
+        cleanup_task,
+        f"{description} aclose",
+    )
+
+
+async def _with_runtime_projection_ticks(
+    events: Any,
+    *,
+    projector: RuntimeEventProjector,
+) -> AsyncGenerator[Any, None]:
+    """Yield native events plus flush ticks without cancelling the producer."""
+    iterator = aiter(events)
+    pending: asyncio.Task | None = None
+    try:
+        while True:
+            if pending is None:
+                pending = asyncio.create_task(anext(iterator))
+            flush_delay = projector.next_flush_delay_seconds()
+            if flush_delay is None:
+                done, _ = await asyncio.wait({pending})
+            else:
+                done, _ = await asyncio.wait(
+                    {pending},
+                    timeout=flush_delay,
+                )
+            if not done:
+                yield _RUNTIME_PROJECTION_TICK
+                continue
+
+            completed = pending
+            pending = None
+            try:
+                event = completed.result()
+            except StopAsyncIteration:
+                break
+            yield event
+            if projector.terminal_sent:
+                break
+    finally:
+        caller_cancelled: asyncio.CancelledError | None = None
+        try:
+            await _cancel_pending_native_event(pending)
+        except asyncio.CancelledError as error:
+            caller_cancelled = error
+        try:
+            await _aclose_safely(
+                iterator,
+                "runtime native event iterator",
+            )
+        except asyncio.CancelledError as error:
+            caller_cancelled = caller_cancelled or error
+        if caller_cancelled is not None:
+            raise caller_cancelled
 
 
 class ConsoleChannel(BaseChannel):
@@ -375,20 +565,36 @@ class ConsoleChannel(BaseChannel):
                 if merged and hasattr(request.input[0], "content"):
                     request.input[0].content = merged
         is_runtime_request = False
+        runtime_projector: RuntimeEventProjector | None = None
+        events: Any = None
         try:
             send_meta = getattr(request, "channel_meta", None) or {}
             send_meta.setdefault("bot_prefix", self.bot_prefix)
-            is_runtime_request = (
-                getattr(request, "channel", None) == "bank-runtime"
-                or bool(send_meta.get("runtime_task_id"))
-                or bool(send_meta.get("runtime_tool_gateway"))
-                or bool(send_meta.get("runtime_governance"))
+            is_runtime_request = should_project_runtime_events(
+                getattr(request, "channel", None),
+                send_meta,
             )
+            if is_runtime_request:
+                runtime_projector = RuntimeEventProjector()
             last_response = None
             event_count = 0
             runtime_terminal_sent = False
 
-            async for event in self._process(request):
+            native_events = self._process(request)
+            events = (
+                _with_runtime_projection_ticks(
+                    native_events,
+                    projector=runtime_projector,
+                )
+                if runtime_projector is not None
+                else native_events
+            )
+            async for event in events:
+                if event is _RUNTIME_PROJECTION_TICK:
+                    for projected in runtime_projector.flush_due():
+                        data = json.dumps(projected, ensure_ascii=False)
+                        yield f"data: {data}\n\n"
+                    continue
                 event_count += 1
                 obj = getattr(event, "object", None)
                 status = getattr(event, "status", None)
@@ -403,7 +609,8 @@ class ConsoleChannel(BaseChannel):
                 )
 
                 if (
-                    event.object == "response"
+                    runtime_projector is None
+                    and event.object == "response"
                     and event.status == RunStatus.Completed
                 ):
                     event_output = event.output
@@ -419,15 +626,33 @@ class ConsoleChannel(BaseChannel):
 
                 if obj == "response":
                     usage_data = self._extract_token_usage(session_id)
-                    if usage_data and hasattr(event, "usage"):
+                    if (
+                        runtime_projector is None
+                        and usage_data
+                        and hasattr(event, "usage")
+                    ):
                         setattr(event, "usage", usage_data)
 
-                data = self._serialize_event_for_sse(event)
-                yield f"data: {data}\n\n"
-                if obj == "response" and status == RunStatus.Completed:
-                    runtime_terminal_sent = True
+                if runtime_projector is not None:
+                    projected_events = runtime_projector.project(event)
+                    for projected in projected_events:
+                        data = json.dumps(projected, ensure_ascii=False)
+                        yield f"data: {data}\n\n"
+                    if runtime_projector.terminal_sent:
+                        if obj == "response":
+                            last_response = event
+                        break
+                else:
+                    data = self._serialize_event_for_sse(event)
+                    yield f"data: {data}\n\n"
+                    if obj == "response" and status == RunStatus.Completed:
+                        runtime_terminal_sent = True
 
-                if obj == "message" and status == RunStatus.Completed:
+                if (
+                    runtime_projector is None
+                    and obj == "message"
+                    and status == RunStatus.Completed
+                ):
                     media_message = await self._extract_media_message(event)
                     if media_message:
                         media_json = self._serialize_event_for_sse(
@@ -450,12 +675,19 @@ class ConsoleChannel(BaseChannel):
             err_msg = self._get_response_error_message(last_response)
             if err_msg:
                 self._print_error(err_msg)
+            if runtime_projector is not None:
+                for projected in runtime_projector.finish(
+                    success=not bool(err_msg),
+                ):
+                    data = json.dumps(projected, ensure_ascii=False)
+                    yield f"data: {data}\n\n"
             elif is_runtime_request and not runtime_terminal_sent:
-                yield (
-                    "data: "
-                    f"{json.dumps({'event': 'completed', 'chat_id': session_id}, ensure_ascii=False)}"
-                    "\n\n"
-                )
+                completed_payload = {
+                    "event": "completed",
+                    "chat_id": session_id,
+                }
+                data = json.dumps(completed_payload, ensure_ascii=False)
+                yield f"data: {data}\n\n"
 
             to_handle = request.user_id or ""
             if self._on_reply_sent:
@@ -472,16 +704,33 @@ class ConsoleChannel(BaseChannel):
             )
             err_msg = "附件读取失败"
             self._print_error(err_msg)
-            if is_runtime_request:
-                yield (
-                    "data: "
-                    f"{json.dumps({'event': 'failed', 'status': 'failed', 'chat_id': session_id, 'error': err_msg, 'reason_code': e.reason_code}, ensure_ascii=False)}"
-                    "\n\n"
-                )
+            if runtime_projector is not None:
+                for projected in runtime_projector.finish(
+                    success=False,
+                    message=err_msg,
+                ):
+                    data = json.dumps(projected, ensure_ascii=False)
+                    yield f"data: {data}\n\n"
+            elif is_runtime_request:
+                failed_payload = {
+                    "event": "failed",
+                    "status": "failed",
+                    "chat_id": session_id,
+                    "error": err_msg,
+                    "reason_code": e.reason_code,
+                }
+                data = json.dumps(failed_payload, ensure_ascii=False)
+                yield f"data: {data}\n\n"
         except Exception as e:
             logger.exception("console process/reply failed")
             err_msg = str(e).strip() or "An error occurred while processing."
             self._print_error(err_msg)
+            if runtime_projector is not None:
+                for projected in runtime_projector.finish(success=False):
+                    data = json.dumps(projected, ensure_ascii=False)
+                    yield f"data: {data}\n\n"
+        finally:
+            await _aclose_safely(events, "console nested event stream")
 
     async def consume_one(self, payload: Any) -> None:
         """Process one payload; drain stream_one (queue/terminal)."""

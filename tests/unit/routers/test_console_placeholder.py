@@ -23,7 +23,7 @@ from qwenpaw.app.routers.console import (
     _extract_session_and_payload,
     _is_runtime_native_payload,
     _is_runtime_terminal_sse,
-    _runtime_completed_sse,
+    _runtime_missing_terminal_sse,
     _stream_runtime_console_events,
 )
 
@@ -233,16 +233,29 @@ def test_extract_agent_request_payload_preserves_runtime_bank_context_in_meta() 
     assert native_payload["meta"]["runtime_constraints"] == request.runtime_constraints
 
 
-def test_runtime_native_payload_detection_accepts_channel_or_runtime_meta() -> None:
+def test_runtime_native_payload_detection_requires_bank_runtime_channel() -> None:
     assert _is_runtime_native_payload({"channel_id": "bank-runtime", "meta": {}})
-    assert _is_runtime_native_payload({"channel_id": "console", "meta": {"runtime_task_id": "task_001"}})
+    assert not _is_runtime_native_payload(
+        {"channel_id": "console", "meta": {"runtime_task_id": "task_001"}},
+    )
+    assert not _is_runtime_native_payload(
+        {"channel_id": "console", "meta": {"runtime_tool_gateway": {}}},
+    )
+    assert not _is_runtime_native_payload(
+        {"channel_id": "console", "meta": {"runtime_governance": {}}},
+    )
     assert not _is_runtime_native_payload({"channel_id": "console", "meta": {}})
 
 
-def test_runtime_completed_sse_is_terminal_for_runtime_adapter() -> None:
-    event = _runtime_completed_sse({"meta": {"session_id": "runtime-session-001"}})
+def test_runtime_missing_terminal_sse_is_safe_failure() -> None:
+    event = _runtime_missing_terminal_sse(
+        {"meta": {"session_id": "runtime-session-001"}},
+    )
 
-    assert event == 'data: {"event": "completed", "chat_id": "runtime-session-001"}\n\n'
+    assert event == (
+        'data: {"event": "answer.failed", "status": "failed", '
+        '"message": "回答生成失败"}\n\n'
+    )
     assert _is_runtime_terminal_sse(event)
     assert _is_runtime_terminal_sse('data: {"status": "completed", "object": "response"}\n\n')
     assert not _is_runtime_terminal_sse('data: {"status": "in_progress", "object": "response"}\n\n')
@@ -250,7 +263,7 @@ def test_runtime_completed_sse_is_terminal_for_runtime_adapter() -> None:
     assert not _is_runtime_terminal_sse('data: {"status": "completed", "object": "message", "type": "plugin_call_output"}\n\n')
 
 
-def test_runtime_console_events_append_completed_when_upstream_has_no_terminal() -> None:
+def test_runtime_console_events_fail_when_upstream_has_no_terminal() -> None:
     native_payload = {
         "channel_id": "bank-runtime",
         "sender_id": "u001",
@@ -267,11 +280,12 @@ def test_runtime_console_events_append_completed_when_upstream_has_no_terminal()
     assert channel.seen_payload == native_payload
     assert events == [
         'data: {"event": "message", "delta": "处理中"}\n\n',
-        'data: {"event": "completed", "chat_id": "runtime-session-001"}\n\n',
+        'data: {"event": "answer.failed", "status": "failed", '
+        '"message": "回答生成失败"}\n\n',
     ]
 
 
-def test_runtime_console_events_append_completed_after_content_completed_only() -> None:
+def test_runtime_console_events_fail_after_content_completed_only() -> None:
     native_payload = {
         "channel_id": "bank-runtime",
         "sender_id": "u001",
@@ -288,7 +302,8 @@ def test_runtime_console_events_append_completed_after_content_completed_only() 
 
     assert events == [
         content_completed,
-        'data: {"event": "completed", "chat_id": "runtime-session-001"}\n\n',
+        'data: {"event": "answer.failed", "status": "failed", '
+        '"message": "回答生成失败"}\n\n',
     ]
 
 
@@ -528,10 +543,9 @@ async def test_runtime_console_rejects_invalid_task_binding_before_channel(
     assert len(events) == 1
     payload = json.loads(events[0].removeprefix("data: ").strip())
     assert payload == {
-        "event": "failed",
+        "event": "answer.failed",
         "status": "failed",
-        "error": "Runtime sandbox context is invalid.",
-        "reason_code": "SANDBOX_CONTEXT_INVALID",
+        "message": "回答生成失败",
     }
 
 
