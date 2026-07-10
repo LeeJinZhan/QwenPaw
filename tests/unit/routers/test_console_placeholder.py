@@ -11,6 +11,10 @@ labels like ``{"type": ...`` in the session drawer (regression for PR #3).
 from __future__ import annotations
 
 import asyncio
+import json
+import time
+
+import pytest
 
 from agentscope_runtime.engine.schemas.agent_schemas import AgentRequest
 
@@ -40,6 +44,22 @@ class _RuntimeConsoleChannel:
         self.seen_payload = payload
         for event in self.events:
             yield event
+
+
+class _RaisingRuntimeConsoleChannel:
+    def __init__(self, error: BaseException) -> None:
+        self.error = error
+
+    async def stream_one(self, _payload):
+        if False:
+            yield ""
+        raise self.error
+
+
+class _CancellableRuntimeConsoleChannel:
+    async def stream_one(self, _payload):
+        yield 'data: {"event": "message"}\n\n'
+        await asyncio.Event().wait()
 
 
 def test_no_content_parts_returns_new_chat() -> None:
@@ -234,7 +254,11 @@ def test_runtime_console_events_append_completed_when_upstream_has_no_terminal()
     native_payload = {
         "channel_id": "bank-runtime",
         "sender_id": "u001",
-        "meta": {"session_id": "runtime-session-001", "runtime_task_id": "task-001"},
+        "meta": {
+            "session_id": "runtime-session-001",
+            "runtime_task_id": "task-001",
+            "sandbox_context": {"task_id": "task-001"},
+        },
     }
     channel = _RuntimeConsoleChannel(['data: {"event": "message", "delta": "处理中"}\n\n'])
 
@@ -251,7 +275,11 @@ def test_runtime_console_events_append_completed_after_content_completed_only() 
     native_payload = {
         "channel_id": "bank-runtime",
         "sender_id": "u001",
-        "meta": {"session_id": "runtime-session-001", "runtime_task_id": "task-001"},
+        "meta": {
+            "session_id": "runtime-session-001",
+            "runtime_task_id": "task-001",
+            "sandbox_context": {"task_id": "task-001"},
+        },
     }
     content_completed = 'data: {"object": "content", "status": "completed", "type": "text"}\n\n'
     channel = _RuntimeConsoleChannel([content_completed])
@@ -268,7 +296,11 @@ def test_runtime_console_events_do_not_duplicate_terminal() -> None:
     native_payload = {
         "channel_id": "bank-runtime",
         "sender_id": "u001",
-        "meta": {"session_id": "runtime-session-001", "runtime_task_id": "task-001"},
+        "meta": {
+            "session_id": "runtime-session-001",
+            "runtime_task_id": "task-001",
+            "sandbox_context": {"task_id": "task-001"},
+        },
     }
     terminal = 'data: {"status": "completed", "object": "response"}\n\n'
     channel = _RuntimeConsoleChannel([terminal])
@@ -276,6 +308,322 @@ def test_runtime_console_events_do_not_duplicate_terminal() -> None:
     events = asyncio.run(_collect_runtime_events(channel, native_payload))
 
     assert events == [terminal]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "channel",
+    [
+        _RuntimeConsoleChannel(
+            ['data: {"status": "completed", "object": "response"}\n\n'],
+        ),
+        _RaisingRuntimeConsoleChannel(RuntimeError("failed")),
+        _RaisingRuntimeConsoleChannel(asyncio.TimeoutError()),
+    ],
+    ids=["success", "failure", "timeout"],
+)
+async def test_runtime_console_events_cleanup_task_on_terminal_paths(
+    monkeypatch,
+    channel,
+) -> None:
+    sandbox_module = __import__(
+        "qwenpaw.agents.tools.runtime_sandbox_oss",
+        fromlist=["_DEFAULT_TASK_ATTACHMENT_CACHE"],
+    )
+    cleaned: list[str] = []
+    monkeypatch.setattr(
+        sandbox_module._DEFAULT_TASK_ATTACHMENT_CACHE,
+        "cleanup_task",
+        lambda task_id: cleaned.append(task_id),
+    )
+    payload = {
+        "channel_id": "bank-runtime",
+        "meta": {
+            "runtime_task_id": "task-cleanup",
+            "sandbox_context": {"task_id": "task-cleanup"},
+        },
+    }
+
+    if isinstance(channel, _RuntimeConsoleChannel):
+        await _collect_runtime_events(channel, payload)
+    else:
+        with pytest.raises(type(channel.error)):
+            await _collect_runtime_events(channel, payload)
+
+    assert cleaned == ["task-cleanup"]
+
+
+@pytest.mark.asyncio
+async def test_runtime_console_events_cleanup_task_on_cancellation(monkeypatch) -> None:
+    sandbox_module = __import__(
+        "qwenpaw.agents.tools.runtime_sandbox_oss",
+        fromlist=["_DEFAULT_TASK_ATTACHMENT_CACHE"],
+    )
+    cleaned: list[str] = []
+    monkeypatch.setattr(
+        sandbox_module._DEFAULT_TASK_ATTACHMENT_CACHE,
+        "cleanup_task",
+        lambda task_id: cleaned.append(task_id),
+    )
+    payload = {
+        "channel_id": "bank-runtime",
+        "meta": {
+            "runtime_task_id": "task-cancel",
+            "sandbox_context": {"task_id": "task-cancel"},
+        },
+    }
+    stream = _stream_runtime_console_events(
+        _CancellableRuntimeConsoleChannel(),
+        payload,
+    )
+    assert await anext(stream) == 'data: {"event": "message"}\n\n'
+    pending = asyncio.create_task(anext(stream))
+    await asyncio.sleep(0)
+
+    pending.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await pending
+    await stream.aclose()
+
+    assert cleaned == ["task-cancel"]
+
+
+@pytest.mark.asyncio
+async def test_runtime_cancel_waits_for_queued_prepare_before_cleanup(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    sandbox_module = __import__(
+        "qwenpaw.agents.tools.runtime_sandbox_oss",
+        fromlist=["_DEFAULT_TASK_ATTACHMENT_CACHE"],
+    )
+    assert hasattr(sandbox_module, "run_task_io_in_thread")
+    cache = sandbox_module.TaskAttachmentCache(root=tmp_path)
+    submitted = asyncio.Event()
+    release_worker = asyncio.Event()
+
+    class StreamingClient:
+        def authorize_file(self, file_id, _sandbox_context):
+            return {
+                "file_id": file_id,
+                "storage_provider": "local",
+                "object_key": f"runtime/{file_id}",
+                "content_type": "text/plain",
+                "size_bytes": 6,
+                "original_name": "queued.txt",
+            }
+
+        def stream_authorized_locator(self, _locator, write_chunk):
+            write_chunk(b"queued")
+            return "text/plain"
+
+    async def delayed_thread_submission(function, *args, **kwargs):
+        submitted.set()
+        await release_worker.wait()
+        return function(*args, **kwargs)
+
+    class QueuedPrepareChannel:
+        async def stream_one(self, _payload):
+            await sandbox_module.run_task_io_in_thread(
+                cache,
+                "task-queued",
+                cache.prepare_file,
+                "file-queued",
+                {"task_id": "task-queued", "context_id": "ctx-queued"},
+                client=StreamingClient(),
+                file_id="file-queued",
+            )
+            yield 'data: {"status": "completed", "object": "response"}\n\n'
+
+    monkeypatch.setattr(
+        sandbox_module,
+        "_DEFAULT_TASK_ATTACHMENT_CACHE",
+        cache,
+    )
+    monkeypatch.setattr(
+        sandbox_module,
+        "_run_in_thread",
+        delayed_thread_submission,
+        raising=False,
+    )
+    stream = _stream_runtime_console_events(
+        QueuedPrepareChannel(),
+        {
+            "channel_id": "bank-runtime",
+            "meta": {
+                "runtime_task_id": "task-queued",
+                "sandbox_context": {"task_id": "task-queued"},
+            },
+        },
+    )
+    pending = asyncio.create_task(anext(stream))
+    await asyncio.wait_for(submitted.wait(), timeout=1)
+    assert cache._io_reservations == {"task-queued": 2}
+
+    pending.cancel()
+    await asyncio.sleep(0.05)
+    assert pending.done() is False
+    release_worker.set()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(pending, timeout=2)
+    await stream.aclose()
+
+    assert not list(tmp_path.rglob("queued.txt"))
+    assert cache._prepared == {}
+    assert cache._io_reservations == {}
+    assert cache._download_locks == {}
+    assert cache._batch_locks == {}
+    assert cache._batch_lock_users == {}
+    assert cache._cleaning_tasks == set()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("meta", "expected_cleaned"),
+    [
+        ({"sandbox_context": {"task_id": "task-actual"}}, {"task-actual"}),
+        ({"runtime_task_id": "task-declared"}, {"task-declared"}),
+        (
+            {
+                "runtime_task_id": "task-declared",
+                "sandbox_context": {"task_id": "task-actual"},
+            },
+            {"task-actual", "task-declared"},
+        ),
+    ],
+    ids=["missing-runtime-task", "missing-sandbox-task", "mismatched-task"],
+)
+async def test_runtime_console_rejects_invalid_task_binding_before_channel(
+    monkeypatch,
+    meta,
+    expected_cleaned,
+) -> None:
+    sandbox_module = __import__(
+        "qwenpaw.agents.tools.runtime_sandbox_oss",
+        fromlist=["_DEFAULT_TASK_ATTACHMENT_CACHE"],
+    )
+    cleaned: list[str] = []
+    monkeypatch.setattr(
+        sandbox_module._DEFAULT_TASK_ATTACHMENT_CACHE,
+        "cleanup_task",
+        lambda task_id: cleaned.append(task_id),
+    )
+
+    class UnexpectedChannel:
+        def __init__(self) -> None:
+            self.called = False
+
+        async def stream_one(self, _payload):
+            self.called = True
+            yield 'data: {"status": "completed", "object": "response"}\n\n'
+
+    channel = UnexpectedChannel()
+    events = await _collect_runtime_events(
+        channel,
+        {"channel_id": "bank-runtime", "meta": meta},
+    )
+
+    assert channel.called is False
+    assert set(cleaned) == expected_cleaned
+    assert len(events) == 1
+    payload = json.loads(events[0].removeprefix("data: ").strip())
+    assert payload == {
+        "event": "failed",
+        "status": "failed",
+        "error": "Runtime sandbox context is invalid.",
+        "reason_code": "SANDBOX_CONTEXT_INVALID",
+    }
+
+
+@pytest.mark.asyncio
+async def test_runtime_console_holds_task_reservation_for_full_model_stream(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    sandbox_module = __import__(
+        "qwenpaw.agents.tools.runtime_sandbox_oss",
+        fromlist=["_DEFAULT_TASK_ATTACHMENT_CACHE"],
+    )
+    cache = sandbox_module.TaskAttachmentCache(root=tmp_path, ttl_seconds=1)
+    now = time.time()
+    marker = sandbox_module.TaskMarker(
+        task_id="task-active",
+        sandbox_context_id="ctx-active",
+        created_at_epoch=now - 10,
+        expires_at_epoch=now - 1,
+    )
+    cache._ensure_private_task_root("task-active")
+    cache._write_task_marker(marker)
+    cache._markers["task-active"] = marker
+    task_root = cache._task_root("task-active")
+    observed_reservations: list[int] = []
+    active_root_seen: list[bool] = []
+    cleanup_reservations: list[int] = []
+    original_cleanup = cache.cleanup_task
+
+    def observe_cleanup(task_id: str) -> None:
+        cleanup_reservations.append(cache._io_reservations.get(task_id, 0))
+        original_cleanup(task_id)
+
+    cache.cleanup_task = observe_cleanup
+    monkeypatch.setattr(
+        sandbox_module,
+        "_DEFAULT_TASK_ATTACHMENT_CACHE",
+        cache,
+    )
+
+    class ActiveModelChannel:
+        async def stream_one(self, _payload):
+            observed_reservations.append(
+                cache._io_reservations.get("task-active", 0),
+            )
+            cache.sweep_expired(now_epoch=now + 1)
+            active_root_seen.append(task_root.is_dir())
+            yield 'data: {"status": "completed", "object": "response"}\n\n'
+
+    events = await _collect_runtime_events(
+        ActiveModelChannel(),
+        {
+            "channel_id": "bank-runtime",
+            "meta": {
+                "runtime_task_id": "task-active",
+                "sandbox_context": {"task_id": "task-active"},
+            },
+        },
+    )
+
+    assert len(events) == 1
+    assert observed_reservations == [1]
+    assert active_root_seen == [True]
+    assert cleanup_reservations == [0]
+    assert task_root.exists() is False
+    assert cache._io_reservations == {}
+
+
+@pytest.mark.asyncio
+async def test_non_runtime_console_events_do_not_cleanup_task(monkeypatch) -> None:
+    sandbox_module = __import__(
+        "qwenpaw.agents.tools.runtime_sandbox_oss",
+        fromlist=["_DEFAULT_TASK_ATTACHMENT_CACHE"],
+    )
+    cleaned: list[str] = []
+    monkeypatch.setattr(
+        sandbox_module._DEFAULT_TASK_ATTACHMENT_CACHE,
+        "cleanup_task",
+        lambda task_id: cleaned.append(task_id),
+    )
+
+    channel = _RuntimeConsoleChannel([])
+    await _collect_runtime_events(
+        channel,
+        {
+            "channel_id": "console",
+            "meta": {"runtime_task_id": "task-console-metadata"},
+        },
+    )
+
+    assert channel.seen_payload is not None
+    assert cleaned == []
 
 
 async def _collect_runtime_events(channel, native_payload: dict) -> list[str]:

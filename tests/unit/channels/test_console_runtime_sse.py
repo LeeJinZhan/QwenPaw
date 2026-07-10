@@ -152,6 +152,7 @@ async def test_runtime_attachment_preparation_failure_streams_one_failed_termina
         "meta": {
             "session_id": "runtime-session-failed",
             "runtime_task_id": "task-runtime-failed",
+            "sandbox_context": {"task_id": "task-runtime-failed"},
         },
     }
 
@@ -224,6 +225,7 @@ async def test_invalid_runtime_attachment_file_id_streams_failed_not_completed(
         "meta": {
             "session_id": "runtime-session-invalid",
             "runtime_task_id": "task-runtime-invalid",
+            "sandbox_context": {"task_id": "task-runtime-invalid"},
         },
     }
 
@@ -253,6 +255,7 @@ async def test_runtime_attachment_filesystem_error_streams_failed_not_completed(
     monkeypatch,
 ) -> None:
     media_processing_called = False
+    cleaned: list[str] = []
     channel = ConsoleChannel(
         process=lambda _request: None,
         enabled=True,
@@ -271,8 +274,18 @@ async def test_runtime_attachment_filesystem_error_streams_failed_not_completed(
     )
 
     class FilesystemFailingCache:
+        class Reservation:
+            def release(self) -> None:
+                pass
+
+        def reserve_task_io(self, *_args, **_kwargs):
+            return self.Reservation()
+
         def prepare_files(self, *_args, **_kwargs):
             raise OSError("temporary attachment directory is unavailable")
+
+        def cleanup_task(self, task_id: str) -> None:
+            cleaned.append(task_id)
 
     async def observe_media_processing(_msg):
         nonlocal media_processing_called
@@ -304,6 +317,7 @@ async def test_runtime_attachment_filesystem_error_streams_failed_not_completed(
         "meta": {
             "session_id": "runtime-session-broken",
             "runtime_task_id": "task-runtime-broken",
+            "sandbox_context": {"task_id": "task-runtime-broken"},
         },
     }
 
@@ -321,6 +335,7 @@ async def test_runtime_attachment_filesystem_error_streams_failed_not_completed(
     ]
 
     assert media_processing_called is False
+    assert cleaned == ["task-runtime-broken"]
     assert len(payloads) == 1
     assert payloads[0]["event"] == "failed"
     assert payloads[0]["reason_code"] == "ATTACHMENT_READ_FAILED"

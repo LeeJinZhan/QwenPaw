@@ -2,6 +2,7 @@
 """Tests for the Runtime Tool Gateway bridge used by bank-runtime calls."""
 from __future__ import annotations
 
+import asyncio
 import importlib
 import json
 from types import SimpleNamespace
@@ -9,7 +10,10 @@ from types import SimpleNamespace
 import pytest
 
 from qwenpaw.config.context import (
+    get_current_runtime_discovered_file_ids,
+    reset_current_runtime_discovered_file_ids,
     set_current_runtime_attachments_manifest,
+    set_current_runtime_discovered_file_ids,
     set_current_runtime_sandbox_context,
     set_current_runtime_tool_gateway,
 )
@@ -30,7 +34,9 @@ def reset_runtime_tool_gateway_context():
     set_current_runtime_tool_gateway(None)
     set_current_runtime_attachments_manifest(None)
     set_current_runtime_sandbox_context(None)
+    discovered_token = set_current_runtime_discovered_file_ids(frozenset())
     yield
+    reset_current_runtime_discovered_file_ids(discovered_token)
     set_current_runtime_tool_gateway(None)
     set_current_runtime_attachments_manifest(None)
     set_current_runtime_sandbox_context(None)
@@ -44,6 +50,229 @@ def _text(response) -> str:
         else:
             texts.append(str(getattr(part, "text", "")))
     return "\n".join(texts)
+
+
+def test_runtime_sandbox_files_search_tool_is_available() -> None:
+    tools_module = importlib.import_module("qwenpaw.agents.tools")
+
+    assert hasattr(tools_module, "runtime_sandbox_files_search")
+
+
+def test_runtime_discovered_file_ids_are_request_local() -> None:
+    context_module = importlib.import_module("qwenpaw.config.context")
+
+    assert hasattr(
+        context_module,
+        "get_current_runtime_discovered_file_ids",
+    )
+    assert hasattr(
+        context_module,
+        "set_current_runtime_discovered_file_ids",
+    )
+
+
+@pytest.mark.asyncio
+async def test_runtime_sandbox_search_sends_only_signed_scope_and_safe_filters(
+    monkeypatch,
+) -> None:
+    module = importlib.import_module(
+        "qwenpaw.agents.tools.runtime_sandbox_files",
+    )
+    captured: dict[str, object] = {}
+    sandbox_context = {
+        "context_id": "ctx_001",
+        "task_id": "task_001",
+        "user_id": "u001",
+        "assistant_id": "assistant_a",
+        "scope": {"file_scope": "current_user_current_assistant"},
+        "signature": "signed",
+    }
+
+    class FakeSandboxedOssClient:
+        def search_files(self, query, content_types, limit, request_context):
+            captured.update(
+                query=query,
+                content_types=content_types,
+                limit=limit,
+                sandbox_context=request_context,
+            )
+            return {
+                "files": [
+                    {
+                        "file_id": "file_history",
+                        "display_name": "history.md",
+                        "content_type": "text/markdown",
+                        "size_bytes": 128,
+                        "created_at": "2026-07-10T10:00:00+08:00",
+                        "source": "conversation",
+                        "readable": True,
+                        "status_label": "available",
+                        "object_key": "must/not/leak",
+                        "bucket": "must-not-leak",
+                        "user_id": "must-not-leak",
+                        "assistant_id": "must-not-leak",
+                    },
+                ],
+                "next_cursor": "private-cursor",
+            }
+
+    monkeypatch.setattr(
+        module,
+        "SandboxedOssClient",
+        FakeSandboxedOssClient,
+        raising=False,
+    )
+    set_current_runtime_sandbox_context(sandbox_context)
+
+    response = await module.runtime_sandbox_files_search(
+        " history ",
+        ["text/markdown", "text/markdown"],
+        500,
+    )
+    rendered = _text(response)
+
+    assert rendered.startswith("{")
+    payload = json.loads(rendered)
+    assert captured == {
+        "query": "history",
+        "content_types": ["text/markdown"],
+        "limit": 50,
+        "sandbox_context": sandbox_context,
+    }
+    assert payload == {
+        "files": [
+            {
+                "file_id": "file_history",
+                "display_name": "history.md",
+                "content_type": "text/markdown",
+                "size_bytes": 128,
+                "created_at": "2026-07-10T10:00:00+08:00",
+                "source": "conversation",
+                "readable": True,
+                "status_label": "available",
+            },
+        ],
+    }
+    assert get_current_runtime_discovered_file_ids() == frozenset(
+        {"file_history"},
+    )
+    assert "object_key" not in rendered
+    assert "bucket" not in rendered
+    assert "private-cursor" not in rendered
+
+
+@pytest.mark.asyncio
+async def test_runtime_sandbox_search_unions_discovered_ids(monkeypatch) -> None:
+    module = importlib.import_module(
+        "qwenpaw.agents.tools.runtime_sandbox_files",
+    )
+    results = iter(
+        [
+            {"files": [{"file_id": "file_a", "readable": True}]},
+            {"files": [{"file_id": "file_b", "readable": True}]},
+        ],
+    )
+
+    class FakeSandboxedOssClient:
+        def search_files(self, *_args):
+            return next(results)
+
+    monkeypatch.setattr(
+        module,
+        "SandboxedOssClient",
+        FakeSandboxedOssClient,
+        raising=False,
+    )
+    set_current_runtime_sandbox_context(
+        {"context_id": "ctx_001", "task_id": "task_001", "signature": "signed"},
+    )
+
+    await module.runtime_sandbox_files_search("a")
+    await module.runtime_sandbox_files_search("b")
+
+    assert get_current_runtime_discovered_file_ids() == frozenset(
+        {"file_a", "file_b"},
+    )
+
+
+@pytest.mark.asyncio
+async def test_runtime_sandbox_search_does_not_allowlist_unreadable_file(
+    monkeypatch,
+) -> None:
+    search_module = importlib.import_module(
+        "qwenpaw.agents.tools.runtime_sandbox_files",
+    )
+    read_module = importlib.import_module(
+        "qwenpaw.agents.tools.runtime_attachment_read",
+    )
+    download_called = False
+
+    class FakeSearchClient:
+        def search_files(self, *_args):
+            return {
+                "files": [
+                    {
+                        "file_id": "file_denied",
+                        "display_name": "denied.md",
+                        "content_type": "text/markdown",
+                        "size_bytes": 12,
+                        "created_at": "2026-07-10T10:00:00+08:00",
+                        "source": "assistant_workspace",
+                        "readable": False,
+                        "status_label": "不可读取",
+                    },
+                ],
+            }
+
+    class FailingReadClient:
+        def read_file(self, *_args, **_kwargs):
+            nonlocal download_called
+            download_called = True
+            raise AssertionError("unreadable search results must stay denied")
+
+    monkeypatch.setattr(search_module, "SandboxedOssClient", FakeSearchClient)
+    monkeypatch.setattr(read_module, "SandboxedOssClient", FailingReadClient)
+    set_current_runtime_sandbox_context(
+        {"context_id": "ctx_001", "task_id": "task_001", "signature": "signed"},
+    )
+    set_current_runtime_attachments_manifest([])
+
+    search_response = await search_module.runtime_sandbox_files_search("denied")
+    search_payload = json.loads(_text(search_response))
+    read_response = await read_module.runtime_attachment_read("file_denied")
+
+    assert search_payload["files"][0]["status_label"] == "不可读取"
+    assert search_payload["files"][0]["readable"] is False
+    assert get_current_runtime_discovered_file_ids() == frozenset()
+    assert download_called is False
+    assert "not available" in _text(read_response)
+
+
+@pytest.mark.asyncio
+async def test_agent_reply_clears_request_discovered_file_ids(monkeypatch) -> None:
+    del monkeypatch
+    observed: list[frozenset[str]] = []
+
+    async def fake_reply(msg=None, structured_model=None):
+        del msg, structured_model
+        observed.append(get_current_runtime_discovered_file_ids())
+        set_current_runtime_discovered_file_ids({"file_discovered"})
+        return "done"
+
+    fake_agent = SimpleNamespace(_reply_with_request_context=fake_reply)
+    outer_token = set_current_runtime_discovered_file_ids({"outer"})
+    try:
+        reply_impl = QwenPawAgent.reply
+        while hasattr(reply_impl, "__wrapped__"):
+            reply_impl = reply_impl.__wrapped__
+        result = await reply_impl(fake_agent, None)
+        restored = get_current_runtime_discovered_file_ids()
+    finally:
+        reset_current_runtime_discovered_file_ids(outer_token)
+
+    assert result == "done"
+    assert observed == [frozenset()]
+    assert restored == frozenset({"outer"})
 
 
 def test_build_runtime_tool_gateway_context_guides_controlled_tool_usage() -> None:
@@ -61,6 +290,7 @@ def test_build_runtime_tool_gateway_context_guides_controlled_tool_usage() -> No
             "attachments_manifest": [
                 {
                     "file_id": "file_001",
+                    "source": "current_task",
                     "original_name": "客户材料.md",
                     "content_type": "text/markdown",
                     "size_bytes": 128,
@@ -86,6 +316,11 @@ def test_build_runtime_tool_gateway_context_guides_controlled_tool_usage() -> No
     assert "Do not use native shell" in context
     assert "memory_search" in context
     assert "runtime_attachment_read" in context
+    assert "runtime_sandbox_files_search" in context
+    assert "优先使用本次任务已附带的文件" in context
+    assert "只在当前文件不足以完成请求时" in context
+    assert "只能读取搜索结果返回的 file_id" in context
+    assert "不得构造路径或对象键" in context
     assert "file_001" in context
     assert "客户材料.md" in context
     assert "read_url" not in context
@@ -122,6 +357,7 @@ def test_runtime_gateway_enabled_registers_only_gateway_and_attachment_tool() ->
         "attachments_manifest": [
             {
                 "file_id": "file_001",
+                "source": "current_task",
                 "original_name": "客户材料.md",
                 "access_mode": "sandbox_oss",
             }
@@ -143,6 +379,7 @@ def test_runtime_gateway_enabled_registers_only_gateway_and_attachment_tool() ->
 
     assert "runtime_tool_gateway" in toolkit.tools
     assert "runtime_attachment_read" in toolkit.tools
+    assert "runtime_sandbox_files_search" in toolkit.tools
     assert "get_current_time" not in toolkit.tools
     assert "read_file" not in toolkit.tools
     assert "execute_shell_command" not in toolkit.tools
@@ -176,6 +413,37 @@ def test_runtime_gateway_does_not_register_attachment_tool_without_sandbox_conte
 
     assert "runtime_tool_gateway" in toolkit.tools
     assert "runtime_attachment_read" not in toolkit.tools
+    assert "runtime_sandbox_files_search" not in toolkit.tools
+
+
+def test_runtime_gateway_registers_sandbox_tools_without_current_task_files() -> None:
+    fake_agent = SimpleNamespace()
+    fake_agent._agent_config = SimpleNamespace(
+        tools=SimpleNamespace(builtin_tools={}),
+    )
+    fake_agent._request_context = {
+        "runtime_tool_gateway": {
+            "base_url": "http://127.0.0.1:8765",
+            "endpoint": "/runtime/v1/tool-calls",
+            "task_id": "task_001",
+            "allowed_tools": [],
+        },
+        "attachments_manifest": [],
+        "sandbox_context": {
+            "context_id": "ctx_001",
+            "task_id": "task_001",
+            "user_id": "u001",
+            "assistant_id": "general_assistant",
+            "signature": "signed",
+        },
+    }
+    fake_agent._runtime_tool_gateway_enabled = lambda: True
+    fake_agent._register_coding_mode_tools = lambda *_, **__: None
+
+    toolkit = QwenPawAgent._create_toolkit(fake_agent, effective_skills=[])
+
+    assert "runtime_sandbox_files_search" in toolkit.tools
+    assert "runtime_attachment_read" in toolkit.tools
 
 
 def test_runtime_gateway_empty_allowlist_still_disables_native_tools() -> None:
@@ -426,7 +694,10 @@ async def test_runtime_attachment_read_fetches_only_manifest_file_id(
     captured: dict[str, object] = {}
     local_path = tmp_path / "customer.md"
 
-    class FakeTaskAttachmentCache:
+    class FakeTaskAttachmentCache(sandbox_module.TaskAttachmentCache):
+        def __init__(self):
+            super().__init__(root=tmp_path / "cache")
+
         def prepare_file(self, file_id: str, sandbox_context: dict, *, client):
             captured["file_id"] = file_id
             captured["sandbox_context"] = sandbox_context
@@ -463,6 +734,7 @@ async def test_runtime_attachment_read_fetches_only_manifest_file_id(
                 "original_name": "客户材料.md",
                 "content_type": "text/markdown",
                 "size_bytes": 22,
+                "source": "current_task",
                 "access_mode": "sandbox_oss",
                 "expires_at": "2026-06-23T12:10:00+08:00",
             }
@@ -522,6 +794,7 @@ async def test_runtime_attachment_read_requests_only_limit_plus_one(
         [
             {
                 "file_id": "file_001",
+                "source": "current_task",
                 "original_name": "large.txt",
                 "content_type": "text/plain",
                 "access_mode": "sandbox_oss",
@@ -541,6 +814,165 @@ async def test_runtime_attachment_read_requests_only_limit_plus_one(
     assert payload["preview_bytes"] == 12
     assert payload["size_bytes"] == 100
     assert payload["truncated"] is True
+
+
+@pytest.mark.asyncio
+async def test_runtime_attachment_read_reserves_before_thread_submission(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    module = importlib.import_module("qwenpaw.agents.tools.runtime_attachment_read")
+    sandbox_module = importlib.import_module(
+        "qwenpaw.agents.tools.runtime_sandbox_oss",
+    )
+    cache = sandbox_module.TaskAttachmentCache(root=tmp_path)
+    observed: list[int] = []
+
+    class PrefixSandboxedOssClient:
+        def read_file(self, *_args, **_kwargs):
+            return module.SandboxedObjectContent(
+                content=b"preview",
+                content_type="text/plain",
+                size_bytes=7,
+            )
+
+    async def observe_thread_submission(function, *args, **kwargs):
+        observed.append(cache._io_reservations.get("task_read", 0))
+        return function(*args, **kwargs)
+
+    monkeypatch.setattr(module, "SandboxedOssClient", PrefixSandboxedOssClient)
+    monkeypatch.setattr(
+        sandbox_module,
+        "_DEFAULT_TASK_ATTACHMENT_CACHE",
+        cache,
+    )
+    monkeypatch.setattr(
+        sandbox_module,
+        "_run_in_thread",
+        observe_thread_submission,
+        raising=False,
+    )
+    set_current_runtime_sandbox_context(
+        {"task_id": "task_read", "context_id": "ctx_read", "signature": "signed"},
+    )
+    set_current_runtime_attachments_manifest(
+        [
+            {
+                "file_id": "file_read",
+                "source": "current_task",
+                "access_mode": "sandbox_oss",
+            },
+        ],
+    )
+
+    response = await module.runtime_attachment_read("file_read")
+
+    assert "preview" in _text(response)
+    assert observed == [1]
+    assert cache._io_reservations == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "read_error",
+    [
+        FileNotFoundError("/private/runtime/task_secret/customer.txt"),
+        PermissionError("/private/runtime/task_secret/customer.txt"),
+    ],
+    ids=["missing", "permission-denied"],
+)
+async def test_runtime_attachment_read_hides_local_paths_from_read_errors(
+    monkeypatch,
+    read_error,
+) -> None:
+    module = importlib.import_module("qwenpaw.agents.tools.runtime_attachment_read")
+
+    class FailingSandboxedOssClient:
+        def read_file(self, *_args, **_kwargs):
+            raise read_error
+
+    monkeypatch.setattr(module, "SandboxedOssClient", FailingSandboxedOssClient)
+    set_current_runtime_sandbox_context(
+        {"task_id": "task_read", "context_id": "ctx_read", "signature": "signed"},
+    )
+    set_current_runtime_attachments_manifest(
+        [
+            {
+                "file_id": "file_read",
+                "source": "current_task",
+                "access_mode": "sandbox_oss",
+            },
+        ],
+    )
+
+    response = await module.runtime_attachment_read("file_read")
+    text = _text(response)
+
+    assert text == "Runtime attachment could not be read."
+    assert "/private/" not in text
+    assert "customer.txt" not in text
+
+
+@pytest.mark.asyncio
+async def test_runtime_attachment_read_hides_post_read_processing_errors(
+    monkeypatch,
+) -> None:
+    module = importlib.import_module("qwenpaw.agents.tools.runtime_attachment_read")
+
+    class UnsafeContent:
+        @property
+        def content(self):
+            raise PermissionError("/private/runtime/task_secret/customer.txt")
+
+    class FailingSandboxedOssClient:
+        def read_file(self, *_args, **_kwargs):
+            return UnsafeContent()
+
+    monkeypatch.setattr(module, "SandboxedOssClient", FailingSandboxedOssClient)
+    set_current_runtime_sandbox_context(
+        {"task_id": "task_read", "context_id": "ctx_read", "signature": "signed"},
+    )
+    set_current_runtime_attachments_manifest(
+        [
+            {
+                "file_id": "file_read",
+                "source": "current_task",
+                "access_mode": "sandbox_oss",
+            },
+        ],
+    )
+
+    response = await module.runtime_attachment_read("file_read")
+
+    assert _text(response) == "Runtime attachment could not be read."
+
+
+@pytest.mark.asyncio
+async def test_runtime_attachment_read_does_not_swallow_cancelled_error(
+    monkeypatch,
+) -> None:
+    module = importlib.import_module("qwenpaw.agents.tools.runtime_attachment_read")
+
+    class CancelledSandboxedOssClient:
+        def read_file(self, *_args, **_kwargs):
+            raise asyncio.CancelledError()
+
+    monkeypatch.setattr(module, "SandboxedOssClient", CancelledSandboxedOssClient)
+    set_current_runtime_sandbox_context(
+        {"task_id": "task_read", "context_id": "ctx_read", "signature": "signed"},
+    )
+    set_current_runtime_attachments_manifest(
+        [
+            {
+                "file_id": "file_read",
+                "source": "current_task",
+                "access_mode": "sandbox_oss",
+            },
+        ],
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        await module.runtime_attachment_read("file_read")
 
 
 @pytest.mark.asyncio
@@ -564,6 +996,7 @@ async def test_runtime_attachment_read_rejects_unknown_file_without_downloading(
         [
             {
                 "file_id": "file_001",
+                "source": "current_task",
                 "access_mode": "sandbox_oss",
             }
         ]
@@ -574,6 +1007,121 @@ async def test_runtime_attachment_read_rejects_unknown_file_without_downloading(
     assert called is False
     assert "not available" in _text(response)
     assert "grant-token" not in _text(response)
+
+
+@pytest.mark.asyncio
+async def test_runtime_attachment_read_rejects_undiscovered_supplemental_manifest_entry(
+    monkeypatch,
+) -> None:
+    module = importlib.import_module("qwenpaw.agents.tools.runtime_attachment_read")
+    called = False
+
+    class FakeSandboxedOssClient:
+        def read_file(self, *_args, **_kwargs):
+            nonlocal called
+            called = True
+            raise AssertionError("supplemental files require request discovery")
+
+    monkeypatch.setattr(module, "SandboxedOssClient", FakeSandboxedOssClient)
+    set_current_runtime_sandbox_context(
+        {"task_id": "task_001", "context_id": "ctx_001", "signature": "signed"},
+    )
+    set_current_runtime_attachments_manifest(
+        [
+            {
+                "file_id": "file_history",
+                "source": "conversation",
+                "access_mode": "sandbox_oss",
+            },
+        ],
+    )
+    set_current_runtime_discovered_file_ids(frozenset())
+
+    response = await module.runtime_attachment_read("file_history")
+
+    assert called is False
+    assert "not available" in _text(response)
+
+
+@pytest.mark.asyncio
+async def test_runtime_attachment_read_accepts_discovered_file_and_reauthorizes(
+    monkeypatch,
+) -> None:
+    module = importlib.import_module("qwenpaw.agents.tools.runtime_attachment_read")
+    captured: dict[str, object] = {}
+
+    class FakeSandboxedOssClient:
+        def read_file(self, file_id, sandbox_context, *, max_bytes):
+            captured.update(
+                file_id=file_id,
+                sandbox_context=sandbox_context,
+                max_bytes=max_bytes,
+            )
+            return module.SandboxedObjectContent(
+                content=b"supplemental",
+                content_type="text/plain",
+                size_bytes=12,
+            )
+
+    monkeypatch.setattr(module, "SandboxedOssClient", FakeSandboxedOssClient)
+    sandbox_context = {
+        "task_id": "task_001",
+        "context_id": "ctx_001",
+        "user_id": "u001",
+        "assistant_id": "assistant_a",
+        "signature": "signed",
+    }
+    set_current_runtime_sandbox_context(sandbox_context)
+    set_current_runtime_attachments_manifest([])
+    set_current_runtime_discovered_file_ids({"file_history"})
+
+    response = await module.runtime_attachment_read("file_history", max_bytes=20)
+    payload = json.loads(_text(response))
+
+    assert captured == {
+        "file_id": "file_history",
+        "sandbox_context": sandbox_context,
+        "max_bytes": 21,
+    }
+    assert payload["file_id"] == "file_history"
+    assert payload["content_preview"] == "supplemental"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "forged_file_id",
+    [
+        "file_unknown",
+        "../file_history",
+        "/tmp/file_history",
+        "https://oss.example/file_history",
+        "runtime/user/file_history",
+    ],
+)
+async def test_runtime_attachment_read_rejects_forged_file_id(
+    monkeypatch,
+    forged_file_id,
+) -> None:
+    module = importlib.import_module("qwenpaw.agents.tools.runtime_attachment_read")
+    called = False
+
+    class FakeSandboxedOssClient:
+        def read_file(self, *_args, **_kwargs):
+            nonlocal called
+            called = True
+            raise AssertionError("forged file IDs must not reach Runtime")
+
+    monkeypatch.setattr(module, "SandboxedOssClient", FakeSandboxedOssClient)
+    set_current_runtime_sandbox_context(
+        {"task_id": "task_001", "context_id": "ctx_001", "signature": "signed"},
+    )
+    set_current_runtime_attachments_manifest([])
+    set_current_runtime_discovered_file_ids({"file_history"})
+
+    response = await module.runtime_attachment_read(forged_file_id)
+
+    assert called is False
+    assert "not available" in _text(response)
 
 
 @pytest.mark.asyncio
@@ -597,6 +1145,7 @@ async def test_runtime_attachment_read_requires_sandbox_context(monkeypatch) -> 
         [
             {
                 "file_id": "file_001",
+                "source": "current_task",
                 "access_mode": "sandbox_oss",
             }
         ]

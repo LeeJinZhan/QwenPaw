@@ -56,6 +56,7 @@ from .tools import (
     materialize_skill,
     read_file,
     runtime_attachment_read,
+    runtime_sandbox_files_search,
     runtime_tool_gateway,
     send_file_to_user,
     set_user_timezone,
@@ -145,12 +146,15 @@ def _build_runtime_attachments_context(
     """Render safe Runtime attachment hints without grant URLs or tokens."""
     manifest = _runtime_attachments_manifest(request_context)
     sandbox_context = request_context.get("sandbox_context")
-    if not manifest or not isinstance(sandbox_context, dict):
+    if not isinstance(sandbox_context, dict):
         return []
     lines = [
-        "- Runtime has authorized uploaded attachments for this sandbox. "
-        "Use only `runtime_attachment_read(file_id=...)` to "
-        "read them.",
+        "- 优先使用本次任务已附带的文件。只在当前文件不足以完成请求时，",
+        "  才查找当前会话或当前用户+助手工作区的补充文件。",
+        "- 只能读取搜索结果返回的 file_id，不得构造路径或对象键。",
+        "- Use `runtime_sandbox_files_search` only for supplemental files, "
+        "then use `runtime_attachment_read(file_id=...)` with a returned "
+        "file_id.",
         "- Do not request, reveal, copy, or summarize Runtime attachment "
         "URLs, headers, tokens, object keys, storage locations, credentials, or "
         "local paths.",
@@ -190,7 +194,7 @@ def _runtime_attachments_manifest(
 
 
 def _runtime_attachments_available(request_context: dict[str, Any]) -> bool:
-    return bool(_runtime_attachments_manifest(request_context)) and isinstance(
+    return isinstance(
         request_context.get("sandbox_context"),
         dict,
     )
@@ -222,14 +226,24 @@ async def _append_runtime_attachment_content_parts(
             file_ids[0],
             "SANDBOX_CONTEXT_INVALID",
         )
+    task_id = str(sandbox_context.get("task_id") or "").strip()
+    if not task_id:
+        raise runtime_sandbox_oss.RuntimeAttachmentPreparationError(
+            file_ids[0],
+            "SANDBOX_CONTEXT_INVALID",
+        )
     target = msg[-1] if isinstance(msg, list) and msg else msg
     if not isinstance(target, Msg):
         return msg
     try:
-        prepared_files = await asyncio.to_thread(
-            runtime_sandbox_oss._DEFAULT_TASK_ATTACHMENT_CACHE.prepare_files,
+        cache = runtime_sandbox_oss._DEFAULT_TASK_ATTACHMENT_CACHE
+        prepared_files = await runtime_sandbox_oss.run_task_io_in_thread(
+            cache,
+            task_id,
+            cache.prepare_files,
             file_ids,
             sandbox_context,
+            file_id=file_ids[0],
         )
     except runtime_sandbox_oss.RuntimeAttachmentPreparationError:
         raise
@@ -462,6 +476,7 @@ class QwenPawAgent(CodingModeMixin, ToolGuardMixin, ReActAgent):
         )
         if runtime_attachment_available:
             runtime_allowed_native_tools.add("runtime_attachment_read")
+            runtime_allowed_native_tools.add("runtime_sandbox_files_search")
 
         # Map of tool functions (hardcoded builtin tools)
         tool_functions = {
@@ -484,6 +499,11 @@ class QwenPawAgent(CodingModeMixin, ToolGuardMixin, ReActAgent):
             ),
             **(
                 {"runtime_attachment_read": runtime_attachment_read}
+                if runtime_gateway_enabled and runtime_attachment_available
+                else {}
+            ),
+            **(
+                {"runtime_sandbox_files_search": runtime_sandbox_files_search}
                 if runtime_gateway_enabled and runtime_attachment_available
                 else {}
             ),
@@ -1643,6 +1663,28 @@ class QwenPawAgent(CodingModeMixin, ToolGuardMixin, ReActAgent):
 
     # pylint: disable=protected-access
     async def reply(
+        self,
+        msg: Msg | list[Msg] | None = None,
+        structured_model: Type[BaseModel] | None = None,
+    ) -> Msg:
+        """Run one reply with an isolated supplemental-file discovery set."""
+        from ..config.context import (
+            reset_current_runtime_discovered_file_ids,
+            set_current_runtime_discovered_file_ids,
+        )
+
+        discovered_token = set_current_runtime_discovered_file_ids(
+            frozenset(),
+        )
+        try:
+            return await self._reply_with_request_context(
+                msg=msg,
+                structured_model=structured_model,
+            )
+        finally:
+            reset_current_runtime_discovered_file_ids(discovered_token)
+
+    async def _reply_with_request_context(
         self,
         msg: Msg | list[Msg] | None = None,
         structured_model: Type[BaseModel] | None = None,

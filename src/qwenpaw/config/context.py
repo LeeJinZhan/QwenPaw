@@ -5,7 +5,7 @@ This module provides a context variable to pass the agent's workspace
 directory to tool functions, allowing them to resolve relative paths
 correctly in a multi-agent environment.
 """
-from contextvars import ContextVar
+from contextvars import ContextVar, Token
 from pathlib import Path
 from typing import Any
 
@@ -185,3 +185,31 @@ def set_current_runtime_sandbox_context(
 ) -> None:
     """Set Runtime-issued sandbox context for the current request."""
     current_runtime_sandbox_context.set(sandbox_context)
+
+
+current_runtime_discovered_file_ids: ContextVar[frozenset[str]] = ContextVar(
+    "current_runtime_discovered_file_ids",
+    default=frozenset(),
+)
+
+
+def get_current_runtime_discovered_file_ids() -> frozenset[str]:
+    """Get file IDs discovered during the current Runtime request."""
+    return current_runtime_discovered_file_ids.get()
+
+
+def set_current_runtime_discovered_file_ids(
+    file_ids: frozenset[str] | set[str] | list[str] | tuple[str, ...],
+) -> Token:
+    """Replace request-local discovered file IDs and return a reset token."""
+    normalized = frozenset(
+        str(file_id).strip()
+        for file_id in file_ids
+        if str(file_id).strip()
+    )
+    return current_runtime_discovered_file_ids.set(normalized)
+
+
+def reset_current_runtime_discovered_file_ids(token: Token) -> None:
+    """Restore discovered file IDs to the value before this request."""
+    current_runtime_discovered_file_ids.reset(token)

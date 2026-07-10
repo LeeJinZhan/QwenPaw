@@ -182,17 +182,107 @@ def _runtime_completed_sse(native_payload: dict) -> str:
     return f"data: {json.dumps({'event': 'completed', 'chat_id': chat_id}, ensure_ascii=False)}\n\n"
 
 
+def _runtime_invalid_sandbox_sse() -> str:
+    return (
+        "data: "
+        f"{json.dumps({'event': 'failed', 'status': 'failed', 'error': 'Runtime sandbox context is invalid.', 'reason_code': 'SANDBOX_CONTEXT_INVALID'}, ensure_ascii=False)}"
+        "\n\n"
+    )
+
+
+def _runtime_task_ids(meta: dict) -> tuple[str, str]:
+    runtime_task_id = str(meta.get("runtime_task_id") or "").strip()
+    sandbox_context = meta.get("sandbox_context")
+    sandbox_task_id = (
+        str(sandbox_context.get("task_id") or "").strip()
+        if isinstance(sandbox_context, dict)
+        else ""
+    )
+    return runtime_task_id, sandbox_task_id
+
+
 async def _stream_runtime_console_events(
     console_channel,
     native_payload: dict,
 ) -> AsyncGenerator[str, None]:
-    terminal_seen = False
-    async for event_data in console_channel.stream_one(native_payload):
-        if _is_runtime_terminal_sse(event_data):
-            terminal_seen = True
-        yield event_data
-    if not terminal_seen:
-        yield _runtime_completed_sse(native_payload)
+    runtime_request = (
+        isinstance(native_payload, dict)
+        and native_payload.get("channel_id") == "bank-runtime"
+    )
+    meta = native_payload.get("meta") if isinstance(native_payload, dict) else {}
+    if not isinstance(meta, dict):
+        meta = {}
+    runtime_task_id, sandbox_task_id = _runtime_task_ids(meta)
+    if runtime_request and (
+        not runtime_task_id
+        or not sandbox_task_id
+        or runtime_task_id != sandbox_task_id
+    ):
+        await _cleanup_runtime_task_files_many(
+            sandbox_task_id,
+            runtime_task_id,
+        )
+        yield _runtime_invalid_sandbox_sse()
+        return
+
+    lifetime_reservation = None
+    if runtime_request:
+        from ...agents.tools import runtime_sandbox_oss
+
+        try:
+            lifetime_reservation = (
+                runtime_sandbox_oss._DEFAULT_TASK_ATTACHMENT_CACHE.reserve_task_io(
+                    runtime_task_id,
+                )
+            )
+        except Exception:
+            await _cleanup_runtime_task_files(runtime_task_id)
+            yield _runtime_invalid_sandbox_sse()
+            return
+    try:
+        terminal_seen = False
+        async for event_data in console_channel.stream_one(native_payload):
+            if _is_runtime_terminal_sse(event_data):
+                terminal_seen = True
+            yield event_data
+        if not terminal_seen:
+            yield _runtime_completed_sse(native_payload)
+    finally:
+        if lifetime_reservation is not None:
+            lifetime_reservation.release()
+        if runtime_request and runtime_task_id:
+            await _cleanup_runtime_task_files(runtime_task_id)
+
+
+async def _cleanup_runtime_task_files_many(*task_ids: str) -> None:
+    seen: set[str] = set()
+    for task_id in task_ids:
+        normalized = str(task_id or "").strip()
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        await _cleanup_runtime_task_files(normalized)
+
+
+async def _cleanup_runtime_task_files(runtime_task_id: str) -> None:
+    from ...agents.tools import runtime_sandbox_oss
+
+    cleanup = asyncio.create_task(
+        asyncio.to_thread(
+            runtime_sandbox_oss._DEFAULT_TASK_ATTACHMENT_CACHE.cleanup_task,
+            runtime_task_id,
+        ),
+    )
+    try:
+        await asyncio.shield(cleanup)
+    except asyncio.CancelledError:
+        await cleanup
+        raise
+    except Exception:
+        logger.exception(
+            "Failed to clean Runtime task attachment cache task_id=%s",
+            runtime_task_id,
+        )
 
 
 def _tail_text_file(
