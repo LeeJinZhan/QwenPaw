@@ -29,11 +29,11 @@ async def test_preflight_uses_task_gateway_context_and_returns_allow(monkeypatch
     client = RuntimeToolGatewayClient.from_request_context(_context())
     requests: list[tuple[str, dict, dict]] = []
 
-    async def fake_post(url, payload, headers):
+    async def fake_post(_self, url, payload, headers):
         requests.append((url, payload, headers))
         return {"tool_call_id": "tool_001", "decision": "allow", "status": "allowed", "trace_id": "trace_001"}
 
-    monkeypatch.setattr(client, "_post", fake_post)
+    monkeypatch.setattr(RuntimeToolGatewayClient, "_post", fake_post)
 
     result = await client.preflight("mcp.policy.search", {"query": "制度"})
 
@@ -62,7 +62,7 @@ async def test_result_retries_three_times_without_tool_output(monkeypatch):
     client = RuntimeToolGatewayClient.from_request_context(_context())
     attempts = 0
 
-    async def fake_post(_url, payload, _headers):
+    async def fake_post(_self, _url, payload, _headers):
         nonlocal attempts
         attempts += 1
         assert "output" not in payload
@@ -74,7 +74,7 @@ async def test_result_retries_three_times_without_tool_output(monkeypatch):
     async def no_sleep(_delay):
         return None
 
-    monkeypatch.setattr(client, "_post", fake_post)
+    monkeypatch.setattr(RuntimeToolGatewayClient, "_post", fake_post)
     monkeypatch.setattr("qwenpaw.agents.runtime_tool_gateway.asyncio.sleep", no_sleep)
 
     result = await client.report_result("tool_001", "completed", 42)
