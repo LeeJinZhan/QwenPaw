@@ -24,10 +24,10 @@ from qwenpaw.agents.react_agent import (
 )
 from qwenpaw.agents.tool_guard_mixin import ToolGuardMixin
 
-runtime_tool_gateway_module = importlib.import_module(
-    "qwenpaw.agents.tools.runtime_tool_gateway",
-)
-runtime_tool_gateway = runtime_tool_gateway_module.runtime_tool_gateway
+
+def _builtin_tool(enabled: bool) -> SimpleNamespace:
+    return SimpleNamespace(enabled=enabled, async_execution=False)
+
 
 @pytest.fixture(autouse=True)
 def reset_runtime_tool_gateway_context():
@@ -310,11 +310,12 @@ def test_build_runtime_tool_gateway_context_guides_controlled_tool_usage() -> No
         }
     )
 
-    assert "runtime_tool_gateway" in context
-    assert "workspace.list_outputs" in context
+    assert "Runtime Tool Gateway preflight is enabled" in context
+    assert "runtime_tool_gateway" not in context
+    assert "workspace.list_outputs" not in context
     assert "execute_shell_command" in context
-    assert "Do not use native shell" in context
-    assert "memory_search" in context
+    assert "Each configured QwenPaw built-in, plugin, or MCP tool call" in context
+    assert "memory_search" not in context
     assert "runtime_attachment_read" in context
     assert "runtime_sandbox_files_search" in context
     assert "优先使用本次任务已附带的文件" in context
@@ -341,10 +342,14 @@ def test_runtime_disabled_tools_from_context_filters_native_tools() -> None:
     assert disabled == {"execute_shell_command", "write_file"}
 
 
-def test_runtime_gateway_enabled_registers_only_gateway_and_attachment_tool() -> None:
+def test_runtime_gateway_keeps_agent_visible_native_tools_registered() -> None:
     fake_agent = SimpleNamespace()
     fake_agent._agent_config = SimpleNamespace(
-        tools=SimpleNamespace(builtin_tools={}),
+        tools=SimpleNamespace(
+            builtin_tools={
+                "execute_sandboxed_shell_command": _builtin_tool(False),
+            },
+        ),
     )
     fake_agent._request_context = {
         "runtime_tool_gateway": {
@@ -377,18 +382,22 @@ def test_runtime_gateway_enabled_registers_only_gateway_and_attachment_tool() ->
 
     toolkit = QwenPawAgent._create_toolkit(fake_agent, effective_skills=[])
 
-    assert "runtime_tool_gateway" in toolkit.tools
+    assert "runtime_tool_gateway" not in toolkit.tools
     assert "runtime_attachment_read" in toolkit.tools
     assert "runtime_sandbox_files_search" in toolkit.tools
-    assert "get_current_time" not in toolkit.tools
-    assert "read_file" not in toolkit.tools
-    assert "execute_shell_command" not in toolkit.tools
+    assert "get_current_time" in toolkit.tools
+    assert "read_file" in toolkit.tools
+    assert "execute_shell_command" in toolkit.tools
 
 
 def test_runtime_gateway_does_not_register_attachment_tool_without_sandbox_context() -> None:
     fake_agent = SimpleNamespace()
     fake_agent._agent_config = SimpleNamespace(
-        tools=SimpleNamespace(builtin_tools={}),
+        tools=SimpleNamespace(
+            builtin_tools={
+                "execute_sandboxed_shell_command": _builtin_tool(False),
+            },
+        ),
     )
     fake_agent._request_context = {
         "runtime_tool_gateway": {
@@ -411,7 +420,8 @@ def test_runtime_gateway_does_not_register_attachment_tool_without_sandbox_conte
 
     toolkit = QwenPawAgent._create_toolkit(fake_agent, effective_skills=[])
 
-    assert "runtime_tool_gateway" in toolkit.tools
+    assert "runtime_tool_gateway" not in toolkit.tools
+    assert "get_current_time" in toolkit.tools
     assert "runtime_attachment_read" not in toolkit.tools
     assert "runtime_sandbox_files_search" not in toolkit.tools
 
@@ -419,7 +429,11 @@ def test_runtime_gateway_does_not_register_attachment_tool_without_sandbox_conte
 def test_runtime_gateway_registers_sandbox_tools_without_current_task_files() -> None:
     fake_agent = SimpleNamespace()
     fake_agent._agent_config = SimpleNamespace(
-        tools=SimpleNamespace(builtin_tools={}),
+        tools=SimpleNamespace(
+            builtin_tools={
+                "execute_sandboxed_shell_command": _builtin_tool(False),
+            },
+        ),
     )
     fake_agent._request_context = {
         "runtime_tool_gateway": {
@@ -446,10 +460,14 @@ def test_runtime_gateway_registers_sandbox_tools_without_current_task_files() ->
     assert "runtime_attachment_read" in toolkit.tools
 
 
-def test_runtime_gateway_empty_allowlist_still_disables_native_tools() -> None:
+def test_runtime_gateway_does_not_apply_task_tool_allowlist() -> None:
     fake_agent = SimpleNamespace()
     fake_agent._agent_config = SimpleNamespace(
-        tools=SimpleNamespace(builtin_tools={}),
+        tools=SimpleNamespace(
+            builtin_tools={
+                "execute_sandboxed_shell_command": _builtin_tool(False),
+            },
+        ),
     )
     fake_agent._request_context = {
         "runtime_tool_gateway": {
@@ -468,10 +486,10 @@ def test_runtime_gateway_empty_allowlist_still_disables_native_tools() -> None:
     context = _build_runtime_tool_gateway_context(fake_agent._request_context)
     toolkit = QwenPawAgent._create_toolkit(fake_agent, effective_skills=[])
 
-    assert "No Runtime Tool Gateway tool ids are currently allowed" in context
-    assert "runtime_tool_gateway" in toolkit.tools
-    assert "get_current_time" not in toolkit.tools
-    assert "read_file" not in toolkit.tools
+    assert "Runtime Tool Gateway preflight is enabled" in context
+    assert "runtime_tool_gateway" not in toolkit.tools
+    assert "get_current_time" in toolkit.tools
+    assert "read_file" in toolkit.tools
 
 
 def test_simple_text_fast_mode_registers_no_native_tools() -> None:
@@ -493,7 +511,7 @@ def test_simple_text_fast_mode_registers_no_native_tools() -> None:
     assert toolkit.tools == {}
 
 
-def test_runtime_gateway_skips_native_memory_tools() -> None:
+def test_runtime_gateway_registers_native_memory_tools() -> None:
     def memory_search():
         return "memory"
 
@@ -526,7 +544,7 @@ def test_runtime_gateway_skips_native_memory_tools() -> None:
 
     QwenPawAgent._register_memory_tools(fake_agent)
 
-    assert fake_agent.toolkit.registered == []
+    assert fake_agent.toolkit.registered == ["memory_search"]
 
 
 def test_simple_text_fast_mode_skips_native_memory_tools() -> None:
@@ -561,7 +579,7 @@ def test_simple_text_fast_mode_skips_native_memory_tools() -> None:
     assert fake_agent.toolkit.registered == []
 
 
-def test_runtime_gateway_builds_prompt_without_native_memory_manager(monkeypatch) -> None:
+def test_runtime_gateway_builds_prompt_with_native_memory_manager(monkeypatch) -> None:
     captured: dict[str, object] = {}
     memory_manager = object()
 
@@ -597,8 +615,8 @@ def test_runtime_gateway_builds_prompt_without_native_memory_manager(monkeypatch
 
     prompt = QwenPawAgent._build_sys_prompt(fake_agent)
 
-    assert captured["memory_manager"] is None
-    assert "Runtime Tool Gateway is enabled" in prompt
+    assert captured["memory_manager"] is memory_manager
+    assert "Runtime Tool Gateway preflight is enabled" in prompt
 
 
 def test_simple_text_fast_mode_builds_minimal_prompt(monkeypatch) -> None:
@@ -726,136 +744,6 @@ async def test_simple_text_fast_reasoning_temporarily_disables_model_thinking(mo
     }
 
 
-@pytest.mark.asyncio
-async def test_runtime_tool_gateway_posts_allowed_tool_with_skill_context(monkeypatch) -> None:
-    captured: dict = {}
-
-    def fake_post_json(url: str, token: str, payload: dict, timeout_seconds: float):
-        captured["url"] = url
-        captured["token"] = token
-        captured["payload"] = payload
-        captured["timeout_seconds"] = timeout_seconds
-        return {
-            "status": "success",
-            "tool_call_id": "tool_call_001",
-            "result": {"tool_id": "workspace.list_outputs", "output_count": 0},
-        }
-
-    monkeypatch.setattr(
-        runtime_tool_gateway_module,
-        "_post_runtime_tool_gateway",
-        fake_post_json,
-    )
-    set_current_runtime_tool_gateway(
-        {
-            "base_url": "http://127.0.0.1:8765",
-            "endpoint": "/runtime/v1/tool-calls",
-            "token": "worker-session-token",
-            "task_id": "task_001",
-            "session_id": "sess_001",
-            "trace_id": "trace_001",
-            "policy_snapshot_id": "ps_001",
-            "tool_session_id": "wts_001",
-            "allowed_tools": ["workspace.list_outputs"],
-            "allowed_skill_contexts": [
-                {
-                    "skill_code": "workspace_reader",
-                    "skill_version": "1.0.0",
-                    "skill_catalog_version": "skill_cat_v1",
-                    "skill_binding_version": "bind_v1",
-                    "worker_skill_id": "qwenpaw-reader-v1",
-                    "required_capabilities": ["file.read"],
-                }
-            ],
-        }
-    )
-
-    response = await runtime_tool_gateway(
-        tool_id="workspace.list_outputs",
-        input={"task_id": "task_001"},
-        idempotency_key="idem-001",
-    )
-
-    assert captured["url"] == "http://127.0.0.1:8765/runtime/v1/tool-calls"
-    assert captured["token"] == "worker-session-token"
-    assert captured["payload"]["tool_id"] == "workspace.list_outputs"
-    assert captured["payload"]["input"] == {"task_id": "task_001"}
-    assert captured["payload"]["skill_code"] == "workspace_reader"
-    assert captured["payload"]["skill_binding_version"] == "bind_v1"
-    assert "workspace.list_outputs" in _text(response)
-    assert "worker-session-token" not in _text(response)
-
-
-@pytest.mark.asyncio
-async def test_runtime_tool_gateway_parses_json_string_input(monkeypatch) -> None:
-    captured: dict = {}
-
-    def fake_post_json(url: str, token: str, payload: dict, timeout_seconds: float):
-        captured["payload"] = payload
-        return {
-            "status": "success",
-            "tool_call_id": "tool_call_001",
-            "result": {"tool_id": "file.parse_document", "file_id": "file_001"},
-        }
-
-    monkeypatch.setattr(
-        runtime_tool_gateway_module,
-        "_post_runtime_tool_gateway",
-        fake_post_json,
-    )
-    set_current_runtime_tool_gateway(
-        {
-            "base_url": "http://127.0.0.1:8765",
-            "endpoint": "/runtime/v1/tool-calls",
-            "token": "worker-session-token",
-            "task_id": "task_001",
-            "session_id": "sess_001",
-            "policy_snapshot_id": "ps_001",
-            "tool_session_id": "wts_001",
-            "allowed_tools": ["file.parse_document"],
-        }
-    )
-
-    response = await runtime_tool_gateway(
-        tool_id="file.parse_document",
-        input='{"file_id":"file_001"}',
-    )
-
-    assert captured["payload"]["input"] == {"file_id": "file_001"}
-    assert "file.parse_document" in _text(response)
-
-
-@pytest.mark.asyncio
-async def test_runtime_tool_gateway_rejects_unlisted_tool(monkeypatch) -> None:
-    called = False
-
-    def fake_post_json(*_args, **_kwargs):
-        nonlocal called
-        called = True
-        return {}
-
-    monkeypatch.setattr(
-        runtime_tool_gateway_module,
-        "_post_runtime_tool_gateway",
-        fake_post_json,
-    )
-    set_current_runtime_tool_gateway(
-        {
-            "base_url": "http://127.0.0.1:8765",
-            "endpoint": "/runtime/v1/tool-calls",
-            "token": "worker-session-token",
-            "task_id": "task_001",
-            "session_id": "sess_001",
-            "policy_snapshot_id": "ps_001",
-            "tool_session_id": "wts_001",
-            "allowed_tools": ["workspace.list_outputs"],
-        }
-    )
-
-    response = await runtime_tool_gateway(tool_id="execute_shell_command", input={})
-
-    assert called is False
-    assert "not allowed" in _text(response)
 
 
 @pytest.mark.asyncio

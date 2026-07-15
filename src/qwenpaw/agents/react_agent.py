@@ -61,7 +61,6 @@ from .tools import (
     read_file,
     runtime_attachment_read,
     runtime_sandbox_files_search,
-    runtime_tool_gateway,
     run_tool_batch,
     send_file_to_user,
     set_user_timezone,
@@ -90,15 +89,10 @@ NamesakeStrategy = Literal["override", "skip", "raise", "rename"]
 
 
 def _build_runtime_tool_gateway_context(request_context: dict[str, Any]) -> str:
-    """Render Runtime Tool Gateway instructions for bank-runtime calls."""
+    """Render preflight and audit instructions for Runtime-managed calls."""
     gateway = request_context.get("runtime_tool_gateway")
     if not isinstance(gateway, dict):
         return ""
-    allowed_tools = [
-        str(item).strip()
-        for item in gateway.get("allowed_tools", [])
-        if str(item).strip()
-    ]
     constraints = request_context.get("runtime_constraints")
     disabled_tools: list[str] = []
     if isinstance(constraints, dict):
@@ -107,41 +101,17 @@ def _build_runtime_tool_gateway_context(request_context: dict[str, Any]) -> str:
             for item in constraints.get("disabled_tools", [])
             if str(item).strip()
         ]
-    task_id = str(gateway.get("task_id", "")).strip()
     lines = [
-        "Runtime Tool Gateway is enabled for this request.",
-        "- Runtime-governed requests must not use native QwenPaw tools.",
-        "- Do not use native shell, file, browser, desktop, or other "
-        "QwenPaw tools to simulate Runtime actions.",
+        "Runtime Tool Gateway preflight is enabled for this request.",
+        "- Each configured QwenPaw built-in, plugin, or MCP tool call is "
+        "checked by Runtime before local execution and audited after it.",
+        "- Use only tools that are visible in this Agent's configuration.",
     ]
-    if allowed_tools:
-        lines.append(
-            "- Use the QwenPaw tool `runtime_tool_gateway` for Runtime "
-            "actions.",
-        )
-        lines.append("- Allowed Runtime tool ids: " + ", ".join(allowed_tools))
-    else:
-        lines.append(
-            "- No Runtime Tool Gateway tool ids are currently allowed; "
-            "answer without gateway tools or explain that the requested "
-            "capability is unavailable.",
-        )
-    if "workspace.list_outputs" in allowed_tools and task_id:
-        lines.append(
-            "- For `workspace.list_outputs`, call "
-            "`runtime_tool_gateway` with "
-            f"`tool_id=\"workspace.list_outputs\"` and "
-            f"`input={{\"task_id\":\"{task_id}\"}}`.",
-        )
     if disabled_tools:
         lines.append("- Disabled native tools: " + ", ".join(disabled_tools))
     attachment_lines = _build_runtime_attachments_context(request_context)
     if attachment_lines:
         lines.extend(attachment_lines)
-    lines.append(
-        "- Native QwenPaw memory tools, including `memory_search`, are "
-        "disabled in Runtime-governed requests.",
-    )
     return "\n".join(lines)
 
 
@@ -590,13 +560,9 @@ class QwenPawAgent(CodingModeMixin, ToolGuardMixin, ReActAgent):
             )
 
         runtime_gateway_enabled = self._runtime_tool_gateway_enabled()
-        runtime_allowed_native_tools = {"runtime_tool_gateway"}
         runtime_attachment_available = _runtime_attachments_available(
             self._request_context,
         )
-        if runtime_attachment_available:
-            runtime_allowed_native_tools.add("runtime_attachment_read")
-            runtime_allowed_native_tools.add("runtime_sandbox_files_search")
 
         # Map of tool functions (hardcoded builtin tools)
         tool_functions = {
@@ -613,11 +579,6 @@ class QwenPawAgent(CodingModeMixin, ToolGuardMixin, ReActAgent):
             "view_video": view_video,
             "send_file_to_user": send_file_to_user,
             "get_current_time": get_current_time,
-            **(
-                {"runtime_tool_gateway": runtime_tool_gateway}
-                if runtime_gateway_enabled
-                else {}
-            ),
             **(
                 {"runtime_attachment_read": runtime_attachment_read}
                 if runtime_gateway_enabled and runtime_attachment_available
@@ -669,13 +630,6 @@ class QwenPawAgent(CodingModeMixin, ToolGuardMixin, ReActAgent):
         )
         registered_tool_names: set[str] = set()
         for tool_name, tool_func in tool_functions.items():
-            if runtime_gateway_enabled and tool_name not in runtime_allowed_native_tools:
-                logger.debug(
-                    "Skipped native tool while Runtime Tool Gateway is "
-                    "enabled: %s",
-                    tool_name,
-                )
-                continue
             if tool_name in runtime_disabled_tools:
                 logger.debug("Skipped Runtime-disabled tool: %s", tool_name)
                 continue
@@ -787,19 +741,13 @@ class QwenPawAgent(CodingModeMixin, ToolGuardMixin, ReActAgent):
                     )
 
     def _register_memory_tools(self) -> None:
-        """Register memory tools unless Runtime owns tool governance."""
+        """Register memory tools unless a tool-free Runtime mode is active."""
         if self.memory_manager is None:
             return
         if _runtime_simple_text_fast_enabled_from_context(
             getattr(self, "_request_context", {}) or {},
         ):
             logger.debug("Skipped native memory tools in simple_text_fast mode")
-            return
-        if self._runtime_tool_gateway_enabled():
-            logger.debug(
-                "Skipped native memory tools while Runtime Tool Gateway "
-                "is enabled",
-            )
             return
         memory_tools = self.memory_manager.list_memory_tools()
         for tool_fn in memory_tools:
@@ -841,17 +789,12 @@ class QwenPawAgent(CodingModeMixin, ToolGuardMixin, ReActAgent):
         ):
             heartbeat_enabled = self._agent_config.heartbeat.enabled
 
-        prompt_memory_manager = (
-            None
-            if self._runtime_tool_gateway_enabled()
-            else self.memory_manager
-        )
         sys_prompt = build_system_prompt_from_working_dir(
             working_dir=self._workspace_dir,
             agent_id=agent_id,
             heartbeat_enabled=heartbeat_enabled,
             language=self._language,
-            memory_manager=prompt_memory_manager,
+            memory_manager=self.memory_manager,
         )
         logger.debug("System prompt:\n%s...", sys_prompt[:100])
 

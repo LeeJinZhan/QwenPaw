@@ -25,7 +25,6 @@ from .get_current_time import get_current_time, set_user_timezone
 from .get_token_usage import get_token_usage
 from .runtime_attachment_read import runtime_attachment_read
 from .runtime_sandbox_files import runtime_sandbox_files_search
-from .runtime_tool_gateway import runtime_tool_gateway
 from .agent_management import (
     list_agents,
     chat_with_agent,
@@ -63,7 +62,6 @@ __all__ = [
     "get_token_usage",
     "runtime_attachment_read",
     "runtime_sandbox_files_search",
-    "runtime_tool_gateway",
     "delegate_external_agent",
     "list_agents",
     "chat_with_agent",
