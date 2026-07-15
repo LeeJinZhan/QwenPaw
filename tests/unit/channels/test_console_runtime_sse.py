@@ -474,6 +474,72 @@ def test_runtime_projection_diffs_cumulative_text_snapshots() -> None:
     assert len(chunks) == 2
 
 
+def test_runtime_projection_projects_reasoning_message_as_answer_thinking() -> None:
+    projector = _runtime_projector()
+
+    emitted = projector.project(
+        {
+            "object": "message",
+            "id": "msg-reasoning",
+            "role": "assistant",
+            "type": "reasoning",
+            "status": "in_progress",
+            "content": "我先判断问题类型。",
+        },
+        now=0.0,
+    )
+
+    assert emitted == [
+        {"event": "answer.thinking", "text": "我先判断问题类型。"},
+    ]
+
+
+def test_runtime_projection_projects_reasoning_content_deltas_as_answer_thinking() -> None:
+    projector = _runtime_projector()
+
+    emitted = projector.project(
+        {
+            "object": "message",
+            "id": "msg-reasoning-delta",
+            "role": "assistant",
+            "type": "reasoning",
+            "status": "in_progress",
+        },
+        now=0.0,
+    )
+    emitted.extend(
+        projector.project(
+            {
+                "object": "content",
+                "msg_id": "msg-reasoning-delta",
+                "type": "text",
+                "status": "in_progress",
+                "delta": True,
+                "text": "正在分析",
+            },
+            now=0.01,
+        ),
+    )
+    emitted.extend(
+        projector.project(
+            {
+                "object": "content",
+                "msg_id": "msg-reasoning-delta",
+                "type": "text",
+                "status": "in_progress",
+                "delta": True,
+                "text": "用户问题。",
+            },
+            now=0.02,
+        ),
+    )
+
+    assert emitted == [
+        {"event": "answer.thinking", "text": "正在分析"},
+        {"event": "answer.thinking", "text": "用户问题。"},
+    ]
+
+
 def test_projection_appends_real_agentscope_text_deltas() -> None:
     projector = _runtime_projector()
     emitted: list[dict] = []
@@ -500,7 +566,7 @@ def test_projection_appends_real_agentscope_text_deltas() -> None:
     assert projector.full_text == "今天是七月"
 
 
-def test_projection_suppresses_children_of_internal_parent_messages() -> None:
+def test_projection_streams_reasoning_and_suppresses_other_internal_parent_messages() -> None:
     projector = _runtime_projector()
     emitted: list[dict] = []
     internal_parents = [
@@ -527,7 +593,7 @@ def test_projection_suppresses_children_of_internal_parent_messages() -> None:
         AgentScopeTextContent(
             msg_id="msg-reasoning",
             delta=True,
-            text="SECRET_REASONING",
+            text="VISIBLE_REASONING",
         ),
         AgentScopeTextContent(
             msg_id="msg-component-call",
@@ -573,10 +639,15 @@ def test_projection_suppresses_children_of_internal_parent_messages() -> None:
         for item in emitted
         if item["event"] == "answer.chunk"
     ]
+    thinking = [
+        item["text"]
+        for item in emitted
+        if item["event"] == "answer.thinking"
+    ]
 
     assert "".join(chunks) == "正常答案"
+    assert thinking == ["VISIBLE_REASONING"]
     assert projector.full_text == "正常答案"
-    assert "SECRET_REASONING" not in serialized
     assert "SECRET_COMPONENT_RESULT" not in serialized
     assert "SECRET_TOOL_RESULT" not in serialized
 

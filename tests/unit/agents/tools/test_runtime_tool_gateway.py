@@ -22,12 +22,12 @@ from qwenpaw.agents.react_agent import (
     _build_runtime_tool_gateway_context,
     _runtime_disabled_tools_from_context,
 )
+from qwenpaw.agents.tool_guard_mixin import ToolGuardMixin
 
 runtime_tool_gateway_module = importlib.import_module(
     "qwenpaw.agents.tools.runtime_tool_gateway",
 )
 runtime_tool_gateway = runtime_tool_gateway_module.runtime_tool_gateway
-
 
 @pytest.fixture(autouse=True)
 def reset_runtime_tool_gateway_context():
@@ -474,6 +474,25 @@ def test_runtime_gateway_empty_allowlist_still_disables_native_tools() -> None:
     assert "read_file" not in toolkit.tools
 
 
+def test_simple_text_fast_mode_registers_no_native_tools() -> None:
+    fake_agent = SimpleNamespace()
+    fake_agent._agent_config = SimpleNamespace(
+        tools=SimpleNamespace(builtin_tools={}),
+    )
+    fake_agent._request_context = {
+        "runtime_execution_mode": "simple_text_fast",
+    }
+    fake_agent._runtime_tool_gateway_enabled = lambda: False
+    fake_agent._runtime_simple_text_fast_enabled = (
+        lambda: QwenPawAgent._runtime_simple_text_fast_enabled(fake_agent)
+    )
+    fake_agent._register_coding_mode_tools = lambda *_, **__: None
+
+    toolkit = QwenPawAgent._create_toolkit(fake_agent, effective_skills=["bank_assistant"])
+
+    assert toolkit.tools == {}
+
+
 def test_runtime_gateway_skips_native_memory_tools() -> None:
     def memory_search():
         return "memory"
@@ -500,6 +519,38 @@ def test_runtime_gateway_skips_native_memory_tools() -> None:
     }
     fake_agent._runtime_tool_gateway_enabled = (
         lambda: QwenPawAgent._runtime_tool_gateway_enabled(fake_agent)
+    )
+    fake_agent.memory_manager = FakeMemoryManager()
+    fake_agent.toolkit = FakeToolkit()
+    fake_agent._namesake_strategy = "skip"
+
+    QwenPawAgent._register_memory_tools(fake_agent)
+
+    assert fake_agent.toolkit.registered == []
+
+
+def test_simple_text_fast_mode_skips_native_memory_tools() -> None:
+    def memory_search():
+        return "memory"
+
+    class FakeMemoryManager:
+        def list_memory_tools(self):
+            return [memory_search]
+
+    class FakeToolkit:
+        def __init__(self):
+            self.registered: list[str] = []
+
+        def register_tool_function(self, tool_fn, **_kwargs):
+            self.registered.append(tool_fn.__name__)
+
+    fake_agent = SimpleNamespace()
+    fake_agent._request_context = {
+        "runtime_execution_mode": "simple_text_fast",
+    }
+    fake_agent._runtime_tool_gateway_enabled = lambda: False
+    fake_agent._runtime_simple_text_fast_enabled = (
+        lambda: QwenPawAgent._runtime_simple_text_fast_enabled(fake_agent)
     )
     fake_agent.memory_manager = FakeMemoryManager()
     fake_agent.toolkit = FakeToolkit()
@@ -548,6 +599,131 @@ def test_runtime_gateway_builds_prompt_without_native_memory_manager(monkeypatch
 
     assert captured["memory_manager"] is None
     assert "Runtime Tool Gateway is enabled" in prompt
+
+
+def test_simple_text_fast_mode_builds_minimal_prompt(monkeypatch) -> None:
+    def fail_build_system_prompt_from_working_dir(**_kwargs):
+        raise AssertionError("simple_text_fast must not build workspace prompt")
+
+    monkeypatch.setattr(
+        "qwenpaw.agents.react_agent.build_system_prompt_from_working_dir",
+        fail_build_system_prompt_from_working_dir,
+    )
+    monkeypatch.setattr(
+        "qwenpaw.agents.react_agent.build_multimodal_hint",
+        lambda: "multimodal hint should be skipped",
+    )
+    fake_agent = SimpleNamespace()
+    fake_agent._request_context = {
+        "runtime_execution_mode": "simple_text_fast",
+        "runtime_task_id": "task_001",
+        "trace_id": "trace_001",
+        "runtime_datetime_context": {
+            "current_date": "2026-07-02",
+            "current_datetime": "2026-07-02T13:30:00+08:00",
+            "timezone": "Asia/Shanghai",
+        },
+    }
+    fake_agent._agent_config = SimpleNamespace(heartbeat=None)
+    fake_agent._workspace_dir = None
+    fake_agent._language = "zh"
+    fake_agent._env_context = None
+    fake_agent.memory_manager = object()
+    fake_agent._runtime_tool_gateway_enabled = lambda: False
+    fake_agent._runtime_simple_text_fast_enabled = (
+        lambda: QwenPawAgent._runtime_simple_text_fast_enabled(fake_agent)
+    )
+
+    prompt = QwenPawAgent._build_sys_prompt(fake_agent)
+
+    assert "直接回答" in prompt
+    assert "不要调用工具" in prompt
+    assert "2026-07-02" in prompt
+    assert "Asia/Shanghai" in prompt
+    assert "task_001" in prompt
+    assert "multimodal hint should be skipped" not in prompt
+
+
+@pytest.mark.asyncio
+async def test_simple_text_fast_reasoning_omits_tool_choice_without_tools(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+    parent_msg = SimpleNamespace()
+
+    async def fake_parent_reasoning(self, tool_choice=None):
+        captured["tool_choice"] = tool_choice
+        return parent_msg
+
+    monkeypatch.setattr(ToolGuardMixin, "_reasoning", fake_parent_reasoning)
+    monkeypatch.setattr(
+        "qwenpaw.agents.react_agent.get_active_model_supports_multimodal",
+        lambda: True,
+    )
+
+    fake_agent = QwenPawAgent.__new__(QwenPawAgent)
+    fake_agent._request_context = {
+        "runtime_execution_mode": "simple_text_fast",
+    }
+    fake_agent.plan_notebook = None
+    fake_agent._model_rejects_media = lambda: False
+    fake_agent._uses_request_time_media_normalization = lambda: False
+    fake_agent._set_formatter_media_strip = lambda _enabled: None
+    fake_agent._proactive_strip_media_blocks = lambda: 0
+    fake_agent._is_bad_request_or_media_error = lambda _error: False
+    fake_agent._filter_plan_tools = lambda msg, _notebook: msg
+
+    msg = await QwenPawAgent._reasoning.__wrapped__(fake_agent, tool_choice="auto")
+
+    assert msg is parent_msg
+    assert captured["tool_choice"] is None
+
+
+@pytest.mark.asyncio
+async def test_simple_text_fast_reasoning_temporarily_disables_model_thinking(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+    parent_msg = SimpleNamespace()
+    inner_model = SimpleNamespace(
+        generate_kwargs={
+            "temperature": 0.2,
+            "extra_body": {"seed": 1},
+        },
+    )
+    fake_model = SimpleNamespace(_inner=SimpleNamespace(_model=inner_model))
+
+    async def fake_parent_reasoning(self, tool_choice=None):
+        captured["tool_choice"] = tool_choice
+        captured["generate_kwargs"] = dict(inner_model.generate_kwargs)
+        captured["extra_body"] = dict(inner_model.generate_kwargs["extra_body"])
+        return parent_msg
+
+    monkeypatch.setattr(ToolGuardMixin, "_reasoning", fake_parent_reasoning)
+    monkeypatch.setattr(
+        "qwenpaw.agents.react_agent.get_active_model_supports_multimodal",
+        lambda: True,
+    )
+
+    fake_agent = QwenPawAgent.__new__(QwenPawAgent)
+    fake_agent._request_context = {
+        "runtime_execution_mode": "simple_text_fast",
+        "runtime_generation_controls": {"disable_thinking": True},
+    }
+    fake_agent.model = fake_model
+    fake_agent.plan_notebook = None
+    fake_agent._model_rejects_media = lambda: False
+    fake_agent._uses_request_time_media_normalization = lambda: False
+    fake_agent._set_formatter_media_strip = lambda _enabled: None
+    fake_agent._proactive_strip_media_blocks = lambda: 0
+    fake_agent._is_bad_request_or_media_error = lambda _error: False
+    fake_agent._filter_plan_tools = lambda msg, _notebook: msg
+
+    msg = await QwenPawAgent._reasoning.__wrapped__(fake_agent, tool_choice="auto")
+
+    assert msg is parent_msg
+    assert captured["tool_choice"] is None
+    assert captured["extra_body"] == {"seed": 1, "enable_thinking": False}
+    assert inner_model.generate_kwargs == {
+        "temperature": 0.2,
+        "extra_body": {"seed": 1},
+    }
 
 
 @pytest.mark.asyncio

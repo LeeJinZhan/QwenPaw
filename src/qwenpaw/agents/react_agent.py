@@ -10,8 +10,10 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+from contextlib import contextmanager
+from copy import deepcopy
 from pathlib import Path
-from typing import Any, List, Literal, Optional, Type, TYPE_CHECKING
+from typing import Any, Iterator, List, Literal, Optional, Type, TYPE_CHECKING
 
 from agentscope.agent import ReActAgent
 from agentscope.agent._react_agent import _MemoryMark
@@ -278,6 +280,110 @@ def _runtime_disabled_tools_from_context(
     }
 
 
+def _runtime_simple_text_fast_enabled_from_context(
+    request_context: dict[str, Any],
+) -> bool:
+    return str(request_context.get("runtime_execution_mode", "")).strip() == (
+        "simple_text_fast"
+    )
+
+
+def _runtime_disable_thinking_from_context(
+    request_context: dict[str, Any],
+) -> bool:
+    controls = request_context.get("runtime_generation_controls")
+    if not isinstance(controls, dict):
+        return False
+    if controls.get("disable_thinking") is True:
+        return True
+    thinking = str(controls.get("thinking", "") or "").strip().lower()
+    return thinking in {"disabled", "disable", "off", "false", "0"}
+
+
+def _iter_model_generate_kwargs_targets(model: Any) -> Iterator[Any]:
+    seen: set[int] = set()
+    stack: list[Any] = [model]
+    while stack:
+        current = stack.pop()
+        if current is None:
+            continue
+        current_id = id(current)
+        if current_id in seen:
+            continue
+        seen.add(current_id)
+        if isinstance(getattr(current, "generate_kwargs", None), dict):
+            yield current
+        for attr in ("_inner", "_model", "inner", "model"):
+            child = getattr(current, attr, None)
+            if child is not None and id(child) not in seen:
+                stack.append(child)
+
+
+@contextmanager
+def _temporarily_disable_model_thinking(model: Any) -> Iterator[None]:
+    snapshots: list[tuple[Any, dict[str, Any]]] = []
+    for target in _iter_model_generate_kwargs_targets(model):
+        original = getattr(target, "generate_kwargs", None)
+        if not isinstance(original, dict):
+            continue
+        updated = deepcopy(original)
+        extra_body = updated.get("extra_body")
+        if not isinstance(extra_body, dict):
+            extra_body = {}
+        else:
+            extra_body = deepcopy(extra_body)
+        extra_body["enable_thinking"] = False
+        updated["extra_body"] = extra_body
+        snapshots.append((target, deepcopy(original)))
+        target.generate_kwargs = updated
+    try:
+        yield
+    finally:
+        for target, original in reversed(snapshots):
+            target.generate_kwargs = original
+
+
+def _build_runtime_simple_text_fast_prompt(
+    request_context: dict[str, Any],
+    *,
+    language: str,
+) -> str:
+    task_id = str(request_context.get("runtime_task_id", "") or "").strip()
+    trace_id = str(request_context.get("trace_id", "") or "").strip()
+    lines = [
+        "你是 Bank Agent Runtime 通过 QwenPaw 调用的轻量文本助手。",
+        "直接回答用户的简单文本问题，保持简洁、准确，并使用用户的语言。",
+        "不要调用工具，不要读写文件，不要访问浏览器、shell、外部网络、银行数据库或未授权 MCP。",
+        "如果用户问题需要附件、客户数据、外部系统、工具执行或高风险能力，说明该请求需要走完整任务模式。",
+        "不要声称已经创建文件、执行命令、查询客户信息或调用外部系统。",
+    ]
+    if task_id:
+        lines.append(f"Runtime task_id: {task_id}")
+    if trace_id:
+        lines.append(f"Runtime trace_id: {trace_id}")
+    datetime_context = request_context.get("runtime_datetime_context")
+    if isinstance(datetime_context, dict):
+        current_date = str(datetime_context.get("current_date", "") or "").strip()
+        current_datetime = str(
+            datetime_context.get("current_datetime", "") or "",
+        ).strip()
+        timezone = str(datetime_context.get("timezone", "") or "").strip()
+        if current_date or current_datetime or timezone:
+            lines.append("Runtime time context:")
+            if current_date:
+                lines.append(f"- Current date: {current_date}")
+            if current_datetime:
+                lines.append(f"- Current datetime: {current_datetime}")
+            if timezone:
+                lines.append(f"- Timezone: {timezone}")
+            lines.append(
+                "当用户询问今天、当前日期或当前时间时，必须基于上述 Runtime time context 回答。",
+            )
+    if language:
+        lines.append(f"Preferred language: {language}")
+    return "\n".join(lines)
+
+
 class QwenPawAgent(CodingModeMixin, ToolGuardMixin, ReActAgent):
     """QwenPaw Agent with integrated tools, skills, and memory management.
 
@@ -338,6 +444,7 @@ class QwenPawAgent(CodingModeMixin, ToolGuardMixin, ReActAgent):
         self._namesake_strategy = namesake_strategy
         self._workspace_dir = workspace_dir
         self._task_tracker = task_tracker
+        simple_text_fast = self._runtime_simple_text_fast_enabled()
 
         # Extract configuration from agent_config
         running_config = agent_config.running
@@ -345,16 +452,19 @@ class QwenPawAgent(CodingModeMixin, ToolGuardMixin, ReActAgent):
 
         # Resolve effective skills once and share across toolkit /
         # skill registration.
-        workspace_dir = self._workspace_dir or WORKING_DIR
-        ensure_skills_initialized(workspace_dir)
-        channel_name = self._request_context.get("channel", "console")
-        try:
-            effective_skills = resolve_effective_skills(
-                workspace_dir,
-                channel_name,
-            )
-        except Exception:  # pylint: disable=broad-except
+        if simple_text_fast:
             effective_skills = []
+        else:
+            workspace_dir = self._workspace_dir or WORKING_DIR
+            ensure_skills_initialized(workspace_dir)
+            channel_name = self._request_context.get("channel", "console")
+            try:
+                effective_skills = resolve_effective_skills(
+                    workspace_dir,
+                    channel_name,
+                )
+            except Exception:  # pylint: disable=broad-except
+                effective_skills = []
 
         # Initialize toolkit with built-in tools
         toolkit = self._create_toolkit(
@@ -367,8 +477,8 @@ class QwenPawAgent(CodingModeMixin, ToolGuardMixin, ReActAgent):
 
         # Initialize memory_manager and context_manager for use
         # in _build_sys_prompt
-        self.memory_manager = memory_manager
-        self.context_manager = context_manager
+        self.memory_manager = None if simple_text_fast else memory_manager
+        self.context_manager = None if simple_text_fast else context_manager
 
         # Build system prompt
         sys_prompt = self._build_sys_prompt()
@@ -438,6 +548,10 @@ class QwenPawAgent(CodingModeMixin, ToolGuardMixin, ReActAgent):
             Configured toolkit instance
         """
         effective_skills = effective_skills or []
+        if _runtime_simple_text_fast_enabled_from_context(
+            getattr(self, "_request_context", {}) or {},
+        ):
+            return Toolkit()
         toolkit = Toolkit()
 
         # Check which tools are enabled from agent config
@@ -668,6 +782,11 @@ class QwenPawAgent(CodingModeMixin, ToolGuardMixin, ReActAgent):
         """Register memory tools unless Runtime owns tool governance."""
         if self.memory_manager is None:
             return
+        if _runtime_simple_text_fast_enabled_from_context(
+            getattr(self, "_request_context", {}) or {},
+        ):
+            logger.debug("Skipped native memory tools in simple_text_fast mode")
+            return
         if self._runtime_tool_gateway_enabled():
             logger.debug(
                 "Skipped native memory tools while Runtime Tool Gateway "
@@ -691,6 +810,14 @@ class QwenPawAgent(CodingModeMixin, ToolGuardMixin, ReActAgent):
         Returns:
             Complete system prompt string
         """
+        if _runtime_simple_text_fast_enabled_from_context(
+            getattr(self, "_request_context", {}) or {},
+        ):
+            return _build_runtime_simple_text_fast_prompt(
+                self._request_context,
+                language=self._language,
+            )
+
         # Get agent_id from request_context
         agent_id = (
             self._request_context.get("agent_id")
@@ -739,6 +866,11 @@ class QwenPawAgent(CodingModeMixin, ToolGuardMixin, ReActAgent):
     def _runtime_tool_gateway_enabled(self) -> bool:
         gateway = self._request_context.get("runtime_tool_gateway")
         return isinstance(gateway, dict)
+
+    def _runtime_simple_text_fast_enabled(self) -> bool:
+        return _runtime_simple_text_fast_enabled_from_context(
+            self._request_context,
+        )
 
     def _register_hooks(self) -> None:
         """Register pre-reasoning and pre-acting hooks."""
@@ -1281,10 +1413,16 @@ class QwenPawAgent(CodingModeMixin, ToolGuardMixin, ReActAgent):
            schedules plan mutation tools; `_plan_text_only_after_mutation`
            forces ``tool_choice="none"`` once so the model cannot issue
            execution tools immediately after ``create_plan`` / revise.
+        5. Runtime simple text fast mode registers no tools and omits
+           ``tool_choice`` so OpenAI-compatible providers do not reject an
+           empty ``tools`` request.
 
         Calls ``super()._reasoning`` to keep the ToolGuardMixin
         interception active.
         """
+        simple_text_fast = self._runtime_simple_text_fast_enabled()
+        if simple_text_fast:
+            tool_choice = None
         nb = getattr(self, "plan_notebook", None)
         if nb is not None and getattr(
             nb,
@@ -1316,9 +1454,26 @@ class QwenPawAgent(CodingModeMixin, ToolGuardMixin, ReActAgent):
                         n,
                     )
 
+        disable_runtime_thinking = (
+            simple_text_fast
+            and _runtime_disable_thinking_from_context(self._request_context)
+        )
+
+        async def _call_parent_reasoning() -> Msg:
+            if disable_runtime_thinking:
+                with _temporarily_disable_model_thinking(
+                    getattr(self, "model", None),
+                ):
+                    return await super(QwenPawAgent, self)._reasoning(
+                        tool_choice=tool_choice,
+                    )
+            return await super(QwenPawAgent, self)._reasoning(
+                tool_choice=tool_choice,
+            )
+
         # --- Passive fallback layer (existing logic) ---
         try:
-            msg = await super()._reasoning(tool_choice=tool_choice)
+            msg = await _call_parent_reasoning()
         except Exception as e:
             if not self._is_bad_request_or_media_error(e):
                 raise
@@ -1339,7 +1494,7 @@ class QwenPawAgent(CodingModeMixin, ToolGuardMixin, ReActAgent):
                         "Retrying with request-time media stripping.",
                         e,
                     )
-                    msg = await super()._reasoning(tool_choice=tool_choice)
+                    msg = await _call_parent_reasoning()
                     if model_key:
                         get_capability_cache().learn(
                             model_key,
@@ -1367,7 +1522,7 @@ class QwenPawAgent(CodingModeMixin, ToolGuardMixin, ReActAgent):
                 e,
                 n_stripped,
             )
-            msg = await super()._reasoning(tool_choice=tool_choice)
+            msg = await _call_parent_reasoning()
             if model_key:
                 get_capability_cache().learn(
                     model_key,
@@ -1380,6 +1535,8 @@ class QwenPawAgent(CodingModeMixin, ToolGuardMixin, ReActAgent):
 
         msg = self._filter_plan_tools(msg, nb)
 
+        if simple_text_fast:
+            return msg
         return await self._auto_continue_if_text_only(msg, tool_choice)
 
     # pylint: disable=too-many-branches
@@ -1765,6 +1922,12 @@ class QwenPawAgent(CodingModeMixin, ToolGuardMixin, ReActAgent):
 
         # Normal message processing
         logger.info("QwenPawAgent.reply: max_iters=%s", self.max_iters)
+
+        if self._runtime_simple_text_fast_enabled():
+            return await super().reply(
+                msg=msg,
+                structured_model=structured_model,
+            )
 
         request_context = getattr(self, "_request_context", {}) or {}
         channel_name = request_context.get("channel", "console")

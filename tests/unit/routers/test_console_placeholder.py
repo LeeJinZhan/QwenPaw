@@ -18,6 +18,9 @@ import pytest
 
 from agentscope_runtime.engine.schemas.agent_schemas import AgentRequest
 
+from qwenpaw.app.channels.console.runtime_event_projection import (
+    RuntimeEventProjector,
+)
 from qwenpaw.app.routers.console import (
     _extract_placeholder_name,
     _extract_session_and_payload,
@@ -137,6 +140,17 @@ def test_extract_session_payload_preserves_runtime_bank_context_in_meta() -> Non
         "session_id": "session-runtime-001",
         "trace_id": "trace-runtime-001",
         "runtime_task_id": "task-runtime-001",
+        "runtime_execution_mode": "simple_text_fast",
+        "runtime_response_mode": "stream_answer",
+        "runtime_datetime_context": {
+            "current_date": "2026-07-02",
+            "current_datetime": "2026-07-02T11:48:14+08:00",
+            "timezone": "Asia/Shanghai",
+        },
+        "runtime_latency_marks": {
+            "submit_received_at": "2026-07-02T11:48:14+08:00",
+            "worker_dispatch_started_at": "2026-07-02T11:48:18+08:00",
+        },
         "identity_json": '{"user_id":"u001","allowed_customer_ids":["cust-001"]}',
         "runtime_governance": {
             "task_id": "task-runtime-001",
@@ -183,6 +197,10 @@ def test_extract_session_payload_preserves_runtime_bank_context_in_meta() -> Non
     assert native_payload["meta"]["user_id"] == "u001"
     assert native_payload["meta"]["trace_id"] == "trace-runtime-001"
     assert native_payload["meta"]["runtime_task_id"] == "task-runtime-001"
+    assert native_payload["meta"]["runtime_execution_mode"] == "simple_text_fast"
+    assert native_payload["meta"]["runtime_response_mode"] == "stream_answer"
+    assert native_payload["meta"]["runtime_datetime_context"] == payload["runtime_datetime_context"]
+    assert native_payload["meta"]["runtime_latency_marks"] == payload["runtime_latency_marks"]
     assert native_payload["meta"]["identity_json"] == payload["identity_json"]
     assert native_payload["meta"]["runtime_governance"] == payload["runtime_governance"]
     assert native_payload["meta"]["runtime_tool_gateway"] == payload["runtime_tool_gateway"]
@@ -642,3 +660,103 @@ async def test_non_runtime_console_events_do_not_cleanup_task(monkeypatch) -> No
 
 async def _collect_runtime_events(channel, native_payload: dict) -> list[str]:
     return [event async for event in _stream_runtime_console_events(channel, native_payload)]
+
+
+def test_runtime_event_projector_coalesces_small_text_deltas_before_flush() -> None:
+    projector = RuntimeEventProjector(
+        min_chunk_chars=256,
+        max_chunk_chars=512,
+        max_chunk_delay_seconds=0.5,
+    )
+    emitted: list[dict[str, str]] = []
+    delta_text = "短句" * 10
+
+    for index in range(20):
+        emitted.extend(
+            projector.project(
+                {
+                    "object": "content",
+                    "type": "text",
+                    "status": "in_progress",
+                    "delta": True,
+                    "text": delta_text,
+                },
+                now=1.0 + index * 0.01,
+            ),
+        )
+
+    chunks_before_terminal = [
+        event for event in emitted if event["event"] == "answer.chunk"
+    ]
+    emitted.extend(projector.finish(success=True, now=1.4))
+    chunks = [event for event in emitted if event["event"] == "answer.chunk"]
+
+    assert chunks_before_terminal == []
+    assert len(chunks) == 1
+    assert chunks[0]["text"] == delta_text * 20
+
+
+def test_runtime_event_projector_flushes_last_chunk_before_completed() -> None:
+    projector = RuntimeEventProjector(
+        min_chunk_chars=256,
+        max_chunk_chars=512,
+        max_chunk_delay_seconds=0.5,
+    )
+
+    emitted = projector.project(
+        {
+            "object": "content",
+            "type": "text",
+            "status": "in_progress",
+            "delta": True,
+            "text": "最后一段",
+        },
+        now=2.0,
+    )
+    emitted.extend(projector.project({"event": "completed"}, now=2.1))
+
+    assert [event["event"] for event in emitted[-2:]] == [
+        "answer.chunk",
+        "answer.completed",
+    ]
+    assert emitted[-2]["text"] == "最后一段"
+
+
+def test_runtime_event_projector_emits_only_user_facing_statuses() -> None:
+    allowed_statuses = {
+        "task.accepted",
+        "file.reading",
+        "answer.preparing",
+        "answer.generating",
+        "answer.completed",
+        "answer.failed",
+    }
+    success_projector = RuntimeEventProjector()
+    success_events = success_projector.project(
+        {
+            "object": "content",
+            "type": "text",
+            "status": "in_progress",
+            "delta": True,
+            "text": "生成中",
+        },
+        now=3.0,
+    )
+    success_events.extend(
+        success_projector.project({"event": "completed"}, now=3.1),
+    )
+
+    failure_projector = RuntimeEventProjector()
+    failure_events = failure_projector.project({"event": "failed"}, now=4.0)
+    statuses = [
+        event["status"]
+        for event in success_events + failure_events
+        if "status" in event
+    ]
+
+    assert statuses == [
+        "answer.generating",
+        "answer.completed",
+        "answer.failed",
+    ]
+    assert set(statuses) <= allowed_statuses
