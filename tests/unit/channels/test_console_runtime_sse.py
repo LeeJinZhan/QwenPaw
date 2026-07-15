@@ -744,7 +744,7 @@ def test_runtime_projection_finish_flushes_short_answer_tail() -> None:
     assert emitted == [
         {
             "event": "status.changed",
-            "status": "answering",
+            "status": "answer.generating",
             "message": "正在生成回答",
         },
         {"event": "answer.chunk", "text": "简短回答"},

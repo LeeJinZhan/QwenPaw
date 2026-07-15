@@ -728,8 +728,8 @@ def test_runtime_event_projector_emits_only_user_facing_statuses() -> None:
         "file.reading",
         "answer.preparing",
         "answer.generating",
-        "answer.completed",
-        "answer.failed",
+        "completed",
+        "failed",
     }
     success_projector = RuntimeEventProjector()
     success_events = success_projector.project(
@@ -756,7 +756,7 @@ def test_runtime_event_projector_emits_only_user_facing_statuses() -> None:
 
     assert statuses == [
         "answer.generating",
-        "answer.completed",
-        "answer.failed",
+        "completed",
+        "failed",
     ]
     assert set(statuses) <= allowed_statuses

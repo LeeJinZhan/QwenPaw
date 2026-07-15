@@ -20,10 +20,10 @@ _SAFE_FAILURE_MESSAGES = {
 }
 DEFAULT_MIN_CHUNK_CHARS = 256
 DEFAULT_MAX_CHUNK_CHARS = 512
-DEFAULT_MAX_CHUNK_DELAY_SECONDS = 0.5
+DEFAULT_MAX_CHUNK_DELAY_SECONDS = 0.05
 STATUS_ANSWER_GENERATING = "answer.generating"
-STATUS_ANSWER_COMPLETED = "answer.completed"
-STATUS_ANSWER_FAILED = "answer.failed"
+STATUS_ANSWER_COMPLETED = "completed"
+STATUS_ANSWER_FAILED = "failed"
 
 
 def _token(value: Any) -> str:
@@ -289,7 +289,13 @@ class RuntimeEventProjector:  # pylint: disable=too-many-instance-attributes
                             "message": "正在生成回答",
                         },
                     )
-                emitted.extend(self._flush(current_time, force=False))
+                emitted.extend(
+                    self._flush(
+                        current_time,
+                        force=False,
+                        allow_min_chunk=not incremental,
+                    ),
+                )
         elif self.buffer:
             emitted.extend(self._flush(current_time, force=False))
 
@@ -431,7 +437,13 @@ class RuntimeEventProjector:  # pylint: disable=too-many-instance-attributes
         self.buffer += delta
         return delta
 
-    def _flush(self, now: float, *, force: bool) -> list[dict[str, str]]:
+    def _flush(
+        self,
+        now: float,
+        *,
+        force: bool,
+        allow_min_chunk: bool = False,
+    ) -> list[dict[str, str]]:
         if not self.buffer:
             return []
         if self.last_flush_at is None:
@@ -445,7 +457,10 @@ class RuntimeEventProjector:  # pylint: disable=too-many-instance-attributes
         deadline_reached = (
             now - self.last_flush_at >= self.max_chunk_delay_seconds
         )
-        if self.buffer and (force or deadline_reached):
+        min_chunk_reached = (
+            allow_min_chunk and len(self.buffer) >= self.min_chunk_chars
+        )
+        if self.buffer and (force or deadline_reached or min_chunk_reached):
             emitted.append(
                 self._pop_chunk(
                     min(len(self.buffer), self.max_chunk_chars),

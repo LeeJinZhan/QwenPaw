@@ -38,6 +38,7 @@ from .bank_assistant import bank_assistant
 # Registered via react_agent's hardcoded tool_functions; kept out of
 # __all__ so it's always enabled, not gated on agent config.
 from .make_skill_tools import materialize_skill  # noqa: F401
+from .run_tool_batch import run_tool_batch  # noqa: F401
 
 __all__ = [
     "execute_python_code",
@@ -68,4 +69,5 @@ __all__ = [
     "check_agent_task",
     "spawn_subagent",
     "bank_assistant",
+    "run_tool_batch",
 ]
