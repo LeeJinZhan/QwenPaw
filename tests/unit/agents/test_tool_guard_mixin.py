@@ -16,7 +16,7 @@ Covers:
 # pylint: disable=protected-access,unused-argument
 
 import asyncio
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -25,6 +25,7 @@ from qwenpaw.agents.tool_guard_mixin import (
     _normalize_tool_guard_ui_lang,
     _tool_guard_t,
 )
+from qwenpaw.agents.runtime_tool_gateway import RuntimeToolGatewayError
 from qwenpaw.security.tool_guard.execution_level import ToolExecutionLevel
 from qwenpaw.security.tool_guard.models import (
     GuardSeverity,
@@ -472,3 +473,50 @@ class TestEnsureToolGuard:
         assert hasattr(m, "_tool_guard_engine")
         assert hasattr(m, "_tool_guard_approval_service")
         assert hasattr(m, "_tool_guard_lock")
+
+
+# ---------------------------------------------------------------------------
+# Runtime Tool Gateway execution boundary
+# ---------------------------------------------------------------------------
+
+
+class TestRuntimeToolGatewayExecution:
+    """The native tool executes only after Runtime preflight allows it."""
+
+    @pytest.mark.asyncio
+    async def test_gateway_denial_returns_tool_failure_without_execution(self):
+        m = _make_mixin()
+        gateway = MagicMock()
+        gateway.preflight = AsyncMock(side_effect=RuntimeToolGatewayError("denied"))
+        m._runtime_tool_gateway_client = MagicMock(return_value=gateway)
+        m._call_parent_tool = AsyncMock()
+        m._emit_runtime_gateway_failure = AsyncMock()
+
+        result = await m._execute_runtime_gateway_tool_call(
+            {"id": "call_001", "name": "write_file", "input": {"path": "output/a.txt"}},
+        )
+
+        assert result is None
+        m._call_parent_tool.assert_not_awaited()
+        m._emit_runtime_gateway_failure.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_gateway_allow_executes_native_tool_then_reports_status_only(self):
+        m = _make_mixin()
+        gateway = MagicMock()
+        gateway.preflight = AsyncMock(return_value={"tool_call_id": "tool_001"})
+        gateway.report_result = AsyncMock(return_value={"status": "completed"})
+        m._runtime_tool_gateway_client = MagicMock(return_value=gateway)
+        m._call_parent_tool = AsyncMock(return_value={"sensitive_native_output": "never audited"})
+        m._emit_runtime_gateway_failure = AsyncMock()
+        tool_call = {"id": "call_001", "name": "write_file", "input": {"path": "output/a.txt"}}
+
+        result = await m._execute_runtime_gateway_tool_call(tool_call)
+
+        assert result == {"sensitive_native_output": "never audited"}
+        gateway.preflight.assert_awaited_once_with("write_file", {"path": "output/a.txt"})
+        gateway.report_result.assert_awaited_once()
+        report_args = gateway.report_result.await_args.args
+        assert report_args[0] == "tool_001"
+        assert report_args[1] == "completed"
+        assert "sensitive_native_output" not in str(gateway.report_result.await_args)

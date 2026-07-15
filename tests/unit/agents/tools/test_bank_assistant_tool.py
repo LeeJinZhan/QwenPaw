@@ -33,6 +33,38 @@ async def test_bank_assistant_tool_returns_service_reply(monkeypatch):
             calls.append(request)
             return FakeResponse()
 
+    class FakeIdentity:
+        def __init__(
+            self,
+            user_id,
+            display_name,
+            roles,
+            org_id,
+            allowed_customer_ids,
+        ):
+            self.user_id = user_id
+            self.display_name = display_name
+            self.roles = roles
+            self.org_id = org_id
+            self.allowed_customer_ids = allowed_customer_ids
+
+    class FakeRequest:
+        def __init__(
+            self,
+            message,
+            customer_id,
+            session_id,
+            identity,
+            channel,
+        ):
+            self.message = message
+            self.customer_id = customer_id
+            self.session_id = session_id
+            self.identity = identity
+            self.channel = channel
+
+    monkeypatch.setattr(bank_assistant_module, "BankIdentity", FakeIdentity)
+    monkeypatch.setattr(bank_assistant_module, "QwenPawBankRequest", FakeRequest)
     monkeypatch.setattr(
         bank_assistant_module,
         "BankAssistantService",

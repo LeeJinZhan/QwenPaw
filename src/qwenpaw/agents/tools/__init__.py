@@ -23,6 +23,9 @@ from .desktop_screenshot import desktop_screenshot
 from .view_media import view_image, view_video
 from .get_current_time import get_current_time, set_user_timezone
 from .get_token_usage import get_token_usage
+from .runtime_attachment_read import runtime_attachment_read
+from .runtime_sandbox_files import runtime_sandbox_files_search
+from .runtime_tool_gateway import runtime_tool_gateway
 from .agent_management import (
     list_agents,
     chat_with_agent,
@@ -36,6 +39,7 @@ from .bank_assistant import bank_assistant
 # Registered via react_agent's hardcoded tool_functions; kept out of
 # __all__ so it's always enabled, not gated on agent config.
 from .make_skill_tools import materialize_skill  # noqa: F401
+from .run_tool_batch import run_tool_batch  # noqa: F401
 
 __all__ = [
     "execute_python_code",
@@ -57,6 +61,9 @@ __all__ = [
     "get_current_time",
     "set_user_timezone",
     "get_token_usage",
+    "runtime_attachment_read",
+    "runtime_sandbox_files_search",
+    "runtime_tool_gateway",
     "delegate_external_agent",
     "list_agents",
     "chat_with_agent",
@@ -64,4 +71,5 @@ __all__ = [
     "check_agent_task",
     "spawn_subagent",
     "bank_assistant",
+    "run_tool_batch",
 ]

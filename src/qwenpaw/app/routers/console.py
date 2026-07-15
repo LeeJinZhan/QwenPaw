@@ -32,6 +32,24 @@ class MarkInboxReadRequest(BaseModel):
 
 
 MAX_DEBUG_LOG_LINES = 1000
+RUNTIME_CHANNEL_META_KEYS = (
+    "conversation_id",
+    "runtime_task_id",
+    "trace_id",
+    "runtime_execution_mode",
+    "runtime_response_mode",
+    "runtime_generation_controls",
+    "runtime_datetime_context",
+    "runtime_latency_marks",
+    "runtime_constraints",
+    "execution_sandbox",
+    "policy_search_context",
+    "identity_json",
+    "runtime_governance",
+    "runtime_tool_gateway",
+    "attachments_manifest",
+    "sandbox_context",
+)
 
 
 def _safe_filename(name: str) -> str:
@@ -93,16 +111,180 @@ def _extract_session_and_payload(request_data: Union[AgentRequest, dict]):
             elif isinstance(content_part, dict) and "content" in content_part:
                 content_parts.extend(content_part["content"] or [])
 
+    channel_meta = {
+        "session_id": session_id,
+        "user_id": sender_id,
+    }
+    if isinstance(request_data, dict):
+        for key in RUNTIME_CHANNEL_META_KEYS:
+            if key in request_data:
+                channel_meta[key] = request_data[key]
+    else:
+        for key in RUNTIME_CHANNEL_META_KEYS:
+            value = getattr(request_data, key, None)
+            if value is not None:
+                channel_meta[key] = value
+
     native_payload = {
         "channel_id": channel_id,
         "sender_id": sender_id,
         "content_parts": content_parts,
-        "meta": {
-            "session_id": session_id,
-            "user_id": sender_id,
-        },
+        "meta": channel_meta,
     }
     return native_payload
+
+
+def _is_runtime_native_payload(native_payload: dict) -> bool:
+    return (
+        isinstance(native_payload, dict)
+        and native_payload.get("channel_id") == "bank-runtime"
+    )
+
+
+def _is_runtime_terminal_sse(event_data: str) -> bool:
+    for raw_line in str(event_data).splitlines():
+        line = raw_line.strip()
+        if not line.startswith("data:"):
+            continue
+        try:
+            payload = json.loads(line.removeprefix("data:").strip())
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        event = str(payload.get("event") or payload.get("event_type") or "").strip()
+        status = str(payload.get("status") or "").strip()
+        if event in {
+            "completed",
+            "done",
+            "success",
+            "agent.completed",
+            "answer.completed",
+            "failed",
+            "error",
+            "agent.failed",
+            "answer.failed",
+        }:
+            return True
+        if payload.get("object") == "response" and status in {
+            "completed",
+            "failed",
+            "error",
+        }:
+            return True
+    return False
+
+
+def _runtime_missing_terminal_sse(native_payload: dict) -> str:
+    del native_payload
+    return (
+        "data: "
+        f"{json.dumps({'event': 'answer.failed', 'status': 'failed', 'message': '回答生成失败'}, ensure_ascii=False)}"
+        "\n\n"
+    )
+
+
+def _runtime_invalid_sandbox_sse() -> str:
+    return (
+        "data: "
+        f"{json.dumps({'event': 'answer.failed', 'status': 'failed', 'message': '回答生成失败'}, ensure_ascii=False)}"
+        "\n\n"
+    )
+
+
+def _runtime_task_ids(meta: dict) -> tuple[str, str]:
+    runtime_task_id = str(meta.get("runtime_task_id") or "").strip()
+    sandbox_context = meta.get("sandbox_context")
+    sandbox_task_id = (
+        str(sandbox_context.get("task_id") or "").strip()
+        if isinstance(sandbox_context, dict)
+        else ""
+    )
+    return runtime_task_id, sandbox_task_id
+
+
+async def _stream_runtime_console_events(
+    console_channel,
+    native_payload: dict,
+) -> AsyncGenerator[str, None]:
+    runtime_request = (
+        isinstance(native_payload, dict)
+        and native_payload.get("channel_id") == "bank-runtime"
+    )
+    meta = native_payload.get("meta") if isinstance(native_payload, dict) else {}
+    if not isinstance(meta, dict):
+        meta = {}
+    runtime_task_id, sandbox_task_id = _runtime_task_ids(meta)
+    if runtime_request and (
+        not runtime_task_id
+        or not sandbox_task_id
+        or runtime_task_id != sandbox_task_id
+    ):
+        await _cleanup_runtime_task_files_many(
+            sandbox_task_id,
+            runtime_task_id,
+        )
+        yield _runtime_invalid_sandbox_sse()
+        return
+
+    lifetime_reservation = None
+    if runtime_request:
+        from ...agents.tools import runtime_sandbox_oss
+
+        try:
+            lifetime_reservation = (
+                runtime_sandbox_oss._DEFAULT_TASK_ATTACHMENT_CACHE.reserve_task_io(
+                    runtime_task_id,
+                )
+            )
+        except Exception:
+            await _cleanup_runtime_task_files(runtime_task_id)
+            yield _runtime_invalid_sandbox_sse()
+            return
+    try:
+        terminal_seen = False
+        async for event_data in console_channel.stream_one(native_payload):
+            if _is_runtime_terminal_sse(event_data):
+                terminal_seen = True
+            yield event_data
+        if not terminal_seen:
+            yield _runtime_missing_terminal_sse(native_payload)
+    finally:
+        if lifetime_reservation is not None:
+            lifetime_reservation.release()
+        if runtime_request and runtime_task_id:
+            await _cleanup_runtime_task_files(runtime_task_id)
+
+
+async def _cleanup_runtime_task_files_many(*task_ids: str) -> None:
+    seen: set[str] = set()
+    for task_id in task_ids:
+        normalized = str(task_id or "").strip()
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        await _cleanup_runtime_task_files(normalized)
+
+
+async def _cleanup_runtime_task_files(runtime_task_id: str) -> None:
+    from ...agents.tools import runtime_sandbox_oss
+
+    cleanup = asyncio.create_task(
+        asyncio.to_thread(
+            runtime_sandbox_oss._DEFAULT_TASK_ATTACHMENT_CACHE.cleanup_task,
+            runtime_task_id,
+        ),
+    )
+    try:
+        await asyncio.shield(cleanup)
+    except asyncio.CancelledError:
+        await cleanup
+        raise
+    except Exception:
+        logger.exception(
+            "Failed to clean Runtime task attachment cache task_id=%s",
+            runtime_task_id,
+        )
 
 
 def _tail_text_file(
@@ -140,7 +322,7 @@ def _tail_text_file(
     "Use body.reconnect=true to attach to a running stream.",
 )
 async def post_console_chat(
-    request_data: Union[AgentRequest, dict],
+    request_data: dict,
     request: Request,
 ) -> StreamingResponse:
     """Stream agent response. Run continues in background after disconnect.
@@ -193,6 +375,15 @@ async def post_console_chat(
         queue = await tracker.attach(chat.id)
         if queue is None:
             return
+    elif _is_runtime_native_payload(native_payload):
+        return StreamingResponse(
+            _stream_runtime_console_events(console_channel, native_payload),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+            },
+        )
     else:
         queue, _ = await tracker.attach_or_start(
             chat.id,
@@ -204,10 +395,16 @@ async def post_console_chat(
         # Hold iterator so finally can aclose(); guarantees stream_from_queue's
         # finally (detach_subscriber) on client abort / generator teardown.
         stream_it = tracker.stream_from_queue(queue, chat.id)
+        runtime_request = _is_runtime_native_payload(native_payload)
+        terminal_seen = False
         try:
             try:
                 async for event_data in stream_it:
+                    if runtime_request and _is_runtime_terminal_sse(event_data):
+                        terminal_seen = True
                     yield event_data
+                if runtime_request and not terminal_seen:
+                    yield _runtime_missing_terminal_sse(native_payload)
             except Exception as e:
                 logger.exception("Console chat stream error")
                 yield f"data: {json.dumps({'error': str(e)})}\n\n"

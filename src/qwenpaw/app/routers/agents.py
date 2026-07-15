@@ -389,6 +389,17 @@ async def create_agent(
     tools = ToolsConfig()
     _apply_sandbox_tool_defaults(tools, sandbox)
 
+    active_model = request.active_model
+    if not active_model or not active_model.provider_id:
+        try:
+            from ...providers import ProviderManager
+
+            global_model = ProviderManager.get_instance().get_active_model()
+            if global_model and global_model.provider_id:
+                active_model = global_model
+        except Exception:
+            pass
+
     agent_config = AgentProfileConfig(
         id=new_id,
         name=request.name,
@@ -400,7 +411,7 @@ async def create_agent(
         heartbeat=HeartbeatConfig(),
         tools=tools,
         sandbox=sandbox,
-        active_model=request.active_model,
+        active_model=active_model,
     )
 
     _initialize_agent_workspace(

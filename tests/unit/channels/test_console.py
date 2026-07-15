@@ -522,6 +522,55 @@ class TestConsoleStreaming:
 
             assert len(events) == 1
 
+    async def test_stream_one_processes_runtime_json_text_content(
+        self,
+        stream_channel,
+    ):
+        """Runtime JSON text blocks should be processed, not debounced."""
+        from agentscope_runtime.engine.schemas.agent_schemas import (
+            RunStatus,
+            Event,
+            Message,
+            MessageType,
+            Role,
+            TextContent,
+            ContentType,
+        )
+
+        mock_event = Event(
+            object="message",
+            status=RunStatus.Completed,
+            type="message.completed",
+            id="ev-runtime-json-text",
+            created_at=1234567890,
+            message=Message(
+                type=MessageType.MESSAGE,
+                role=Role.ASSISTANT,
+                content=[TextContent(type=ContentType.TEXT, text="Done")],
+            ),
+        )
+        captured_request = None
+
+        async def mock_process(request):
+            nonlocal captured_request
+            captured_request = request
+            yield mock_event
+
+        stream_channel._process = mock_process
+
+        payload = {
+            "channel_id": "bank-runtime",
+            "sender_id": "u001",
+            "content_parts": [{"type": "text", "text": "测试连通性"}],
+            "meta": {"session_id": "qpaw_runtime_json_text"},
+        }
+
+        events = [event async for event in stream_channel.stream_one(payload)]
+
+        assert any("data:" in event for event in events)
+        assert captured_request is not None
+        assert captured_request.input[0].content[0].text == "测试连通性"
+
     async def test_stream_one_falls_back_on_surrogate_json_error(
         self,
         stream_channel,
