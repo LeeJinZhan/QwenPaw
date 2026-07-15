@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import json as _json
 import logging
+import time
 import uuid as _uuid
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -30,6 +31,7 @@ from ..constant import (
     TOOL_GUARD_APPROVAL_TIMEOUT_SECONDS,
     TOOL_GUARD_APPROVAL_HEARTBEAT_INTERVAL,
 )
+from .runtime_tool_gateway import RuntimeToolGatewayClient, RuntimeToolGatewayError
 
 if TYPE_CHECKING:
     from qwenpaw.app.approvals import PendingApproval
@@ -131,6 +133,81 @@ class ToolGuardMixin:
             return _normalize_tool_guard_ui_lang(raw)
         return "en"
 
+    def _runtime_tool_gateway_client(self) -> RuntimeToolGatewayClient | None:
+        request_context = getattr(self, "_request_context", None) or {}
+        if not isinstance(request_context, dict):
+            return None
+        return RuntimeToolGatewayClient.from_request_context(request_context)
+
+    async def _call_parent_tool(self, tool_call: dict[str, Any]) -> dict | None:
+        return await super()._acting(tool_call)  # type: ignore[misc]
+
+    async def _emit_runtime_gateway_failure(self, tool_call: dict[str, Any], message: str) -> None:
+        from agentscope.message import ToolResultBlock
+
+        tool_res_msg = Msg(
+            "system",
+            [
+                ToolResultBlock(
+                    type="tool_result",
+                    id=tool_call["id"],
+                    name=str(tool_call.get("name", "tool")),
+                    output=[{"type": "text", "text": message}],
+                ),
+            ],
+            "system",
+        )
+        await self.print(tool_res_msg, True)
+        await self.memory.add(tool_res_msg)
+
+    async def _execute_runtime_gateway_tool_call(self, tool_call: dict[str, Any]) -> dict | None:
+        try:
+            client = self._runtime_tool_gateway_client()
+        except RuntimeToolGatewayError:
+            await self._emit_runtime_gateway_failure(tool_call, "Tool Gateway configuration is invalid; tool execution was blocked.")
+            return None
+        if client is None:
+            return await self._call_parent_tool(tool_call)
+
+        tool_name = str(tool_call.get("name", ""))
+        tool_input = tool_call.get("input", {})
+        if not tool_name or not isinstance(tool_input, dict):
+            await self._emit_runtime_gateway_failure(tool_call, "Tool Gateway rejected an invalid tool call.")
+            return None
+        try:
+            preflight = await client.preflight(tool_name, tool_input)
+        except RuntimeToolGatewayError:
+            await self._emit_runtime_gateway_failure(tool_call, "Tool Gateway denied this tool call; it was not executed.")
+            return None
+
+        started_at = time.monotonic()
+        try:
+            result = await self._call_parent_tool(tool_call)
+        except asyncio.CancelledError:
+            try:
+                await client.report_result(
+                    preflight["tool_call_id"],
+                    "cancelled",
+                    int((time.monotonic() - started_at) * 1000),
+                    "CANCELLED",
+                )
+            except RuntimeToolGatewayError:
+                logger.warning("Tool Gateway audit writeback failed after tool cancellation")
+            raise
+        except Exception:
+            try:
+                await client.report_result(preflight["tool_call_id"], "failed", int((time.monotonic() - started_at) * 1000), "TOOL_EXECUTION_FAILED")
+            except RuntimeToolGatewayError:
+                await self._emit_runtime_gateway_failure(tool_call, "Tool Gateway audit writeback failed.")
+                return None
+            raise
+        try:
+            await client.report_result(preflight["tool_call_id"], "completed", int((time.monotonic() - started_at) * 1000))
+        except RuntimeToolGatewayError:
+            await self._emit_runtime_gateway_failure(tool_call, "Tool Gateway audit writeback failed.")
+            return None
+        return result
+
     # ------------------------------------------------------------------
     # _acting override
     # ------------------------------------------------------------------
@@ -155,7 +232,7 @@ class ToolGuardMixin:
         ctx = getattr(self, "_request_context", None) or {}
         # TODO: remove this
         if ctx.get("_headless_tool_guard", "true").lower() == "false":
-            return await super()._acting(tool_call)  # type: ignore[misc]
+            return await self._execute_runtime_gateway_tool_call(tool_call)
 
         self._ensure_tool_guard()
 
@@ -173,7 +250,7 @@ class ToolGuardMixin:
         if action is not None:
             return await self._execute_guard_action(action, tool_call)
 
-        return await super()._acting(tool_call)  # type: ignore[misc]
+        return await self._execute_runtime_gateway_tool_call(tool_call)
 
     # pylint: disable=too-many-return-statements
     async def _decide_guard_action(
@@ -493,7 +570,7 @@ class ToolGuardMixin:
                 tool_name,
             )
             # Execute the tool
-            return await super()._acting(tool_call)  # type: ignore[misc]
+            return await self._execute_runtime_gateway_tool_call(tool_call)
         elif decision == ApprovalDecision.DENIED:
             logger.info(
                 "Tool '%s' denied by user",
