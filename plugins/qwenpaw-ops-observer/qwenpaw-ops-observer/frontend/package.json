@@ -1,0 +1,13 @@
+{
+  "name": "qwenpaw-ops-observer-frontend",
+  "version": "1.1.0",
+  "private": true,
+  "scripts": {
+    "build": "vite build"
+  },
+  "devDependencies": {
+    "vite": "^5.0.0",
+    "typescript": "^5.0.0",
+    "@vitejs/plugin-react": "^4.0.0"
+  }
+}

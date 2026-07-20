@@ -1,0 +1,28 @@
+{
+  "id": "dual-workspace",
+  "name": "双 Workspace 架构",
+  "version": "1.0.0",
+  "type": "general",
+  "description": "智能体 Workspace（只读）+ 用户 Workspace（读写）非侵入合并",
+  "description_i18n": {
+    "zh-CN": "智能体 Workspace（只读）+ 用户 Workspace（读写）非侵入合并",
+    "en-US": "Read-only agent workspace + per-user read-write workspace, merged non-invasively via hooks"
+  },
+  "author": "QwenPaw",
+  "entry": {
+    "backend": "plugin.py"
+  },
+  "dependencies": [],
+  "qwenpaw_version": {
+    "min": "2.0.0"
+  },
+  "meta": {
+    "category": "workspace",
+    "features": [
+      "dual-workspace",
+      "user-isolation",
+      "tool-merge",
+      "skill-merge"
+    ]
+  }
+}

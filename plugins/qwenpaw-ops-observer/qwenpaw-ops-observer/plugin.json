@@ -1,0 +1,22 @@
+{
+  "id": "qwenpaw-ops-observer",
+  "name": "Ops Observer",
+  "version": "1.1.0",
+  "description": "Content-free operations observation for QwenPaw agents, with a console dashboard.",
+  "description_i18n": {
+    "zh-CN": "面向 QwenPaw 智能体的无内容运维观测，附控制台可视化仪表盘。",
+    "en-US": "Content-free operations observation for QwenPaw agents, with a console dashboard."
+  },
+  "author": "runtime-agent",
+  "type": "general",
+  "entry": {
+    "backend": "backend.py",
+    "frontend": "dist/index.js"
+  },
+  "dependencies": ["PyMySQL>=1.0.0", "python-dotenv>=1.0.0"],
+  "qwenpaw_version": {"min": "2.0.0", "max": "2.1.0"},
+  "meta": {
+    "db_url_env": "OPS_OBSERVER_DB_URL",
+    "config_file": ".env"
+  }
+}
