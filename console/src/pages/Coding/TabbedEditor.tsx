@@ -994,7 +994,7 @@ export default function TabbedEditor({
                 acceptSuggestionOnCommitCharacter: true,
                 quickSuggestions: true,
                 parameterHints: { enabled: true },
-                hover: { enabled: true },
+                hover: { enabled: "on" },
                 gotoLocation: { multiple: "goto" },
               }}
             />
