@@ -11,7 +11,7 @@ from qwenpaw.agents.runtime_tool_gateway import RuntimeToolGatewayClient
 def _context() -> dict:
     return {
         "runtime_tool_gateway": {
-            "protocol": "preflight_result_v1",
+            "protocol": "preflight_guard_result_v2",
             "base_url": "http://runtime.example",
             "endpoint": "/runtime/v1/tool-calls",
             "token": "worker-token",
@@ -81,6 +81,33 @@ async def test_result_retries_three_times_without_tool_output(monkeypatch):
 
     assert result["status"] == "completed"
     assert attempts == 3
+
+
+@pytest.mark.asyncio
+async def test_guard_callback_uses_same_call_and_only_the_decision(monkeypatch):
+    client = RuntimeToolGatewayClient.from_request_context(_context())
+    requests: list[dict] = []
+
+    async def fake_post(_self, _url, payload, _headers):
+        requests.append(payload)
+        return {"tool_call_id": "tool_001", "status": "executing"}
+
+    monkeypatch.setattr(RuntimeToolGatewayClient, "_post", fake_post)
+
+    result = await client.report_guard("tool_001", "allow")
+
+    assert result["status"] == "executing"
+    assert requests == [
+        {
+            "phase": "guard",
+            "task_id": "task_001",
+            "session_id": "sess_001",
+            "tool_session_id": "wts_001",
+            "policy_snapshot_id": "ps_001",
+            "tool_call_id": "tool_001",
+            "guard_decision": "allow",
+        }
+    ]
 
 
 def test_missing_or_other_protocol_does_not_enable_gateway():

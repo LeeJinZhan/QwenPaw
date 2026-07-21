@@ -505,6 +505,7 @@ class TestRuntimeToolGatewayExecution:
         m = _make_mixin()
         gateway = MagicMock()
         gateway.preflight = AsyncMock(return_value={"tool_call_id": "tool_001"})
+        gateway.report_guard = AsyncMock(return_value={"status": "executing"})
         gateway.report_result = AsyncMock(return_value={"status": "completed"})
         m._runtime_tool_gateway_client = MagicMock(return_value=gateway)
         m._call_parent_tool = AsyncMock(return_value={"sensitive_native_output": "never audited"})
@@ -520,3 +521,26 @@ class TestRuntimeToolGatewayExecution:
         assert report_args[0] == "tool_001"
         assert report_args[1] == "completed"
         assert "sensitive_native_output" not in str(gateway.report_result.await_args)
+
+    @pytest.mark.asyncio
+    async def test_runtime_gateway_cannot_bypass_guard_when_headless_flag_is_false(self):
+        m = _make_mixin(_request_context={"_headless_tool_guard": "false"})
+        gateway = MagicMock()
+        gateway.preflight = AsyncMock(return_value={"tool_call_id": "tool_001"})
+        gateway.report_guard = AsyncMock(return_value={"status": "executing"})
+        m._runtime_tool_gateway_client = MagicMock(return_value=gateway)
+        m._decide_guard_action = AsyncMock(return_value=None)
+        m._execute_runtime_gateway_tool_call = AsyncMock(return_value={"status": "ok"})
+        m._emit_runtime_gateway_failure = AsyncMock()
+        tool_call = {"id": "call_001", "name": "execute_shell_command", "input": {"command": "pwd"}}
+
+        result = await m._acting(tool_call)
+
+        assert result == {"status": "ok"}
+        gateway.preflight.assert_awaited_once_with("execute_shell_command", {"command": "pwd"})
+        gateway.report_guard.assert_awaited_once_with("tool_001", "allow")
+        m._execute_runtime_gateway_tool_call.assert_awaited_once_with(
+            tool_call,
+            gateway_client=gateway,
+            preflight={"tool_call_id": "tool_001"},
+        )

@@ -12,7 +12,7 @@ from urllib.request import Request, urlopen
 
 
 RESULT_CALLBACK_MAX_ATTEMPTS = 3
-_PROTOCOL = "preflight_result_v1"
+_PROTOCOL = "preflight_guard_result_v2"
 
 
 class RuntimeToolGatewayError(RuntimeError):
@@ -97,6 +97,20 @@ class RuntimeToolGatewayClient:
                 if attempt + 1 < RESULT_CALLBACK_MAX_ATTEMPTS:
                     await asyncio.sleep(0.05 * (attempt + 1))
         raise RuntimeToolGatewayError("Tool Gateway audit writeback failed") from last_error
+
+    async def report_guard(self, tool_call_id: str, guard_decision: str) -> dict[str, Any]:
+        if guard_decision not in {"allow", "block", "require_approval"}:
+            raise RuntimeToolGatewayError("Tool Guard decision is invalid")
+        return await self._post(
+            self._url,
+            {
+                "phase": "guard",
+                **self._scope_payload(),
+                "tool_call_id": str(tool_call_id),
+                "guard_decision": guard_decision,
+            },
+            self._headers,
+        )
 
     @property
     def _url(self) -> str:
