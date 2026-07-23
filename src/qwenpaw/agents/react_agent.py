@@ -1953,7 +1953,9 @@ class QwenPawAgent(CodingModeMixin, ToolGuardMixin, ReActAgent):
         set_current_shell_command_executable(
             self._agent_config.running.shell_command_executable or None,
         )
-        set_current_sandbox_profile(self._agent_config.sandbox)
+        set_current_sandbox_profile(
+            getattr(self._agent_config, "sandbox", None),
+        )
 
         # Process file and media blocks in messages
         if msg is not None:
