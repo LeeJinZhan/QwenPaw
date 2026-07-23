@@ -6,6 +6,8 @@ ARG UV_IMAGE=agentscope-registry.ap-southeast-1.cr.aliyuncs.com/agentscope/uv:la
 # Stage 1: build console frontend (dist not committed in repo).
 # -----------------------------------------------------------------------------
 FROM ${NODE_IMAGE} AS console-builder
+ARG CONSOLE_BUILD_NODE_OPTIONS="--max-old-space-size=4096"
+ENV NODE_OPTIONS=${CONSOLE_BUILD_NODE_OPTIONS}
 WORKDIR /app
 COPY console /app/console
 RUN cd /app/console && npm ci --include=dev && npm run build
