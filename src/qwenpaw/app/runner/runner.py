@@ -565,6 +565,7 @@ class AgentRunner(Runner):
                 "policy_search_context",
                 "identity_json",
                 "runtime_governance",
+                "runtime_context",
                 "runtime_tool_gateway",
                 "attachments_manifest",
                 "sandbox_context",

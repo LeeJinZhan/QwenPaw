@@ -474,10 +474,14 @@ def test_runtime_projection_diffs_cumulative_text_snapshots() -> None:
     assert len(chunks) == 2
 
 
-def test_runtime_projection_projects_reasoning_message_as_answer_thinking() -> None:
-    projector = _runtime_projector()
+def test_runtime_projection_streams_reasoning_before_first_answer_chunk() -> None:
+    projector = _runtime_projector(
+        min_chunk_chars=1,
+        thinking_chunk_chars=256,
+        thinking_max_delay_seconds=0.1,
+    )
 
-    emitted = projector.project(
+    thinking = projector.project(
         {
             "object": "message",
             "id": "msg-reasoning",
@@ -488,14 +492,82 @@ def test_runtime_projection_projects_reasoning_message_as_answer_thinking() -> N
         },
         now=0.0,
     )
+    thinking_due = projector.flush_due(now=0.1)
+    emitted = projector.project(
+        {
+            "object": "content",
+            "type": "text",
+            "status": "inprogress",
+            "text": "回答",
+        },
+        now=0.2,
+    )
 
-    assert emitted == [
+    assert thinking == [
+        {
+            "event": "status.changed",
+            "status": "answer.generating",
+            "message": "正在生成回答",
+        },
+    ]
+    assert thinking_due == [
         {"event": "answer.thinking", "text": "我先判断问题类型。"},
+    ]
+    assert emitted == [
+        {"event": "answer.chunk", "text": "回答"},
     ]
 
 
-def test_runtime_projection_projects_reasoning_content_deltas_as_answer_thinking() -> None:
-    projector = _runtime_projector()
+def test_runtime_projection_flushes_pending_reasoning_before_answer() -> None:
+    projector = _runtime_projector(
+        min_chunk_chars=1,
+        thinking_chunk_chars=256,
+        thinking_max_delay_seconds=0.1,
+    )
+
+    projector.project(
+        {
+            "object": "message",
+            "id": "msg-reasoning",
+            "role": "assistant",
+            "type": "reasoning",
+            "status": "in_progress",
+            "content": "我先判断问题类型。",
+        },
+        now=0.0,
+    )
+    emitted = projector.project(
+        {
+            "object": "content",
+            "type": "text",
+            "status": "inprogress",
+            "text": "回答",
+        },
+        now=0.05,
+    )
+
+    assert emitted == [
+        {"event": "answer.thinking", "text": "我先判断问题类型。"},
+        {"event": "answer.chunk", "text": "回答"},
+    ]
+
+
+def test_runtime_projection_ignores_reasoning_snapshots_after_answer_starts() -> None:
+    projector = _runtime_projector(
+        min_chunk_chars=1,
+        thinking_chunk_chars=256,
+        thinking_max_delay_seconds=0.1,
+    )
+
+    projector.project(
+        {
+            "object": "content",
+            "type": "text",
+            "status": "in_progress",
+            "text": "回答",
+        },
+        now=0.0,
+    )
 
     emitted = projector.project(
         {
@@ -505,7 +577,7 @@ def test_runtime_projection_projects_reasoning_content_deltas_as_answer_thinking
             "type": "reasoning",
             "status": "in_progress",
         },
-        now=0.0,
+        now=0.01,
     )
     emitted.extend(
         projector.project(
@@ -517,7 +589,7 @@ def test_runtime_projection_projects_reasoning_content_deltas_as_answer_thinking
                 "delta": True,
                 "text": "正在分析",
             },
-            now=0.01,
+            now=0.02,
         ),
     )
     emitted.extend(
@@ -530,14 +602,28 @@ def test_runtime_projection_projects_reasoning_content_deltas_as_answer_thinking
                 "delta": True,
                 "text": "用户问题。",
             },
-            now=0.02,
+            now=0.03,
         ),
     )
+    emitted.extend(projector.flush_due(now=0.14))
 
-    assert emitted == [
-        {"event": "answer.thinking", "text": "正在分析"},
-        {"event": "answer.thinking", "text": "用户问题。"},
-    ]
+    assert emitted == []
+
+
+def test_runtime_projection_reads_chunk_settings_from_environment(monkeypatch) -> None:
+    monkeypatch.setenv("QWENPAW_RUNTIME_ANSWER_MIN_CHUNK_CHARS", "64")
+    monkeypatch.setenv("QWENPAW_RUNTIME_ANSWER_MAX_CHUNK_CHARS", "320")
+    monkeypatch.setenv("QWENPAW_RUNTIME_ANSWER_MAX_DELAY_MS", "25")
+    monkeypatch.setenv("QWENPAW_RUNTIME_THINKING_CHUNK_CHARS", "240")
+    monkeypatch.setenv("QWENPAW_RUNTIME_THINKING_MAX_DELAY_MS", "125")
+
+    projector = RuntimeEventProjector.from_environment()
+
+    assert projector.min_chunk_chars == 64
+    assert projector.max_chunk_chars == 320
+    assert projector.max_chunk_delay_seconds == 0.025
+    assert projector.thinking_chunk_chars == 240
+    assert projector.thinking_max_delay_seconds == 0.125
 
 
 def test_projection_appends_real_agentscope_text_deltas() -> None:
