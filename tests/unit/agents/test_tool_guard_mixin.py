@@ -26,6 +26,7 @@ from qwenpaw.agents.tool_guard_mixin import (
     _tool_guard_t,
 )
 from qwenpaw.agents.runtime_tool_gateway import RuntimeToolGatewayError
+from qwenpaw.security.tool_guard.approval import ApprovalDecision
 from qwenpaw.security.tool_guard.execution_level import ToolExecutionLevel
 from qwenpaw.security.tool_guard.models import (
     GuardSeverity,
@@ -501,6 +502,32 @@ class TestRuntimeToolGatewayExecution:
         m._emit_runtime_gateway_failure.assert_awaited_once()
 
     @pytest.mark.asyncio
+    async def test_gateway_denial_exposes_only_public_summary_to_agent(self):
+        m = _make_mixin()
+        gateway = MagicMock()
+        gateway.preflight = AsyncMock(
+            side_effect=RuntimeToolGatewayError(
+                "internal policy detail",
+                code="POLICY_BLOCKED",
+                violation_type="assistant_tool_not_allowed",
+                public_summary="当前助手未授权使用该工具，请尝试其他方式完成请求。",
+            ),
+        )
+        m._runtime_tool_gateway_client = MagicMock(return_value=gateway)
+        m._call_parent_tool = AsyncMock()
+        m._emit_runtime_gateway_failure = AsyncMock()
+        tool_call = {"id": "call_001", "name": "execute_shell_command", "input": {"command": "pwd"}}
+
+        result = await m._execute_runtime_gateway_tool_call(tool_call)
+
+        assert result is None
+        m._call_parent_tool.assert_not_awaited()
+        m._emit_runtime_gateway_failure.assert_awaited_once_with(
+            tool_call,
+            "当前助手未授权使用该工具，请尝试其他方式完成请求。",
+        )
+
+    @pytest.mark.asyncio
     async def test_gateway_allow_executes_native_tool_then_reports_status_only(self):
         m = _make_mixin()
         gateway = MagicMock()
@@ -544,3 +571,90 @@ class TestRuntimeToolGatewayExecution:
             gateway_client=gateway,
             preflight={"tool_call_id": "tool_001"},
         )
+
+    @pytest.mark.asyncio
+    async def test_auto_denied_guard_reuses_gateway_context_without_type_error(self):
+        m = _make_mixin()
+        m.print = AsyncMock()
+        m.memory.add = AsyncMock()
+        gateway = MagicMock()
+        gateway.report_guard = AsyncMock()
+        tool_call = {
+            "id": "call_001",
+            "name": "execute_shell_command",
+            "input": {"command": "rm -rf /tmp/example"},
+        }
+
+        result = await m._execute_guard_action(
+            _GuardAction(
+                "auto_denied",
+                "execute_shell_command",
+                tool_call["input"],
+            ),
+            tool_call,
+            gateway_client=gateway,
+            gateway_preflight={"tool_call_id": "tool_001"},
+        )
+
+        assert result is None
+        m.print.assert_awaited_once()
+        m.memory.add.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("decision", "expected_guard_decision", "terminal_method"),
+        [
+            (ApprovalDecision.APPROVED, "allow", "execute"),
+            (ApprovalDecision.DENIED, "block", "denied"),
+            (ApprovalDecision.TIMEOUT, "block", "timeout"),
+        ],
+    )
+    async def test_approval_guard_reuses_original_gateway_preflight(
+        self,
+        decision,
+        expected_guard_decision,
+        terminal_method,
+    ):
+        m = _make_mixin()
+        pending = MagicMock(request_id="approval_001", future=MagicMock())
+        m._tool_guard_approval_service.cancel_stale_pending_for_tool_call = AsyncMock()
+        m._tool_guard_approval_service.create_pending = AsyncMock(return_value=pending)
+        m._emit_waiting_for_approval_blocking = AsyncMock()
+        m._wait_for_approval_with_heartbeat = AsyncMock(return_value=decision)
+        m._execute_runtime_gateway_tool_call = AsyncMock(return_value={"status": "ok"})
+        m._acting_denied = AsyncMock(return_value=None)
+        m._acting_timeout = AsyncMock(return_value=None)
+        gateway = MagicMock()
+        gateway.report_guard = AsyncMock()
+        preflight = {"tool_call_id": "tool_001"}
+        tool_call = {
+            "id": "call_001",
+            "name": "execute_shell_command",
+            "input": {"command": "pwd"},
+        }
+
+        await m._execute_guard_action(
+            _GuardAction(
+                "needs_approval",
+                "execute_shell_command",
+                tool_call["input"],
+            ),
+            tool_call,
+            gateway_client=gateway,
+            gateway_preflight=preflight,
+        )
+
+        gateway.report_guard.assert_awaited_once_with(
+            "tool_001",
+            expected_guard_decision,
+        )
+        if terminal_method == "execute":
+            m._execute_runtime_gateway_tool_call.assert_awaited_once_with(
+                tool_call,
+                gateway_client=gateway,
+                preflight=preflight,
+            )
+        elif terminal_method == "denied":
+            m._acting_denied.assert_awaited_once()
+        else:
+            m._acting_timeout.assert_awaited_once()

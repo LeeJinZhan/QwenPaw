@@ -18,6 +18,19 @@ _PROTOCOL = "preflight_guard_result_v2"
 class RuntimeToolGatewayError(RuntimeError):
     """A Gateway callback could not be completed safely."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str = "",
+        violation_type: str = "",
+        public_summary: str = "",
+    ) -> None:
+        super().__init__(message)
+        self.code = str(code)
+        self.violation_type = str(violation_type)
+        self.public_summary = str(public_summary)
+
 
 @dataclass(frozen=True)
 class RuntimeToolGatewayClient:
@@ -55,14 +68,14 @@ class RuntimeToolGatewayClient:
             trace_id=str(request_context.get("trace_id", "")).strip(),
         )
 
-    async def preflight(self, tool_id: str, tool_input: Mapping[str, Any]) -> dict[str, Any]:
+    async def preflight(self, worker_tool_name: str, tool_input: Mapping[str, Any]) -> dict[str, Any]:
         idempotency_key = str(uuid.uuid4())
         response = await self._post(
             self._url,
             {
                 "phase": "preflight",
                 **self._scope_payload(),
-                "tool_id": str(tool_id),
+                "worker_tool_name": str(worker_tool_name),
                 "input": dict(tool_input),
                 "idempotency_key": idempotency_key,
                 "trace_id": self.trace_id,
@@ -70,7 +83,7 @@ class RuntimeToolGatewayClient:
             self._headers,
         )
         if response.get("decision") != "allow" or response.get("status") != "allowed" or not response.get("tool_call_id"):
-            raise RuntimeToolGatewayError("Tool Gateway denied this tool call")
+            raise self._error_from_response(response, "Tool Gateway denied this tool call")
         return {**response, "idempotency_key": idempotency_key}
 
     async def report_result(
@@ -132,6 +145,22 @@ class RuntimeToolGatewayClient:
         return await asyncio.to_thread(self._post_sync, url, payload, headers)
 
     @staticmethod
+    def _error_from_response(payload: Mapping[str, Any], fallback: str) -> RuntimeToolGatewayError:
+        detail = payload.get("detail") if isinstance(payload.get("detail"), Mapping) else payload
+        details = detail.get("details") if isinstance(detail, Mapping) else {}
+        details = details if isinstance(details, Mapping) else {}
+        return RuntimeToolGatewayError(
+            str(detail.get("message") or fallback) if isinstance(detail, Mapping) else fallback,
+            code=str(detail.get("code") or "") if isinstance(detail, Mapping) else "",
+            violation_type=str(details.get("violation_type") or ""),
+            public_summary=(
+                str(detail.get("public_summary") or "")
+                if isinstance(detail, Mapping)
+                else ""
+            ),
+        )
+
+    @staticmethod
     def _post_sync(url: str, payload: dict[str, Any], headers: dict[str, str]) -> dict[str, Any]:
         request = Request(
             url,
@@ -142,7 +171,18 @@ class RuntimeToolGatewayClient:
         try:
             with urlopen(request, timeout=10) as response:  # noqa: S310 - URL is Runtime-supplied task config
                 body = json.loads(response.read().decode("utf-8"))
-        except (HTTPError, URLError, ValueError, OSError) as exc:
+        except HTTPError as exc:
+            try:
+                error_body = json.loads(exc.read().decode("utf-8"))
+            except (ValueError, OSError, UnicodeDecodeError):
+                error_body = {}
+            if isinstance(error_body, Mapping):
+                raise RuntimeToolGatewayClient._error_from_response(
+                    error_body,
+                    "Tool Gateway request failed",
+                ) from exc
+            raise RuntimeToolGatewayError("Tool Gateway request failed") from exc
+        except (URLError, ValueError, OSError) as exc:
             raise RuntimeToolGatewayError("Tool Gateway request failed") from exc
         if not isinstance(body, dict):
             raise RuntimeToolGatewayError("Tool Gateway response is invalid")

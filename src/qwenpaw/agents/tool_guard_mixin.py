@@ -184,8 +184,11 @@ class ToolGuardMixin:
             try:
                 preflight = await client.preflight(tool_name, tool_input)
                 await client.report_guard(preflight["tool_call_id"], "allow")
-            except RuntimeToolGatewayError:
-                await self._emit_runtime_gateway_failure(tool_call, "Tool Gateway denied this tool call; it was not executed.")
+            except RuntimeToolGatewayError as error:
+                await self._emit_runtime_gateway_failure(
+                    tool_call,
+                    error.public_summary or "Tool Gateway denied this tool call; it was not executed.",
+                )
                 return None
 
         started_at = time.monotonic()
@@ -252,8 +255,11 @@ class ToolGuardMixin:
                 return None
             try:
                 gateway_preflight = await gateway_client.preflight(tool_name, tool_input)
-            except RuntimeToolGatewayError:
-                await self._emit_runtime_gateway_failure(tool_call, "Tool Gateway denied this tool call; it was not executed.")
+            except RuntimeToolGatewayError as error:
+                await self._emit_runtime_gateway_failure(
+                    tool_call,
+                    error.public_summary or "Tool Gateway denied this tool call; it was not executed.",
+                )
                 return None
 
         self._ensure_tool_guard()
@@ -471,14 +477,14 @@ class ToolGuardMixin:
                 tool_call,
                 action.tool_name,
                 action.guard_result,
-                gateway_client=gateway_client,
-                gateway_preflight=gateway_preflight,
             )
         if action.kind == "needs_approval":
             return await self._acting_with_approval(
                 tool_call,
                 action.tool_name,
                 action.guard_result,
+                gateway_client=gateway_client,
+                gateway_preflight=gateway_preflight,
             )
         return None
 
