@@ -26,3 +26,18 @@ def test_console_builder_uses_configurable_node_heap_of_at_least_4096_mb():
     assert builder.index("ENV NODE_OPTIONS=") < builder.index("npm run build")
 
     assert "NODE_OPTIONS" not in runtime
+
+
+def test_console_builder_removes_node_modules_after_build_in_the_same_layer():
+    builder, _ = _dockerfile_stages()
+
+    build_step = re.search(
+        r"^RUN cd /app/console && (?P<command>.+)$",
+        builder,
+        re.MULTILINE,
+    )
+    assert build_step is not None
+    command = build_step.group("command")
+    assert "npm run build" in command
+    assert "rm -rf node_modules" in command
+    assert command.index("npm run build") < command.index("rm -rf node_modules")
