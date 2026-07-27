@@ -50,6 +50,8 @@ RUNTIME_CHANNEL_META_KEYS = (
     "runtime_tool_gateway",
     "attachments_manifest",
     "sandbox_context",
+    "personal_skills_catalog",
+    "personal_skills_access_manifest",
 )
 
 

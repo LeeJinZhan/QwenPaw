@@ -29,6 +29,11 @@ from ..app.mcp import HttpStatefulClient, StdIOStatefulClient
 from .command_handler import CommandHandler
 from .hooks import BootstrapHook
 from .model_factory import create_model_and_formatter
+from .personal_skills import (
+    PersonalSkillProtocolError,
+    PersonalSkillsRegistry,
+    build_personal_skills_catalog_prompt,
+)
 from .prompt import (
     build_multimodal_hint,
     build_system_prompt_from_working_dir,
@@ -163,6 +168,13 @@ def _build_runtime_user_profile_context(
             lines.append(
                 "- preferred_formats: " + ", ".join(dict.fromkeys(safe_formats)),
             )
+            if "markdown" in safe_formats:
+                lines.append(
+                    "- Markdown contract: produce valid GitHub Flavored "
+                    "Markdown. Every table delimiter cell must contain at "
+                    "least three hyphens, and every table row must be on its "
+                    "own line.",
+                )
 
     work_context = preferences.get("work_context")
     if isinstance(work_context, str) and work_context.strip():
@@ -313,6 +325,28 @@ def _runtime_disabled_tools_from_context(
     }
 
 
+def _runtime_allowed_tools_from_context(
+    request_context: dict[str, Any],
+) -> set[str] | None:
+    """Return Runtime's model-visible tool allowlist when Gateway is active."""
+    gateway = request_context.get("runtime_tool_gateway")
+    if not isinstance(gateway, dict):
+        return None
+    constraints = request_context.get("runtime_constraints")
+    allowed_tools = (
+        constraints.get("allowed_tools")
+        if isinstance(constraints, dict) and "allowed_tools" in constraints
+        else gateway.get("allowed_tools")
+    )
+    if not isinstance(allowed_tools, list):
+        return set()
+    return {
+        str(item).strip()
+        for item in allowed_tools
+        if str(item).strip()
+    }
+
+
 def _runtime_simple_text_fast_enabled_from_context(
     request_context: dict[str, Any],
 ) -> bool:
@@ -383,10 +417,21 @@ def _build_runtime_simple_text_fast_prompt(
 ) -> str:
     task_id = str(request_context.get("runtime_task_id", "") or "").strip()
     trace_id = str(request_context.get("trace_id", "") or "").strip()
+    has_personal_skills = bool(
+        build_personal_skills_catalog_prompt(
+            request_context.get("personal_skills_catalog"),
+        ),
+    )
+    tool_rule = (
+        "除 activate_personal_skill 外，不要调用任何工具；不要读写文件，"
+        "不要访问浏览器、shell、外部网络、银行数据库或未授权 MCP。"
+        if has_personal_skills
+        else "不要调用工具，不要读写文件，不要访问浏览器、shell、外部网络、银行数据库或未授权 MCP。"
+    )
     lines = [
         "你是 Bank Agent Runtime 通过 QwenPaw 调用的轻量文本助手。",
         "直接回答用户的简单文本问题，保持简洁、准确，并使用用户的语言。",
-        "不要调用工具，不要读写文件，不要访问浏览器、shell、外部网络、银行数据库或未授权 MCP。",
+        tool_rule,
         "如果用户问题需要附件、客户数据、外部系统、工具执行或高风险能力，说明该请求需要走完整任务模式。",
         "不要声称已经创建文件、执行命令、查询客户信息或调用外部系统。",
     ]
@@ -414,6 +459,27 @@ def _build_runtime_simple_text_fast_prompt(
             )
     if language:
         lines.append(f"Preferred language: {language}")
+    return "\n".join(lines)
+
+
+def _build_runtime_datetime_context_prompt(
+    request_context: dict[str, Any],
+) -> str:
+    datetime_context = request_context.get("runtime_datetime_context")
+    if not isinstance(datetime_context, dict):
+        return ""
+    values = {
+        "Current date": str(datetime_context.get("current_date", "") or "").strip(),
+        "Current datetime": str(datetime_context.get("current_datetime", "") or "").strip(),
+        "Timezone": str(datetime_context.get("timezone", "") or "").strip(),
+    }
+    lines = ["Runtime trusted time context:"]
+    lines.extend(f"- {label}: {value}" for label, value in values.items() if value)
+    if len(lines) == 1:
+        return ""
+    lines.append(
+        "Use this context for current-date and current-time questions; do not call a time tool unless Runtime explicitly exposes one.",
+    )
     return "\n".join(lines)
 
 
@@ -473,6 +539,27 @@ class QwenPawAgent(CodingModeMixin, ToolGuardMixin, ReActAgent):
         self._agent_config = agent_config
         self._env_context = env_context
         self._request_context = dict(request_context or {})
+        access_manifest = self._request_context.pop(
+            "personal_skills_access_manifest",
+            None,
+        )
+        self._personal_skills_registry: PersonalSkillsRegistry | None = None
+        personal_skills_catalog = self._request_context.get(
+            "personal_skills_catalog",
+        )
+        if personal_skills_catalog is not None or access_manifest is not None:
+            try:
+                registry = PersonalSkillsRegistry.from_payloads(
+                    personal_skills_catalog,
+                    access_manifest,
+                )
+                if registry.has_items:
+                    self._personal_skills_registry = registry
+                else:
+                    registry.close()
+            except PersonalSkillProtocolError as exc:
+                logger.warning("Ignored invalid Personal Skills protocol: %s", exc)
+                self._request_context.pop("personal_skills_catalog", None)
         self._mcp_clients = mcp_clients or []
         self._namesake_strategy = namesake_strategy
         self._workspace_dir = workspace_dir
@@ -584,7 +671,9 @@ class QwenPawAgent(CodingModeMixin, ToolGuardMixin, ReActAgent):
         if _runtime_simple_text_fast_enabled_from_context(
             getattr(self, "_request_context", {}) or {},
         ):
-            return Toolkit()
+            toolkit = Toolkit()
+            QwenPawAgent._register_personal_skill_tool(self, toolkit)
+            return toolkit
         toolkit = Toolkit()
 
         # Check which tools are enabled from agent config
@@ -688,10 +777,16 @@ class QwenPawAgent(CodingModeMixin, ToolGuardMixin, ReActAgent):
         runtime_disabled_tools = _runtime_disabled_tools_from_context(
             self._request_context,
         )
+        runtime_allowed_tools = _runtime_allowed_tools_from_context(
+            self._request_context,
+        )
         registered_tool_names: set[str] = set()
         for tool_name, tool_func in tool_functions.items():
             if tool_name in runtime_disabled_tools:
                 logger.debug("Skipped Runtime-disabled tool: %s", tool_name)
+                continue
+            if runtime_allowed_tools is not None and tool_name not in runtime_allowed_tools:
+                logger.debug("Skipped tool outside Runtime allowlist: %s", tool_name)
                 continue
             # For plugin tools: skip if not in config (security)
             # For hardcoded tools: default to enabled (backward compatibility)
@@ -762,15 +857,27 @@ class QwenPawAgent(CodingModeMixin, ToolGuardMixin, ReActAgent):
         # Coding Mode tools (lsp, ast_search) — only registered when
         # coding_mode.enabled is True and the underlying CLI / language
         # server is reachable.  See CodingModeMixin.
-        try:
-            self._register_coding_mode_tools(
-                toolkit,
-                namesake_strategy=namesake_strategy,
-            )
-        except Exception as e:  # pylint: disable=broad-except
-            logger.warning(f"Failed to register Coding Mode tools: {e}")
+        if runtime_allowed_tools is None:
+            try:
+                self._register_coding_mode_tools(
+                    toolkit,
+                    namesake_strategy=namesake_strategy,
+                )
+            except Exception as e:  # pylint: disable=broad-except
+                logger.warning(f"Failed to register Coding Mode tools: {e}")
+
+        QwenPawAgent._register_personal_skill_tool(self, toolkit)
 
         return toolkit
+
+    def _register_personal_skill_tool(self, toolkit: Toolkit) -> None:
+        registry = getattr(self, "_personal_skills_registry", None)
+        if registry is None:
+            return
+        toolkit.register_tool_function(
+            registry.activate_personal_skill,
+            namesake_strategy=getattr(self, "_namesake_strategy", "skip"),
+        )
 
     def _register_skills(
         self,
@@ -810,7 +917,19 @@ class QwenPawAgent(CodingModeMixin, ToolGuardMixin, ReActAgent):
             logger.debug("Skipped native memory tools in simple_text_fast mode")
             return
         memory_tools = self.memory_manager.list_memory_tools()
+        runtime_allowed_tools = _runtime_allowed_tools_from_context(
+            getattr(self, "_request_context", {}) or {},
+        )
         for tool_fn in memory_tools:
+            if (
+                runtime_allowed_tools is not None
+                and tool_fn.__name__ not in runtime_allowed_tools
+            ):
+                logger.debug(
+                    "Skipped memory tool outside Runtime allowlist: %s",
+                    tool_fn.__name__,
+                )
+                continue
             self.toolkit.register_tool_function(
                 tool_fn,
                 namesake_strategy=self._namesake_strategy,
@@ -837,6 +956,11 @@ class QwenPawAgent(CodingModeMixin, ToolGuardMixin, ReActAgent):
             )
             if profile_context:
                 sys_prompt = sys_prompt + "\n\n" + profile_context
+            personal_skills_context = build_personal_skills_catalog_prompt(
+                request_context.get("personal_skills_catalog"),
+            )
+            if personal_skills_context:
+                sys_prompt = sys_prompt + "\n\n" + personal_skills_context
             return sys_prompt
 
         # Get agent_id from request_context
@@ -881,11 +1005,23 @@ class QwenPawAgent(CodingModeMixin, ToolGuardMixin, ReActAgent):
         if profile_context:
             sys_prompt = sys_prompt + "\n\n" + profile_context
 
+        personal_skills_context = build_personal_skills_catalog_prompt(
+            request_context.get("personal_skills_catalog"),
+        )
+        if personal_skills_context:
+            sys_prompt = sys_prompt + "\n\n" + personal_skills_context
+
         runtime_gateway_context = _build_runtime_tool_gateway_context(
             request_context,
         )
         if runtime_gateway_context:
             sys_prompt = sys_prompt + "\n\n" + runtime_gateway_context
+
+        datetime_context = _build_runtime_datetime_context_prompt(
+            request_context,
+        )
+        if datetime_context:
+            sys_prompt = sys_prompt + "\n\n" + datetime_context
 
         return sys_prompt
 
@@ -1202,6 +1338,10 @@ class QwenPawAgent(CodingModeMixin, ToolGuardMixin, ReActAgent):
         from ..observability.langfuse import tool_span
 
         tool_name = str(tool_call.get("name", ""))
+        personal_skill_activation = (
+            tool_name == "activate_personal_skill"
+            and self._personal_skills_registry is not None
+        )
 
         async with tool_span(
             name=tool_name or "unknown",
@@ -1246,10 +1386,22 @@ class QwenPawAgent(CodingModeMixin, ToolGuardMixin, ReActAgent):
                         langfuse_span.update(output={"blocked": err})
                     return None
 
-            result = await super()._acting(tool_call)
+            if personal_skill_activation:
+                result = await self._acting_personal_skill(tool_call)
+            else:
+                result = await super()._acting(tool_call)
 
             if langfuse_span is not None:
-                langfuse_span.update(output=result)
+                if personal_skill_activation:
+                    langfuse_span.update(
+                        output={
+                            "activated": str(
+                                tool_call.get("input", {}).get("skill_ref", ""),
+                            ),
+                        },
+                    )
+                else:
+                    langfuse_span.update(output=result)
 
             if nb is not None and tool_name in {
                 "create_plan",
@@ -1263,6 +1415,57 @@ class QwenPawAgent(CodingModeMixin, ToolGuardMixin, ReActAgent):
                 nb._plan_text_only_after_mutation = True
 
             return result
+
+    async def _acting_personal_skill(self, tool_call) -> None:
+        """Execute the private activation tool with a redacted Runtime event."""
+        from agentscope.message import ToolResultBlock
+
+        tool_res_msg = Msg(
+            "system",
+            [
+                ToolResultBlock(
+                    type="tool_result",
+                    id=tool_call["id"],
+                    name=tool_call["name"],
+                    output=[],
+                ),
+            ],
+            "system",
+        )
+        try:
+            tool_res = await self.toolkit.call_tool_function(tool_call)
+            async for chunk in tool_res:
+                tool_res_msg.content[0]["output"] = chunk.content
+                runtime_event = self._personal_skills_registry.pop_runtime_event()
+                if runtime_event is not None:
+                    tool_res_msg.metadata["runtime_event"] = runtime_event
+                await self.print(tool_res_msg, chunk.is_last)
+                if chunk.is_interrupted:
+                    raise asyncio.CancelledError()
+        finally:
+            await self.memory.add(tool_res_msg)
+
+    async def prepare_personal_skills_for_persistence(self) -> None:
+        """Remove request-scoped Skill bodies before saving agent memory."""
+        registry = self._personal_skills_registry
+        if registry is None:
+            return
+        try:
+            if self.memory is not None:
+                state = self.memory.state_dict()
+                redacted = registry.redact_for_persistence(state)
+                self.memory.load_state_dict(redacted, strict=False)
+        finally:
+            registry.close()
+            self._personal_skills_registry = None
+            self._request_context.pop("personal_skills_catalog", None)
+            try:
+                self.rebuild_sys_prompt()
+            except Exception:  # cleanup must not mask the completed response
+                logger.warning(
+                    "Failed to rebuild prompt after Personal Skills cleanup",
+                    exc_info=True,
+                )
 
     _AUTO_CONTINUE_MAX_EXTRA = 2
     _AUTO_CONTINUE_TAIL_CHARS = 600

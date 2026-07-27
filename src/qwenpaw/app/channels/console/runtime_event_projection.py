@@ -27,6 +27,18 @@ DEFAULT_THINKING_MAX_DELAY_SECONDS = 0.1
 STATUS_ANSWER_GENERATING = "answer.generating"
 STATUS_ANSWER_COMPLETED = "completed"
 STATUS_ANSWER_FAILED = "failed"
+_PERSONAL_SKILL_RUNTIME_EVENT_TYPES = {
+    "personal_skill.activated",
+    "personal_skill.load_failed",
+}
+_PERSONAL_SKILL_RUNTIME_EVENT_FIELDS = (
+    "event_type",
+    "skill_id",
+    "version_no",
+    "content_hash",
+    "result",
+    "duration_bucket",
+)
 
 
 def _token(value: Any) -> str:
@@ -219,6 +231,34 @@ def _terminal_outcome(payload: dict[str, Any]) -> tuple[bool | None, bool]:
     return None, False
 
 
+def _personal_skill_runtime_event(
+    payload: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Return an allowlisted control event without exposing tool output."""
+    if (
+        _token(payload.get("object")) != "message"
+        or _token(payload.get("status")) not in _SUCCESS_STATES
+    ):
+        return None
+    metadata = payload.get("metadata")
+    if not isinstance(metadata, dict):
+        return None
+    if isinstance(metadata.get("metadata"), dict):
+        metadata = metadata["metadata"]
+    runtime_event = metadata.get("runtime_event")
+    if not isinstance(runtime_event, dict):
+        return None
+    event_type = str(runtime_event.get("event_type", "")).strip()
+    if event_type not in _PERSONAL_SKILL_RUNTIME_EVENT_TYPES:
+        return None
+    safe_event = {
+        key: runtime_event[key]
+        for key in _PERSONAL_SKILL_RUNTIME_EVENT_FIELDS
+        if key in runtime_event
+    }
+    return {"metadata": {"runtime_event": safe_event}}
+
+
 class RuntimeEventProjector:  # pylint: disable=too-many-instance-attributes
     """Stateful native-event to public Runtime-event projector."""
 
@@ -299,7 +339,7 @@ class RuntimeEventProjector:  # pylint: disable=too-many-instance-attributes
         native_event: Any,
         *,
         now: float | None = None,
-    ) -> list[dict[str, str]]:
+    ) -> list[dict[str, Any]]:
         """Consume one native event and return zero or more public events."""
         if self.terminal_sent:
             return []
@@ -314,7 +354,10 @@ class RuntimeEventProjector:  # pylint: disable=too-many-instance-attributes
                 now=current_time,
             )
 
-        emitted: list[dict[str, str]] = []
+        emitted: list[dict[str, Any]] = []
+        runtime_event = _personal_skill_runtime_event(payload)
+        if runtime_event is not None:
+            emitted.append(runtime_event)
         thinking_delta = self._thinking_delta(payload)
         if thinking_delta:
             self._append_thinking(thinking_delta, current_time)

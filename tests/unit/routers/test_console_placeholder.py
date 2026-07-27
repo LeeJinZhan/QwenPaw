@@ -188,6 +188,19 @@ def test_extract_session_payload_preserves_runtime_bank_context_in_meta() -> Non
                 },
             },
         },
+        "personal_skills_catalog": {
+            "snapshot_id": "pss_001",
+            "items": [],
+            "limits": {
+                "max_candidate_loads": 3,
+                "max_activated": 3,
+                "max_activated_bytes": 65536,
+            },
+        },
+        "personal_skills_access_manifest": {
+            "snapshot_id": "pss_001",
+            "items": [],
+        },
         "input": [
             {
                 "role": "user",
@@ -216,6 +229,12 @@ def test_extract_session_payload_preserves_runtime_bank_context_in_meta() -> Non
     assert native_payload["meta"]["sandbox_context"] == payload["sandbox_context"]
     assert native_payload["meta"]["runtime_constraints"] == payload["runtime_constraints"]
     assert native_payload["meta"]["runtime_context"] == payload["runtime_context"]
+    assert native_payload["meta"]["personal_skills_catalog"] == payload[
+        "personal_skills_catalog"
+    ]
+    assert native_payload["meta"]["personal_skills_access_manifest"] == payload[
+        "personal_skills_access_manifest"
+    ]
 
 
 def test_extract_agent_request_payload_preserves_runtime_bank_context_in_meta() -> None:

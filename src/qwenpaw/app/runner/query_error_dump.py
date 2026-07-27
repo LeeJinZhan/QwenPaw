@@ -14,6 +14,8 @@ from ..channels.schema import DEFAULT_CHANNEL
 
 logger = logging.getLogger(__name__)
 
+_REDACTED_REQUEST_KEYS = {"personal_skills_access_manifest"}
+
 
 def _safe_json_serialize(obj: object) -> object:
     """Convert object to JSON-serializable form; use str() for unknowns."""
@@ -22,7 +24,14 @@ def _safe_json_serialize(obj: object) -> object:
     if isinstance(obj, (list, tuple)):
         return [_safe_json_serialize(x) for x in obj]
     if isinstance(obj, dict):
-        return {str(k): _safe_json_serialize(v) for k, v in obj.items()}
+        return {
+            str(k): (
+                "[REDACTED]"
+                if str(k) in _REDACTED_REQUEST_KEYS
+                else _safe_json_serialize(v)
+            )
+            for k, v in obj.items()
+        }
     return str(obj)
 
 
@@ -42,7 +51,7 @@ def _request_to_dict(request: Any) -> Any:
             raw = dict(vars(request))
         return _safe_json_serialize(raw)
     except Exception:
-        return {"_serialize_error": str(request)}
+        return {"_serialize_error": "request serialization failed"}
 
 
 def write_query_error_dump(
@@ -70,7 +79,15 @@ def write_query_error_dump(
         if agent is not None:
             try:
                 if hasattr(agent, "state_dict"):
-                    agent_state = _safe_json_serialize(agent.state_dict())
+                    raw_state = agent.state_dict()
+                    registry = getattr(
+                        agent,
+                        "_personal_skills_registry",
+                        None,
+                    )
+                    if registry is not None:
+                        raw_state = registry.redact_for_persistence(raw_state)
+                    agent_state = _safe_json_serialize(raw_state)
             except Exception as state_err:
                 agent_state = {"_serialize_error": str(state_err)}
         payload = {

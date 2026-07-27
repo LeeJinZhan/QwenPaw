@@ -6,7 +6,7 @@ import json
 from types import SimpleNamespace
 
 import pytest
-from agentscope.message import Msg
+from agentscope.message import Msg, ToolResultBlock
 from agentscope_runtime.engine.schemas.agent_schemas import (
     Message as AgentScopeMessage,
     RunStatus,
@@ -23,6 +23,7 @@ from qwenpaw.app.channels.console.runtime_event_projection import (
     RuntimeEventProjector,
 )
 from qwenpaw.app.routers.console import _stream_runtime_console_events
+from qwenpaw.app.runner.utils import agentscope_msg_to_message
 
 
 def _runtime_projector(**kwargs):
@@ -1059,6 +1060,99 @@ def test_projection_filters_agentscope_tool_events(native_event: dict) -> None:
     assert emitted == []
     assert projector.accepted_sent is False
     assert projector.full_text == ""
+
+
+def test_projection_forwards_sanitized_personal_skill_runtime_event() -> None:
+    projector = _runtime_projector()
+
+    emitted = projector.project(
+        {
+            "object": "message",
+            "type": "plugin_call_output",
+            "role": "tool",
+            "status": "completed",
+            "content": [
+                {"type": "text", "text": "PRIVATE-SKILL-BODY"},
+            ],
+            "metadata": {
+                "runtime_event": {
+                    "event_type": "personal_skill.activated",
+                    "skill_id": "pskill_001",
+                    "version_no": 3,
+                    "content_hash": "a" * 64,
+                    "result": "activated",
+                    "duration_bucket": "lt_100ms",
+                    "skill_body": "PRIVATE-SKILL-BODY",
+                },
+                "private_metadata": "PRIVATE-METADATA",
+            },
+        },
+        now=1.0,
+    )
+
+    assert emitted == [
+        {
+            "metadata": {
+                "runtime_event": {
+                    "event_type": "personal_skill.activated",
+                    "skill_id": "pskill_001",
+                    "version_no": 3,
+                    "content_hash": "a" * 64,
+                    "result": "activated",
+                    "duration_bucket": "lt_100ms",
+                },
+            },
+        },
+    ]
+    assert "PRIVATE" not in json.dumps(emitted)
+    assert projector.accepted_sent is False
+    assert projector.full_text == ""
+
+
+def test_projection_forwards_personal_skill_event_from_agentscope_message() -> None:
+    projector = _runtime_projector()
+    message = Msg(
+        "system",
+        [
+            ToolResultBlock(
+                type="tool_result",
+                id="call_personal_skill_001",
+                name="activate_personal_skill",
+                output=[],
+            ),
+        ],
+        "system",
+        metadata={
+            "runtime_event": {
+                "event_type": "personal_skill.activated",
+                "skill_id": "pskill_001",
+                "version_no": 3,
+                "content_hash": "a" * 64,
+                "result": "activated",
+                "duration_bucket": "lt_500ms",
+            },
+        },
+    )
+
+    runtime_messages = agentscope_msg_to_message(message)
+    assert len(runtime_messages) == 1
+
+    emitted = projector.project(runtime_messages[0].completed(), now=1.0)
+
+    assert emitted == [
+        {
+            "metadata": {
+                "runtime_event": {
+                    "event_type": "personal_skill.activated",
+                    "skill_id": "pskill_001",
+                    "version_no": 3,
+                    "content_hash": "a" * 64,
+                    "result": "activated",
+                    "duration_bucket": "lt_500ms",
+                },
+            },
+        },
+    ]
 
 
 @pytest.mark.parametrize(

@@ -51,6 +51,64 @@ logger = logging.getLogger(__name__)
 
 _PRINT_END_SIGNAL = "[END]"
 
+RUNTIME_REQUEST_CONTEXT_KEYS = (
+    "conversation_id",
+    "runtime_task_id",
+    "trace_id",
+    "runtime_execution_mode",
+    "runtime_response_mode",
+    "runtime_generation_controls",
+    "runtime_datetime_context",
+    "runtime_latency_marks",
+    "runtime_constraints",
+    "execution_sandbox",
+    "policy_search_context",
+    "identity_json",
+    "runtime_governance",
+    "runtime_context",
+    "runtime_tool_gateway",
+    "attachments_manifest",
+    "sandbox_context",
+    "personal_skills_catalog",
+    "personal_skills_access_manifest",
+)
+
+_PERSONAL_SKILLS_CONTEXT_KEYS = {
+    "personal_skills_catalog",
+    "personal_skills_access_manifest",
+}
+
+
+def _build_base_request_context(
+    *,
+    session_id: str,
+    user_id: str,
+    channel: str,
+    agent_id: str,
+    channel_meta: dict[str, Any],
+    payload_context: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Build request context while preserving private Runtime Skill fields."""
+    context: dict[str, Any] = {
+        "session_id": session_id,
+        "user_id": user_id,
+        "channel": channel,
+        "agent_id": agent_id,
+        "root_agent_id": agent_id,
+    }
+    for key in RUNTIME_REQUEST_CONTEXT_KEYS:
+        if key in channel_meta:
+            context[key] = channel_meta[key]
+    if isinstance(payload_context, dict):
+        context.update(
+            {
+                key: value
+                for key, value in payload_context.items()
+                if key not in _PERSONAL_SKILLS_CONTEXT_KEYS
+            },
+        )
+    return context
+
 
 async def _cancel_streaming_agent_task(task: asyncio.Task) -> None:
     if task.done():
@@ -398,8 +456,12 @@ class AgentRunner(Runner):
         Handle agent query.
         """
         logger.debug(
-            f"AgentRunner.query_handler called: agent_id={self.agent_id}, "
-            f"msgs={msgs}, request={request}",
+            "AgentRunner.query_handler called: agent_id=%s, session_id=%s, "
+            "user_id=%s, msgs_len=%s",
+            self.agent_id,
+            getattr(request, "session_id", ""),
+            getattr(request, "user_id", ""),
+            len(msgs) if msgs else 0,
         )
         query = _get_last_user_text(msgs)
         session_id = getattr(request, "session_id", "") or ""
@@ -413,8 +475,9 @@ class AgentRunner(Runner):
             return
 
         logger.debug(
-            f"AgentRunner.stream_query: request={request}, "
-            f"agent_id={self.agent_id}",
+            "AgentRunner.stream_query: agent_id=%s, session_id=%s",
+            self.agent_id,
+            session_id,
         )
 
         # Set agent context for model creation
@@ -543,40 +606,15 @@ class AgentRunner(Runner):
 
             logger.debug(f"Enabled MCP: {mcp_clients}")
 
-            # Build base request context
-            base_request_context = {
-                "session_id": session_id,
-                "user_id": user_id,
-                "channel": channel,
-                "agent_id": self.agent_id,
-                "root_agent_id": self.agent_id,
-            }
-            for runtime_meta_key in (
-                "conversation_id",
-                "runtime_task_id",
-                "trace_id",
-                "runtime_execution_mode",
-                "runtime_response_mode",
-                "runtime_generation_controls",
-                "runtime_datetime_context",
-                "runtime_latency_marks",
-                "runtime_constraints",
-                "execution_sandbox",
-                "policy_search_context",
-                "identity_json",
-                "runtime_governance",
-                "runtime_context",
-                "runtime_tool_gateway",
-                "attachments_manifest",
-                "sandbox_context",
-            ):
-                if runtime_meta_key in channel_meta:
-                    base_request_context[runtime_meta_key] = channel_meta[
-                        runtime_meta_key
-                    ]
             payload_context = getattr(request, "request_context", None)
-            if isinstance(payload_context, dict):
-                base_request_context.update(payload_context)
+            base_request_context = _build_base_request_context(
+                session_id=session_id,
+                user_id=user_id,
+                channel=channel,
+                agent_id=self.agent_id,
+                channel_meta=channel_meta,
+                payload_context=payload_context,
+            )
 
             # Extract root_session_id from request payload (agent chat)
             payload_root_session = getattr(request, "root_session_id", "")
@@ -773,6 +811,8 @@ class AgentRunner(Runner):
                 task_tracker=self._task_tracker,
                 plan_notebook=plan_notebook,
             )
+            channel_meta.pop("personal_skills_access_manifest", None)
+            base_request_context.pop("personal_skills_access_manifest", None)
             await agent.register_mcp_clients()
             agent.set_console_output_enabled(enabled=False)
 
@@ -1074,12 +1114,16 @@ class AgentRunner(Runner):
                         session_id,
                     )
 
+                await agent.prepare_personal_skills_for_persistence()
+
                 await self.session.save_session_state(
                     session_id=session_id,
                     user_id=user_id,
                     channel=channel,
                     agent=agent,
                 )
+            elif agent is not None:
+                await agent.prepare_personal_skills_for_persistence()
 
             if self._chat_manager is not None and chat is not None:
                 await self._chat_manager.touch_chat(chat.id)
