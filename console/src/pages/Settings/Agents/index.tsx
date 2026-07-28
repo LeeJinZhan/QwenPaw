@@ -1,14 +1,11 @@
-import { useState, useRef, useCallback, useEffect } from "react";
+import { useState, useRef, useCallback } from "react";
 import { Card, Button, Form } from "antd";
 import { useAppMessage } from "../../../hooks/useAppMessage";
 import { PlusOutlined } from "@ant-design/icons";
 import { useTranslation } from "react-i18next";
 import { agentsApi } from "../../../api/modules/agents";
 import { invalidateSkillCache, skillApi } from "../../../api/modules/skill";
-import type {
-  AgentSummary,
-  SandboxProfileSummary,
-} from "../../../api/types/agents";
+import type { AgentSummary } from "../../../api/types/agents";
 import { useAgentStore } from "../../../stores/agentStore";
 import { useAgents } from "./useAgents";
 import { AgentTable, AgentModal } from "./components";
@@ -26,34 +23,8 @@ export default function AgentsPage() {
   const [reordering, setReordering] = useState(false);
   const [form] = Form.useForm();
   const [selectedSkills, setSelectedSkills] = useState<string[]>([]);
-  const [sandboxProfiles, setSandboxProfiles] = useState<
-    SandboxProfileSummary[]
-  >([]);
-  const [loadingSandboxProfiles, setLoadingSandboxProfiles] = useState(false);
   const installedSkillsRef = useRef<string[]>([]);
   const { message } = useAppMessage();
-
-  const loadSandboxProfiles = useCallback(async () => {
-    setLoadingSandboxProfiles(true);
-    try {
-      setSandboxProfiles(await agentsApi.listSandboxProfiles());
-    } catch (error) {
-      console.error("Failed to load sandbox profiles:", error);
-      setSandboxProfiles([
-        {
-          id: "native",
-          name: "Native shell",
-          description: "Use the host shell without OS-level sandboxing.",
-        },
-      ]);
-    } finally {
-      setLoadingSandboxProfiles(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    void loadSandboxProfiles();
-  }, [loadSandboxProfiles]);
 
   const handleCreate = () => {
     setEditingAgent(null);
@@ -62,7 +33,6 @@ export default function AgentsPage() {
       workspace_dir: "",
       active_model_provider: undefined,
       active_model_model: undefined,
-      sandbox_profile_id: "native",
     });
     setSelectedSkills([]);
     installedSkillsRef.current = [];
@@ -236,8 +206,6 @@ export default function AgentsPage() {
         editingAgent={editingAgent}
         form={form}
         selectedSkills={selectedSkills}
-        sandboxProfiles={sandboxProfiles}
-        loadingSandboxProfiles={loadingSandboxProfiles}
         onSelectedSkillsChange={setSelectedSkills}
         onInstalledSkillsLoaded={handleInstalledSkillsLoaded}
         onSave={handleSubmit}

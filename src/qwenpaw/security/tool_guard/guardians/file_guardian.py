@@ -29,12 +29,6 @@ _TOOL_FILE_PARAMS: dict[str, tuple[str, ...]] = {
     "view_text_file": ("file_path", "path"),
     "write_text_file": ("file_path", "path"),
 }
-_SHELL_TOOL_NAMES = frozenset(
-    {
-        "execute_shell_command",
-        "execute_sandboxed_shell_command",
-    },
-)
 
 _SECRET_DIR_CURRENT_NAME = ".qwenpaw.secret"
 _SECRET_DIR_LEGACY_NAME = ".copaw.secret"
@@ -471,7 +465,7 @@ class FilePathToolGuardian(BaseToolGuardian):
         findings: list[GuardFinding] = []
 
         # Shell commands: extract paths from the command string.
-        if tool_name in _SHELL_TOOL_NAMES:
+        if tool_name == "execute_shell_command":
             command = params.get("command")
             if not isinstance(command, str) or not command.strip():
                 return findings

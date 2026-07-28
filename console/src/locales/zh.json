@@ -235,8 +235,6 @@
     "nameRequired": "请输入智能体名称",
     "namePlaceholder": "例如：我的智能体",
     "descriptionPlaceholder": "简要描述这个智能体的用途...",
-    "sandboxProfile": "Shell 隔离环境",
-    "sandboxProfileHelp": "选择此智能体执行 shell 命令的方式。Linux bubblewrap 会禁用宿主网络，并且只把工作区挂载为可写。",
     "workspaceHelp": "留空将自动生成在 ~/.qwenpaw/workspaces/<id> 目录",
     "dragHandleTooltip": "拖拽调整智能体顺序",
     "reorderSuccess": "智能体顺序已保存",

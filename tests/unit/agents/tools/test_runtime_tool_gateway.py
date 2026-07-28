@@ -28,10 +28,6 @@ from qwenpaw.agents.react_agent import (
 from qwenpaw.agents.tool_guard_mixin import ToolGuardMixin
 
 
-def _builtin_tool(enabled: bool) -> SimpleNamespace:
-    return SimpleNamespace(enabled=enabled, async_execution=False)
-
-
 @pytest.fixture(autouse=True)
 def reset_runtime_tool_gateway_context():
     set_current_runtime_tool_gateway(None)
@@ -349,9 +345,7 @@ def test_runtime_gateway_registers_only_runtime_allowed_native_tools() -> None:
     fake_agent = SimpleNamespace()
     fake_agent._agent_config = SimpleNamespace(
         tools=SimpleNamespace(
-            builtin_tools={
-                "execute_sandboxed_shell_command": _builtin_tool(False),
-            },
+            builtin_tools={},
         ),
     )
     fake_agent._request_context = {
@@ -401,9 +395,7 @@ def test_runtime_gateway_does_not_register_attachment_tool_without_sandbox_conte
     fake_agent = SimpleNamespace()
     fake_agent._agent_config = SimpleNamespace(
         tools=SimpleNamespace(
-            builtin_tools={
-                "execute_sandboxed_shell_command": _builtin_tool(False),
-            },
+            builtin_tools={},
         ),
     )
     fake_agent._request_context = {
@@ -437,9 +429,7 @@ def test_runtime_gateway_registers_sandbox_tools_without_current_task_files() ->
     fake_agent = SimpleNamespace()
     fake_agent._agent_config = SimpleNamespace(
         tools=SimpleNamespace(
-            builtin_tools={
-                "execute_sandboxed_shell_command": _builtin_tool(False),
-            },
+            builtin_tools={},
         ),
     )
     fake_agent._request_context = {
@@ -474,9 +464,7 @@ def test_runtime_gateway_hides_native_tools_when_runtime_allowlist_is_empty() ->
     fake_agent = SimpleNamespace()
     fake_agent._agent_config = SimpleNamespace(
         tools=SimpleNamespace(
-            builtin_tools={
-                "execute_sandboxed_shell_command": _builtin_tool(False),
-            },
+            builtin_tools={},
         ),
     )
     fake_agent._request_context = {
