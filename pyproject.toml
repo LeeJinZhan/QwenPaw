@@ -30,6 +30,7 @@ dependencies = [
     "twilio>=9.10.2",
     "pywebview>=4.0",
     "aiofiles>=24.1.0",
+    "oss2>=2.18,<3.0",
     "paho-mqtt>=2.0.0",
     "wecom-aibot-python-sdk==1.0.2",
     "matrix-nio>=0.24.0",

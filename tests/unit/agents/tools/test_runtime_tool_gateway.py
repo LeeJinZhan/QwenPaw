@@ -21,6 +21,7 @@ from qwenpaw.config.context import (
 )
 from qwenpaw.agents.react_agent import (
     QwenPawAgent,
+    _build_runtime_simple_text_fast_prompt,
     _build_runtime_tool_gateway_context,
     _build_runtime_user_profile_context,
     _runtime_disabled_tools_from_context,
@@ -728,6 +729,30 @@ def test_simple_text_fast_mode_builds_minimal_prompt(monkeypatch) -> None:
     assert "multimodal hint should be skipped" not in prompt
 
 
+def test_simple_text_fast_profile_language_overrides_agent_language() -> None:
+    request_context = {
+        "runtime_context": {
+            "user_overlay": {
+                "profile": {
+                    "trust_level": "low",
+                    "preferences": {"language": "en-US"},
+                },
+            },
+        },
+    }
+
+    prompt = _build_runtime_simple_text_fast_prompt(
+        request_context,
+        language="zh",
+    )
+    profile_context = _build_runtime_user_profile_context(request_context)
+
+    assert "Response language: en-US" in prompt
+    assert "Preferred language: zh" not in prompt
+    assert "Respond in English by default" in profile_context
+    assert "input language alone is not an explicit override" in profile_context
+
+
 def test_simple_text_fast_prompt_exposes_personal_catalog_and_allows_only_activation(
     monkeypatch,
 ) -> None:
@@ -817,6 +842,7 @@ def test_runtime_user_profile_context_requires_low_trust_and_known_values() -> N
 
     assert rejected == ""
     assert "language: zh-CN" in rendered
+    assert "Respond in Simplified Chinese by default" in rendered
     assert "preferred_formats: markdown, table" in rendered
     assert "valid GitHub Flavored Markdown" in rendered
     assert "at least three hyphens" in rendered

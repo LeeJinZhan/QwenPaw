@@ -187,6 +187,56 @@ async def test_loopback_runtime_signed_route_is_allowed_for_local_adapter() -> N
 
 
 @pytest.mark.asyncio
+async def test_explicit_http_oss_endpoint_allows_allowlisted_skill_url(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("OSS_ENDPOINT", "http://oss.intranet.local:9000")
+    monkeypatch.setenv(
+        "PERSONAL_SKILLS_ALLOWED_OSS_HOSTS",
+        "oss.intranet.local",
+    )
+    content = _skill_bytes()
+    catalog, manifest = _payloads(
+        content,
+        url="http://oss.intranet.local:9000/skill.md?secret=token",
+    )
+
+    async def fetch(url: str, max_bytes: int) -> DownloadedPersonalSkill:
+        return DownloadedPersonalSkill(content=content, final_url=url, redirected=False)
+
+    registry = PersonalSkillsRegistry.from_payloads(catalog, manifest, fetcher=fetch)
+    response = await registry.activate_personal_skill("personal:skill_001")
+
+    assert "汇总本月进展" in _response_text(response)
+    assert registry.activated_skill_refs == ("personal:skill_001",)
+
+
+@pytest.mark.asyncio
+async def test_explicit_http_oss_endpoint_still_rejects_unlisted_host(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("OSS_ENDPOINT", "http://oss.intranet.local:9000")
+    monkeypatch.setenv(
+        "PERSONAL_SKILLS_ALLOWED_OSS_HOSTS",
+        "oss.intranet.local",
+    )
+    content = _skill_bytes()
+    catalog, manifest = _payloads(
+        content,
+        url="http://attacker.example.net/skill.md?secret=token",
+    )
+
+    async def fetch(url: str, max_bytes: int) -> DownloadedPersonalSkill:
+        raise AssertionError("unlisted HTTP host must not be fetched")
+
+    registry = PersonalSkillsRegistry.from_payloads(catalog, manifest, fetcher=fetch)
+    response = await registry.activate_personal_skill("personal:skill_001")
+
+    assert "host" in _response_text(response).lower()
+    assert registry.activated_skill_refs == ()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("case", "mutate", "expected"),
     [
@@ -234,6 +284,7 @@ async def test_activation_rejects_invalid_content_or_locator(
     expected,
 ) -> None:
     del case
+    monkeypatch.setenv("OSS_ENDPOINT", "https://oss.example.com")
     monkeypatch.setenv("PERSONAL_SKILLS_ALLOWED_OSS_HOSTS", "oss.example.com")
     content = _skill_bytes()
     catalog, manifest = _payloads(content)
