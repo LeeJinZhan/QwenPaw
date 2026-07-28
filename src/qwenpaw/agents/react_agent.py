@@ -50,7 +50,6 @@ from .tools import (
     submit_to_agent,
     desktop_screenshot,
     edit_file,
-    execute_sandboxed_shell_command,
     execute_shell_command,
     get_current_time,
     get_token_usage,
@@ -542,7 +541,6 @@ class QwenPawAgent(CodingModeMixin, ToolGuardMixin, ReActAgent):
                 # Only selected long-running tools support async_execution.
                 async_capable_tool_names = {
                     "execute_shell_command",
-                    "execute_sandboxed_shell_command",
                     "delegate_external_agent",
                 }
                 async_execution_tools = {
@@ -567,7 +565,6 @@ class QwenPawAgent(CodingModeMixin, ToolGuardMixin, ReActAgent):
         # Map of tool functions (hardcoded builtin tools)
         tool_functions = {
             "execute_shell_command": execute_shell_command,
-            "execute_sandboxed_shell_command": execute_sandboxed_shell_command,
             "read_file": read_file,
             "write_file": write_file,
             "edit_file": edit_file,
@@ -1832,7 +1829,6 @@ class QwenPawAgent(CodingModeMixin, ToolGuardMixin, ReActAgent):
             set_current_runtime_tool_gateway,
             set_current_shell_command_timeout,
             set_current_shell_command_executable,
-            set_current_sandbox_profile,
             set_current_toolkit,
         )
 
@@ -1869,7 +1865,6 @@ class QwenPawAgent(CodingModeMixin, ToolGuardMixin, ReActAgent):
         set_current_shell_command_executable(
             self._agent_config.running.shell_command_executable or None,
         )
-        set_current_sandbox_profile(self._agent_config.sandbox)
 
         # Process file and media blocks in messages
         if msg is not None:

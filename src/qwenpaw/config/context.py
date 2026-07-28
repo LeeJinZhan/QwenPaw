@@ -113,22 +113,6 @@ def set_current_shell_command_executable(executable: str | None) -> None:
     current_shell_command_executable.set(executable)
 
 
-current_sandbox_profile: ContextVar[Any | None] = ContextVar(
-    "current_sandbox_profile",
-    default=None,
-)
-
-
-def get_current_sandbox_profile() -> Any | None:
-    """Get the current agent sandbox profile from context."""
-    return current_sandbox_profile.get()
-
-
-def set_current_sandbox_profile(profile: Any | None) -> None:
-    """Set the current agent sandbox profile in context."""
-    current_sandbox_profile.set(profile)
-
-
 # Context variable to store the current session ID for tool functions
 current_session_id: ContextVar[str | None] = ContextVar(
     "current_session_id",

@@ -35,7 +35,6 @@ export interface AgentProfileConfig {
   system_prompt_files?: string[];
   tools?: unknown;
   security?: unknown;
-  sandbox?: { profile_id?: string } | null;
 }
 
 export interface CreateAgentRequest {
@@ -46,16 +45,9 @@ export interface CreateAgentRequest {
   language?: string;
   skill_names?: string[];
   active_model?: ModelSlotConfig | null;
-  sandbox_profile_id?: string;
 }
 
 export interface AgentProfileRef {
   id: string;
   workspace_dir: string;
-}
-
-export interface SandboxProfileSummary {
-  id: string;
-  name: string;
-  description?: string;
 }

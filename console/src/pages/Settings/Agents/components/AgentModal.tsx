@@ -12,10 +12,7 @@ import {
 } from "antd";
 import { CheckOutlined } from "@ant-design/icons";
 import { useTranslation } from "react-i18next";
-import type {
-  AgentSummary,
-  SandboxProfileSummary,
-} from "@/api/types/agents";
+import type { AgentSummary } from "@/api/types/agents";
 import type { ProviderInfo } from "@/api/types/provider";
 import { getAgentDisplayName } from "@/utils/agentDisplayName";
 import type { PoolSkillSpec } from "@/api/types/skill";
@@ -37,8 +34,6 @@ interface AgentModalProps {
   editingAgent: AgentSummary | null;
   form: ReturnType<typeof Form.useForm>[0];
   selectedSkills: string[];
-  sandboxProfiles: SandboxProfileSummary[];
-  loadingSandboxProfiles: boolean;
   onSelectedSkillsChange: (skills: string[]) => void;
   onInstalledSkillsLoaded: (skills: string[]) => void;
   onSave: () => Promise<void>;
@@ -50,8 +45,6 @@ export function AgentModal({
   editingAgent,
   form,
   selectedSkills,
-  sandboxProfiles,
-  loadingSandboxProfiles,
   onSelectedSkillsChange,
   onInstalledSkillsLoaded,
   onSave,
@@ -229,22 +222,6 @@ export function AgentModal({
             rows={3}
           />
         </Form.Item>
-        {!editingAgent && (
-          <Form.Item
-            name="sandbox_profile_id"
-            label={t("agent.sandboxProfile")}
-            help={t("agent.sandboxProfileHelp")}
-          >
-            <Select
-              loading={loadingSandboxProfiles}
-              options={sandboxProfiles.map((profile) => ({
-                value: profile.id,
-                label: profile.name,
-                title: profile.description,
-              }))}
-            />
-          </Form.Item>
-        )}
         <Form.Item label={t("agent.model")} help={t("agent.modelHelp")}>
           <Space.Compact style={{ width: "100%" }}>
             <Select

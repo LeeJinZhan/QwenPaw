@@ -173,10 +173,6 @@ class TestResolveGuardedTools:
         result = resolve_guarded_tools()
         assert result == set(_DEFAULT_GUARDED_TOOLS)
 
-    def test_default_set_includes_sandboxed_shell(self):
-        """Sandboxed shell gets the same default guard coverage."""
-        assert "execute_sandboxed_shell_command" in _DEFAULT_GUARDED_TOOLS
-
     def test_none_user_defined_triggers_env_lookup(self, mock_env_loader):
         """None user_defined causes the env var to be checked."""
         mock_env_loader.return_value = "read_file"

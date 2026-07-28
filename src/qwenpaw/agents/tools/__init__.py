@@ -16,7 +16,6 @@ from .file_search import (
     glob_search,
 )
 from .shell import execute_shell_command
-from .sandboxed_shell import execute_sandboxed_shell_command
 from .send_file import send_file_to_user
 from .browser_control import browser_use
 from .desktop_screenshot import desktop_screenshot
@@ -43,7 +42,6 @@ from .run_tool_batch import run_tool_batch  # noqa: F401
 __all__ = [
     "execute_python_code",
     "execute_shell_command",
-    "execute_sandboxed_shell_command",
     "view_text_file",
     "write_text_file",
     "read_file",
