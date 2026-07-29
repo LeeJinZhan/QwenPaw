@@ -277,7 +277,18 @@ class ToolGuardMixin:
 
         if action is not None:
             if gateway_client is not None:
-                guard_decision = "block" if action.kind == "auto_denied" else "require_approval"
+                if action.kind == "needs_approval":
+                    try:
+                        await gateway_client.report_guard(gateway_preflight["tool_call_id"], "allow")
+                    except RuntimeToolGatewayError:
+                        await self._emit_runtime_gateway_failure(tool_call, "Tool Gateway Guard audit writeback failed.")
+                        return None
+                    return await self._execute_runtime_gateway_tool_call(
+                        tool_call,
+                        gateway_client=gateway_client,
+                        preflight=gateway_preflight,
+                    )
+                guard_decision = "block"
                 try:
                     await gateway_client.report_guard(gateway_preflight["tool_call_id"], guard_decision)
                 except RuntimeToolGatewayError:
