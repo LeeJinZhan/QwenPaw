@@ -542,7 +542,11 @@ class TestRuntimeToolGatewayExecution:
         result = await m._execute_runtime_gateway_tool_call(tool_call)
 
         assert result == {"sensitive_native_output": "never audited"}
-        gateway.preflight.assert_awaited_once_with("write_file", {"path": "output/a.txt"})
+        gateway.preflight.assert_awaited_once_with(
+            "write_file",
+            {"path": "output/a.txt"},
+            idempotency_key="qwenpaw:call_001",
+        )
         gateway.report_result.assert_awaited_once()
         report_args = gateway.report_result.await_args.args
         assert report_args[0] == "tool_001"
@@ -564,13 +568,51 @@ class TestRuntimeToolGatewayExecution:
         result = await m._acting(tool_call)
 
         assert result == {"status": "ok"}
-        gateway.preflight.assert_awaited_once_with("execute_shell_command", {"command": "pwd"})
+        gateway.preflight.assert_awaited_once_with(
+            "execute_shell_command",
+            {"command": "pwd"},
+            idempotency_key="qwenpaw:call_001",
+        )
         gateway.report_guard.assert_awaited_once_with("tool_001", "allow")
         m._execute_runtime_gateway_tool_call.assert_awaited_once_with(
             tool_call,
             gateway_client=gateway,
             preflight={"tool_call_id": "tool_001"},
         )
+
+    @pytest.mark.asyncio
+    async def test_runtime_gateway_guard_report_failure_does_not_block_allowed_execution(self):
+        m = _make_mixin()
+        gateway = MagicMock()
+        gateway.preflight = AsyncMock(return_value={"tool_call_id": "tool_001"})
+        gateway.report_guard = AsyncMock(side_effect=RuntimeToolGatewayError("offline"))
+        m._runtime_tool_gateway_client = MagicMock(return_value=gateway)
+        m._decide_guard_action = AsyncMock(return_value=None)
+        m._execute_runtime_gateway_tool_call = AsyncMock(return_value={"status": "ok"})
+        tool_call = {"id": "call_001", "name": "read_file", "input": {}}
+
+        result = await m._acting(tool_call)
+
+        assert result == {"status": "ok"}
+        m._execute_runtime_gateway_tool_call.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_runtime_gateway_local_guard_failure_blocks_execution(self):
+        m = _make_mixin()
+        gateway = MagicMock()
+        gateway.preflight = AsyncMock(return_value={"tool_call_id": "tool_001"})
+        gateway.report_guard = AsyncMock()
+        m._runtime_tool_gateway_client = MagicMock(return_value=gateway)
+        m._decide_guard_action = AsyncMock(side_effect=RuntimeError("guard unavailable"))
+        m._execute_runtime_gateway_tool_call = AsyncMock()
+        m._emit_runtime_gateway_failure = AsyncMock()
+        tool_call = {"id": "call_001", "name": "read_file", "input": {}}
+
+        result = await m._acting(tool_call)
+
+        assert result is None
+        gateway.report_guard.assert_awaited_once_with("tool_001", "block")
+        m._execute_runtime_gateway_tool_call.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_auto_denied_guard_reuses_gateway_context_without_type_error(self):

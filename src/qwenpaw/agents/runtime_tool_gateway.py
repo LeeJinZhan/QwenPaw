@@ -68,8 +68,14 @@ class RuntimeToolGatewayClient:
             trace_id=str(request_context.get("trace_id", "")).strip(),
         )
 
-    async def preflight(self, worker_tool_name: str, tool_input: Mapping[str, Any]) -> dict[str, Any]:
-        idempotency_key = str(uuid.uuid4())
+    async def preflight(
+        self,
+        worker_tool_name: str,
+        tool_input: Mapping[str, Any],
+        *,
+        idempotency_key: str = "",
+    ) -> dict[str, Any]:
+        idempotency_key = str(idempotency_key).strip() or str(uuid.uuid4())
         response = await self._post(
             self._url,
             {
@@ -82,7 +88,14 @@ class RuntimeToolGatewayClient:
             },
             self._headers,
         )
-        if response.get("decision") != "allow" or response.get("status") != "allowed" or not response.get("tool_call_id"):
+        if response.get("phase") == "deny":
+            raise self._error_from_response(response, "Tool Gateway denied this tool call")
+        if (
+            response.get("phase") != "allow"
+            or response.get("decision") != "allow"
+            or response.get("status") != "allowed"
+            or not response.get("tool_call_id")
+        ):
             raise self._error_from_response(response, "Tool Gateway denied this tool call")
         return {**response, "idempotency_key": idempotency_key}
 

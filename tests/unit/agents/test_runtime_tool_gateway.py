@@ -36,7 +36,7 @@ async def test_preflight_uses_task_gateway_context_and_returns_allow(monkeypatch
 
     async def fake_post(_self, url, payload, headers):
         requests.append((url, payload, headers))
-        return {"tool_call_id": "tool_001", "decision": "allow", "status": "allowed", "trace_id": "trace_001"}
+        return {"phase": "allow", "tool_call_id": "tool_001", "decision": "allow", "status": "allowed", "trace_id": "trace_001"}
 
     monkeypatch.setattr(RuntimeToolGatewayClient, "_post", fake_post)
 
@@ -68,6 +68,7 @@ async def test_preflight_preserves_structured_runtime_denial(monkeypatch):
 
     async def fake_post(_self, _url, _payload, _headers):
         return {
+            "phase": "deny",
             "code": "POLICY_BLOCKED",
             "message": "internal policy detail",
             "details": {"violation_type": "assistant_tool_not_allowed"},
