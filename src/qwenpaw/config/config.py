@@ -1496,6 +1496,12 @@ def _default_builtin_tools() -> Dict[str, BuiltinToolConfig]:
             description="Send files to user",
             icon="📤",
         ),
+        "upload_file_to_oss": BuiltinToolConfig(
+            name="upload_file_to_oss",
+            enabled=True,
+            description="Upload a local file to Alibaba Cloud OSS",
+            icon="☁️",
+        ),
         "get_current_time": BuiltinToolConfig(
             name="get_current_time",
             enabled=True,

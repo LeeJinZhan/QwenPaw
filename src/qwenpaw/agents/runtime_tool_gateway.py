@@ -75,7 +75,7 @@ class RuntimeToolGatewayClient:
             {
                 "phase": "preflight",
                 **self._scope_payload(),
-                "worker_tool_name": str(worker_tool_name),
+                "tool_id": str(worker_tool_name),
                 "input": dict(tool_input),
                 "idempotency_key": idempotency_key,
                 "trace_id": self.trace_id,

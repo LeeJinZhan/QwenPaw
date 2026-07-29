@@ -460,7 +460,7 @@ def test_runtime_gateway_registers_sandbox_tools_without_current_task_files() ->
     assert "runtime_attachment_read" in toolkit.tools
 
 
-def test_runtime_gateway_hides_native_tools_when_runtime_allowlist_is_empty() -> None:
+def test_runtime_gateway_keeps_native_tools_visible_when_runtime_allowlist_is_empty() -> None:
     fake_agent = SimpleNamespace()
     fake_agent._agent_config = SimpleNamespace(
         tools=SimpleNamespace(
@@ -486,8 +486,8 @@ def test_runtime_gateway_hides_native_tools_when_runtime_allowlist_is_empty() ->
 
     assert "Runtime Tool Gateway preflight is enabled" in context
     assert "runtime_tool_gateway" not in toolkit.tools
-    assert "get_current_time" not in toolkit.tools
-    assert "read_file" not in toolkit.tools
+    assert "get_current_time" in toolkit.tools
+    assert "read_file" in toolkit.tools
 
 
 def test_simple_text_fast_mode_registers_no_native_tools() -> None:

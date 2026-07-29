@@ -69,6 +69,7 @@ from .tools import (
     run_tool_batch,
     send_file_to_user,
     set_user_timezone,
+    upload_file_to_oss,
     view_image,
     view_video,
     write_file,
@@ -327,7 +328,7 @@ def _runtime_disabled_tools_from_context(
 def _runtime_allowed_tools_from_context(
     request_context: dict[str, Any],
 ) -> set[str] | None:
-    """Return Runtime's model-visible tool allowlist when Gateway is active."""
+    """Return Runtime's non-empty model-visible tool allowlist, if provided."""
     gateway = request_context.get("runtime_tool_gateway")
     if not isinstance(gateway, dict):
         return None
@@ -337,8 +338,8 @@ def _runtime_allowed_tools_from_context(
         if isinstance(constraints, dict) and "allowed_tools" in constraints
         else gateway.get("allowed_tools")
     )
-    if not isinstance(allowed_tools, list):
-        return set()
+    if not isinstance(allowed_tools, list) or not allowed_tools:
+        return None
     return {
         str(item).strip()
         for item in allowed_tools
@@ -724,6 +725,7 @@ class QwenPawAgent(CodingModeMixin, ToolGuardMixin, ReActAgent):
             "view_image": view_image,
             "view_video": view_video,
             "send_file_to_user": send_file_to_user,
+            "upload_file_to_oss": upload_file_to_oss,
             "get_current_time": get_current_time,
             **(
                 {"runtime_attachment_read": runtime_attachment_read}

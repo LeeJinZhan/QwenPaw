@@ -52,7 +52,7 @@ async def test_preflight_uses_task_gateway_context_and_returns_allow(monkeypatch
                 "session_id": "sess_001",
                 "tool_session_id": "wts_001",
                 "policy_snapshot_id": "ps_001",
-                "worker_tool_name": "mcp.policy.search",
+                "tool_id": "mcp.policy.search",
                 "input": {"query": "制度"},
                 "idempotency_key": result["idempotency_key"],
                 "trace_id": "trace_001",
