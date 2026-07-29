@@ -91,10 +91,10 @@ async def test_upload_file_to_oss_uses_environment_prefix_and_returns_signed_url
     FakeBucket.instances = []
     monkeypatch.setitem(sys.modules, "oss2", fake_oss2)
     monkeypatch.setenv("OSS_ENDPOINT", "https://oss-cn-hangzhou.aliyuncs.com")
-    monkeypatch.setenv("OSS_BUCKET_NAME", "bank-agent-artifacts")
+    monkeypatch.setenv("OSS_BUCKET", "bank-agent-artifacts")
     monkeypatch.setenv("OSS_ACCESS_KEY_ID", "test-ak")
     monkeypatch.setenv("OSS_ACCESS_KEY_SECRET", "test-sk")
-    monkeypatch.setenv("OSS_PREFIX", "exports/daily")
+    monkeypatch.setenv("QWENPAW_OSS_UPLOAD_PREFIX", "exports/daily")
     monkeypatch.setenv("OSS_DOWNLOAD_URL_EXPIRES", "600")
 
     response = await module.upload_file_to_oss(
@@ -150,7 +150,7 @@ async def test_upload_file_to_oss_reports_missing_configuration(
 ) -> None:
     module = importlib.import_module("qwenpaw.agents.tools.oss_upload")
     monkeypatch.delenv("OSS_ENDPOINT", raising=False)
-    monkeypatch.delenv("OSS_BUCKET_NAME", raising=False)
+    monkeypatch.delenv("OSS_BUCKET", raising=False)
     monkeypatch.delenv("OSS_ACCESS_KEY_ID", raising=False)
     monkeypatch.delenv("OSS_ACCESS_KEY_SECRET", raising=False)
 
@@ -158,5 +158,5 @@ async def test_upload_file_to_oss_reports_missing_configuration(
 
     assert _text(response) == (
         "OSS upload failed: missing configuration "
-        "OSS_ENDPOINT, OSS_BUCKET_NAME, OSS_ACCESS_KEY_ID, OSS_ACCESS_KEY_SECRET"
+        "OSS_ENDPOINT, OSS_BUCKET, OSS_ACCESS_KEY_ID, OSS_ACCESS_KEY_SECRET"
     )

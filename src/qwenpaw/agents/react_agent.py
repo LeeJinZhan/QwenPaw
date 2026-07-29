@@ -99,22 +99,12 @@ def _build_runtime_tool_gateway_context(request_context: dict[str, Any]) -> str:
     gateway = request_context.get("runtime_tool_gateway")
     if not isinstance(gateway, dict):
         return ""
-    constraints = request_context.get("runtime_constraints")
-    disabled_tools: list[str] = []
-    if isinstance(constraints, dict):
-        disabled_tools = [
-            str(item).strip()
-            for item in constraints.get("disabled_tools", [])
-            if str(item).strip()
-        ]
     lines = [
         "Runtime Tool Gateway preflight is enabled for this request.",
         "- Each configured QwenPaw built-in, plugin, or MCP tool call is "
         "checked by Runtime before local execution and audited after it.",
         "- Use only tools that are visible in this Agent's configuration.",
     ]
-    if disabled_tools:
-        lines.append("- Disabled native tools: " + ", ".join(disabled_tools))
     attachment_lines = _build_runtime_attachments_context(request_context)
     if attachment_lines:
         lines.extend(attachment_lines)
@@ -330,42 +320,6 @@ async def _append_runtime_attachment_content_parts(
             runtime_sandbox_oss.content_part_for_prepared_file(prepared),
         )
     return msg
-
-
-def _runtime_disabled_tools_from_context(
-    request_context: dict[str, Any],
-) -> set[str]:
-    """Return native tools disabled by Runtime constraints."""
-    constraints = request_context.get("runtime_constraints")
-    if not isinstance(constraints, dict):
-        return set()
-    return {
-        str(item).strip()
-        for item in constraints.get("disabled_tools", [])
-        if str(item).strip()
-    }
-
-
-def _runtime_allowed_tools_from_context(
-    request_context: dict[str, Any],
-) -> set[str] | None:
-    """Return Runtime's non-empty model-visible tool allowlist, if provided."""
-    gateway = request_context.get("runtime_tool_gateway")
-    if not isinstance(gateway, dict):
-        return None
-    constraints = request_context.get("runtime_constraints")
-    allowed_tools = (
-        constraints.get("allowed_tools")
-        if isinstance(constraints, dict) and "allowed_tools" in constraints
-        else gateway.get("allowed_tools")
-    )
-    if not isinstance(allowed_tools, list) or not allowed_tools:
-        return None
-    return {
-        str(item).strip()
-        for item in allowed_tools
-        if str(item).strip()
-    }
 
 
 def _runtime_simple_text_fast_enabled_from_context(
@@ -811,20 +765,8 @@ class QwenPawAgent(CodingModeMixin, ToolGuardMixin, ReActAgent):
                     )
 
         # Register tools with appropriate defaults
-        runtime_disabled_tools = _runtime_disabled_tools_from_context(
-            self._request_context,
-        )
-        runtime_allowed_tools = _runtime_allowed_tools_from_context(
-            self._request_context,
-        )
         registered_tool_names: set[str] = set()
         for tool_name, tool_func in tool_functions.items():
-            if tool_name in runtime_disabled_tools:
-                logger.debug("Skipped Runtime-disabled tool: %s", tool_name)
-                continue
-            if runtime_allowed_tools is not None and tool_name not in runtime_allowed_tools:
-                logger.debug("Skipped tool outside Runtime allowlist: %s", tool_name)
-                continue
             # For plugin tools: skip if not in config (security)
             # For hardcoded tools: default to enabled (backward compatibility)
             if tool_name in plugin_tools:
@@ -894,14 +836,13 @@ class QwenPawAgent(CodingModeMixin, ToolGuardMixin, ReActAgent):
         # Coding Mode tools (lsp, ast_search) — only registered when
         # coding_mode.enabled is True and the underlying CLI / language
         # server is reachable.  See CodingModeMixin.
-        if runtime_allowed_tools is None:
-            try:
-                self._register_coding_mode_tools(
-                    toolkit,
-                    namesake_strategy=namesake_strategy,
-                )
-            except Exception as e:  # pylint: disable=broad-except
-                logger.warning(f"Failed to register Coding Mode tools: {e}")
+        try:
+            self._register_coding_mode_tools(
+                toolkit,
+                namesake_strategy=namesake_strategy,
+            )
+        except Exception as e:  # pylint: disable=broad-except
+            logger.warning(f"Failed to register Coding Mode tools: {e}")
 
         QwenPawAgent._register_personal_skill_tool(self, toolkit)
 
@@ -954,19 +895,7 @@ class QwenPawAgent(CodingModeMixin, ToolGuardMixin, ReActAgent):
             logger.debug("Skipped native memory tools in simple_text_fast mode")
             return
         memory_tools = self.memory_manager.list_memory_tools()
-        runtime_allowed_tools = _runtime_allowed_tools_from_context(
-            getattr(self, "_request_context", {}) or {},
-        )
         for tool_fn in memory_tools:
-            if (
-                runtime_allowed_tools is not None
-                and tool_fn.__name__ not in runtime_allowed_tools
-            ):
-                logger.debug(
-                    "Skipped memory tool outside Runtime allowlist: %s",
-                    tool_fn.__name__,
-                )
-                continue
             self.toolkit.register_tool_function(
                 tool_fn,
                 namesake_strategy=self._namesake_strategy,

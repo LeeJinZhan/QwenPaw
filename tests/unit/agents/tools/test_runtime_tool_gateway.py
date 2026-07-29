@@ -24,7 +24,6 @@ from qwenpaw.agents.react_agent import (
     _build_runtime_simple_text_fast_prompt,
     _build_runtime_tool_gateway_context,
     _build_runtime_user_profile_context,
-    _runtime_disabled_tools_from_context,
 )
 from qwenpaw.agents.tool_guard_mixin import ToolGuardMixin
 
@@ -313,7 +312,7 @@ def test_build_runtime_tool_gateway_context_guides_controlled_tool_usage() -> No
     assert "Runtime Tool Gateway preflight is enabled" in context
     assert "runtime_tool_gateway" not in context
     assert "workspace.list_outputs" not in context
-    assert "execute_shell_command" in context
+    assert "execute_shell_command" not in context
     assert "Each configured QwenPaw built-in, plugin, or MCP tool call" in context
     assert "memory_search" not in context
     assert "runtime_attachment_read" in context
@@ -330,19 +329,7 @@ def test_build_runtime_tool_gateway_context_guides_controlled_tool_usage() -> No
     assert "grant-token" not in context
 
 
-def test_runtime_disabled_tools_from_context_filters_native_tools() -> None:
-    disabled = _runtime_disabled_tools_from_context(
-        {
-            "runtime_constraints": {
-                "disabled_tools": ["execute_shell_command", "write_file"],
-            }
-        }
-    )
-
-    assert disabled == {"execute_shell_command", "write_file"}
-
-
-def test_runtime_gateway_registers_only_runtime_allowed_native_tools() -> None:
+def test_runtime_gateway_does_not_filter_native_tools_from_runtime_context() -> None:
     fake_agent = SimpleNamespace()
     fake_agent._agent_config = SimpleNamespace(
         tools=SimpleNamespace(
@@ -388,8 +375,8 @@ def test_runtime_gateway_registers_only_runtime_allowed_native_tools() -> None:
     assert "runtime_attachment_read" in toolkit.tools
     assert "runtime_sandbox_files_search" in toolkit.tools
     assert "get_current_time" in toolkit.tools
-    assert "read_file" not in toolkit.tools
-    assert "execute_shell_command" not in toolkit.tools
+    assert "read_file" in toolkit.tools
+    assert "execute_shell_command" in toolkit.tools
 
 
 def test_runtime_gateway_does_not_register_attachment_tool_without_sandbox_context() -> None:

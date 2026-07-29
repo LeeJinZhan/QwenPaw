@@ -17,7 +17,7 @@ from .file_io import _resolve_file_path
 
 _REQUIRED_OSS_ENV_VARS = (
     "OSS_ENDPOINT",
-    "OSS_BUCKET_NAME",
+    "OSS_BUCKET",
     "OSS_ACCESS_KEY_ID",
     "OSS_ACCESS_KEY_SECRET",
 )
@@ -74,7 +74,7 @@ def _upload_file(source_path: Path, filename: str) -> str:
     bucket = oss2.Bucket(
         auth,
         os.environ["OSS_ENDPOINT"],
-        os.environ["OSS_BUCKET_NAME"],
+        os.environ["OSS_BUCKET"],
     )
     key = _build_object_key(filename)
     download_headers = _build_download_headers(filename)
@@ -94,7 +94,7 @@ def _upload_file(source_path: Path, filename: str) -> str:
 
 
 def _build_object_key(filename: str) -> str:
-    prefix = os.getenv("OSS_PREFIX", "").strip().strip("/")
+    prefix = os.getenv("QWENPAW_OSS_UPLOAD_PREFIX", "").strip().strip("/")
     suffix = Path(filename).suffix
     key = f"{uuid.uuid4().hex}{suffix}"
     return f"{prefix}/{key}" if prefix else key
