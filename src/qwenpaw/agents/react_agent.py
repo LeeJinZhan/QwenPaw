@@ -121,21 +121,31 @@ def _build_runtime_tool_gateway_context(request_context: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _runtime_user_profile_preferences(
+    request_context: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Return validated request-scoped Profile preferences."""
+    runtime_context = request_context.get("runtime_context")
+    if not isinstance(runtime_context, dict):
+        return None
+    user_overlay = runtime_context.get("user_overlay")
+    if not isinstance(user_overlay, dict):
+        return None
+    profile = user_overlay.get("profile")
+    if not isinstance(profile, dict) or profile.get("trust_level") != "low":
+        return None
+    preferences = profile.get("preferences")
+    if not isinstance(preferences, dict):
+        return None
+    return preferences
+
+
 def _build_runtime_user_profile_context(
     request_context: dict[str, Any],
 ) -> str:
     """Render a constrained, low-trust Runtime user profile."""
-    runtime_context = request_context.get("runtime_context")
-    if not isinstance(runtime_context, dict):
-        return ""
-    user_overlay = runtime_context.get("user_overlay")
-    if not isinstance(user_overlay, dict):
-        return ""
-    profile = user_overlay.get("profile")
-    if not isinstance(profile, dict) or profile.get("trust_level") != "low":
-        return ""
-    preferences = profile.get("preferences")
-    if not isinstance(preferences, dict):
+    preferences = _runtime_user_profile_preferences(request_context)
+    if preferences is None:
         return ""
 
     allowed_values = {
@@ -156,6 +166,17 @@ def _build_runtime_user_profile_context(
         value = preferences.get(field)
         if isinstance(value, str) and value in allowed:
             lines.append(f"- {field}: {value}")
+            if field == "language":
+                language_instruction = {
+                    "zh-CN": "Respond in Simplified Chinese by default",
+                    "en-US": "Respond in English by default",
+                }[value]
+                lines.append(
+                    f"- Response-language rule: {language_instruction}, even "
+                    "when the user writes in another language. The input "
+                    "language alone is not an explicit override. Switch only "
+                    "when the user explicitly requests another output language.",
+                )
 
     formats = preferences.get("preferred_formats")
     if isinstance(formats, list):
@@ -417,6 +438,17 @@ def _build_runtime_simple_text_fast_prompt(
 ) -> str:
     task_id = str(request_context.get("runtime_task_id", "") or "").strip()
     trace_id = str(request_context.get("trace_id", "") or "").strip()
+    profile_preferences = _runtime_user_profile_preferences(request_context)
+    profile_language = (
+        profile_preferences.get("language")
+        if isinstance(profile_preferences, dict)
+        else None
+    )
+    effective_language = (
+        profile_language
+        if profile_language in {"zh-CN", "en-US"}
+        else language
+    )
     has_personal_skills = bool(
         build_personal_skills_catalog_prompt(
             request_context.get("personal_skills_catalog"),
@@ -430,7 +462,8 @@ def _build_runtime_simple_text_fast_prompt(
     )
     lines = [
         "你是 Bank Agent Runtime 通过 QwenPaw 调用的轻量文本助手。",
-        "直接回答用户的简单文本问题，保持简洁、准确，并使用用户的语言。",
+        "直接回答用户的简单文本问题并保持简洁、准确。输出语言遵循下方 "
+        "Response language；未提供时才跟随用户提问语言。",
         tool_rule,
         "如果用户问题需要附件、客户数据、外部系统、工具执行或高风险能力，说明该请求需要走完整任务模式。",
         "不要声称已经创建文件、执行命令、查询客户信息或调用外部系统。",
@@ -457,8 +490,13 @@ def _build_runtime_simple_text_fast_prompt(
             lines.append(
                 "当用户询问今天、当前日期或当前时间时，必须基于上述 Runtime time context 回答。",
             )
-    if language:
-        lines.append(f"Preferred language: {language}")
+    if effective_language:
+        lines.append(f"Response language: {effective_language}")
+        if profile_language:
+            lines.append(
+                "The Profile language is the default even when the input uses "
+                "another language; change it only for an explicit output-language request.",
+            )
     return "\n".join(lines)
 
 

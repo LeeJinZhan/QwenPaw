@@ -251,6 +251,11 @@ def _configured_oss_hosts() -> tuple[str, ...]:
     return tuple(hosts)
 
 
+def _explicit_http_oss_endpoint() -> bool:
+    configured = os.environ.get("OSS_ENDPOINT", "").strip()
+    return urlparse(configured).scheme.lower() == "http"
+
+
 def _validate_signed_url(url: str) -> str:
     parsed = urlparse(url)
     scheme = parsed.scheme.lower()
@@ -261,13 +266,15 @@ def _validate_signed_url(url: str) -> str:
         and parsed.path.startswith("/runtime/internal/personal-skill-content/")
     ):
         return host
-    if scheme != "https":
-        raise PersonalSkillLoadError("Personal Skill URL must use HTTPS.")
     allowed = _configured_oss_hosts()
     if not host or not allowed:
         raise PersonalSkillLoadError("Personal Skill OSS host is not configured.")
     if not any(host == item or host.endswith(f".{item}") for item in allowed):
         raise PersonalSkillLoadError("Personal Skill URL host is not allowed.")
+    if scheme == "http" and _explicit_http_oss_endpoint():
+        return host
+    if scheme != "https":
+        raise PersonalSkillLoadError("Personal Skill URL must use HTTPS.")
     return host
 
 
