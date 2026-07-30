@@ -12,6 +12,7 @@ import stat
 import sys
 import threading
 import time
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -20,6 +21,19 @@ from agentscope.message import Msg
 runtime_sandbox_oss_module = importlib.import_module(
     "qwenpaw.agents.tools.runtime_sandbox_oss",
 )
+
+
+def test_qwenpaw_runtime_dependencies_include_oss_reader() -> None:
+    try:
+        import tomllib
+    except ModuleNotFoundError:  # Python 3.10 compatibility
+        import tomli as tomllib
+
+    project_root = Path(__file__).resolve().parents[4]
+    with (project_root / "pyproject.toml").open("rb") as pyproject_file:
+        dependencies = tomllib.load(pyproject_file)["project"]["dependencies"]
+
+    assert any(dependency.startswith("oss2") for dependency in dependencies)
 
 
 def test_sandboxed_oss_client_unwraps_runtime_authorize_envelope(monkeypatch) -> None:
@@ -559,6 +573,7 @@ def test_sandboxed_oss_client_streams_local_object_in_bounded_chunks(
 def test_sandboxed_oss_client_streams_oss_object_in_bounded_chunks(monkeypatch) -> None:
     payload = b"o" * (2 * 1024 * 1024 + 19)
     read_sizes: list[int] = []
+    bucket_endpoints: list[str] = []
 
     class FakeObject:
         def __init__(self) -> None:
@@ -577,8 +592,8 @@ def test_sandboxed_oss_client_streams_oss_object_in_bounded_chunks(monkeypatch) 
     fake_object = FakeObject()
 
     class FakeBucket:
-        def __init__(self, *_args) -> None:
-            pass
+        def __init__(self, _auth, endpoint: str, _bucket_name: str) -> None:
+            bucket_endpoints.append(endpoint)
 
         def get_object(self, object_key: str):
             assert object_key == "runtime/large.bin"
@@ -589,7 +604,7 @@ def test_sandboxed_oss_client_streams_oss_object_in_bounded_chunks(monkeypatch) 
         Bucket=FakeBucket,
     )
     monkeypatch.setitem(sys.modules, "oss2", fake_oss2)
-    monkeypatch.setenv("OSS_ENDPOINT", "https://oss.example")
+    monkeypatch.setenv("OSS_ENDPOINT", "oss.example")
     monkeypatch.setenv("OSS_BUCKET", "runtime-bucket")
     monkeypatch.setenv("OSS_ACCESS_KEY_ID", "test-key")
     monkeypatch.setenv("OSS_ACCESS_KEY_SECRET", "test-secret")
@@ -608,6 +623,7 @@ def test_sandboxed_oss_client_streams_oss_object_in_bounded_chunks(monkeypatch) 
     assert content_type == "application/octet-stream"
     assert b"".join(chunks) == payload
     assert fake_object.closed is True
+    assert bucket_endpoints == ["https://oss.example"]
     assert read_sizes
     assert max(read_sizes) <= 1024 * 1024
 

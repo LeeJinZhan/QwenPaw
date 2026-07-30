@@ -3,9 +3,14 @@
 
 from __future__ import annotations
 
+import io
+import json
+from urllib.error import HTTPError
+
 import pytest
 
-from qwenpaw.agents.runtime_tool_gateway import RuntimeToolGatewayClient
+import qwenpaw.agents.runtime_tool_gateway as gateway_module
+from qwenpaw.agents.runtime_tool_gateway import RuntimeToolGatewayClient, RuntimeToolGatewayError
 
 
 def _context() -> dict:
@@ -31,7 +36,7 @@ async def test_preflight_uses_task_gateway_context_and_returns_allow(monkeypatch
 
     async def fake_post(_self, url, payload, headers):
         requests.append((url, payload, headers))
-        return {"tool_call_id": "tool_001", "decision": "allow", "status": "allowed", "trace_id": "trace_001"}
+        return {"phase": "allow", "tool_call_id": "tool_001", "decision": "allow", "status": "allowed", "trace_id": "trace_001"}
 
     monkeypatch.setattr(RuntimeToolGatewayClient, "_post", fake_post)
 
@@ -47,7 +52,7 @@ async def test_preflight_uses_task_gateway_context_and_returns_allow(monkeypatch
                 "session_id": "sess_001",
                 "tool_session_id": "wts_001",
                 "policy_snapshot_id": "ps_001",
-                "tool_id": "mcp.policy.search",
+                "worker_tool_name": "mcp.policy.search",
                 "input": {"query": "制度"},
                 "idempotency_key": result["idempotency_key"],
                 "trace_id": "trace_001",
@@ -55,6 +60,59 @@ async def test_preflight_uses_task_gateway_context_and_returns_allow(monkeypatch
             {"Authorization": "Bearer worker-token"},
         )
     ]
+
+
+@pytest.mark.asyncio
+async def test_preflight_preserves_structured_runtime_denial(monkeypatch):
+    client = RuntimeToolGatewayClient.from_request_context(_context())
+
+    async def fake_post(_self, _url, _payload, _headers):
+        return {
+            "phase": "deny",
+            "code": "POLICY_BLOCKED",
+            "message": "internal policy detail",
+            "details": {"violation_type": "assistant_tool_not_allowed"},
+            "public_summary": "当前助手未授权使用该工具，请尝试其他方式完成请求。",
+        }
+
+    monkeypatch.setattr(RuntimeToolGatewayClient, "_post", fake_post)
+
+    with pytest.raises(RuntimeToolGatewayError) as raised:
+        await client.preflight("execute_shell_command", {"command": "pwd"})
+
+    assert raised.value.code == "POLICY_BLOCKED"
+    assert raised.value.violation_type == "assistant_tool_not_allowed"
+    assert raised.value.public_summary == "当前助手未授权使用该工具，请尝试其他方式完成请求。"
+
+
+def test_http_error_preserves_safe_runtime_denial(monkeypatch):
+    response_body = json.dumps(
+        {
+            "detail": {
+                "code": "POLICY_BLOCKED",
+                "message": "internal policy detail",
+                "details": {"violation_type": "assistant_tool_not_allowed"},
+                "public_summary": "当前助手未授权使用该工具，请尝试其他方式完成请求。",
+            },
+        },
+        ensure_ascii=False,
+    ).encode("utf-8")
+
+    def denied_urlopen(request, timeout):
+        raise HTTPError(request.full_url, 403, "Forbidden", {}, io.BytesIO(response_body))
+
+    monkeypatch.setattr(gateway_module, "urlopen", denied_urlopen)
+
+    with pytest.raises(RuntimeToolGatewayError) as raised:
+        RuntimeToolGatewayClient._post_sync(
+            "http://runtime.example/runtime/v1/tool-calls",
+            {"phase": "preflight"},
+            {"Authorization": "Bearer worker-token"},
+        )
+
+    assert raised.value.code == "POLICY_BLOCKED"
+    assert raised.value.violation_type == "assistant_tool_not_allowed"
+    assert raised.value.public_summary == "当前助手未授权使用该工具，请尝试其他方式完成请求。"
 
 
 @pytest.mark.asyncio
@@ -90,7 +148,11 @@ async def test_guard_callback_uses_same_call_and_only_the_decision(monkeypatch):
 
     async def fake_post(_self, _url, payload, _headers):
         requests.append(payload)
-        return {"tool_call_id": "tool_001", "status": "executing"}
+        return {
+            "tool_call_id": "tool_001",
+            "guard_decision": "allow",
+            "status": "executing",
+        }
 
     monkeypatch.setattr(RuntimeToolGatewayClient, "_post", fake_post)
 
@@ -108,6 +170,23 @@ async def test_guard_callback_uses_same_call_and_only_the_decision(monkeypatch):
             "guard_decision": "allow",
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_guard_callback_rejects_mismatched_runtime_acknowledgement(monkeypatch):
+    client = RuntimeToolGatewayClient.from_request_context(_context())
+
+    async def fake_post(_self, _url, _payload, _headers):
+        return {
+            "tool_call_id": "tool_001",
+            "guard_decision": "block",
+            "status": "cancelled",
+        }
+
+    monkeypatch.setattr(RuntimeToolGatewayClient, "_post", fake_post)
+
+    with pytest.raises(RuntimeToolGatewayError):
+        await client.report_guard("tool_001", "allow")
 
 
 def test_missing_or_other_protocol_does_not_enable_gateway():

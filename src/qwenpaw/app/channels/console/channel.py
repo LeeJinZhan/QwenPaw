@@ -616,7 +616,7 @@ class ConsoleChannel(BaseChannel):
                 send_meta,
             )
             if is_runtime_request:
-                runtime_projector = RuntimeEventProjector()
+                runtime_projector = RuntimeEventProjector.from_environment()
             last_response = None
             event_count = 0
             runtime_terminal_sent = False

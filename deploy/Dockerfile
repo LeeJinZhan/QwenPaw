@@ -10,7 +10,7 @@ ARG CONSOLE_BUILD_NODE_OPTIONS="--max-old-space-size=4096"
 ENV NODE_OPTIONS=${CONSOLE_BUILD_NODE_OPTIONS}
 WORKDIR /app
 COPY console /app/console
-RUN cd /app/console && npm ci --include=dev && npm run build
+RUN cd /app/console && npm ci --include=dev && npm run build && rm -rf node_modules
 
 # Alias for uv binary so COPY --from can reference a build-arg image.
 FROM ${UV_IMAGE} AS uv-src

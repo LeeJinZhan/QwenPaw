@@ -22,6 +22,7 @@ from .desktop_screenshot import desktop_screenshot
 from .view_media import view_image, view_video
 from .get_current_time import get_current_time, set_user_timezone
 from .get_token_usage import get_token_usage
+from .oss_upload import upload_file_to_oss
 from .runtime_attachment_read import runtime_attachment_read
 from .runtime_sandbox_files import runtime_sandbox_files_search
 from .agent_management import (
@@ -58,6 +59,7 @@ __all__ = [
     "get_current_time",
     "set_user_timezone",
     "get_token_usage",
+    "upload_file_to_oss",
     "runtime_attachment_read",
     "runtime_sandbox_files_search",
     "delegate_external_agent",

@@ -1458,6 +1458,8 @@ def _stream_oss_object(
     write_chunk: Callable[[bytes], None],
 ) -> str:
     endpoint = os.environ.get("OSS_ENDPOINT", "").strip()
+    if endpoint and "://" not in endpoint:
+        endpoint = f"https://{endpoint}"
     bucket_name = str(
         locator.get("bucket") or os.environ.get("OSS_BUCKET", ""),
     ).strip()

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 from typing import Any
 
@@ -21,9 +22,23 @@ _SAFE_FAILURE_MESSAGES = {
 DEFAULT_MIN_CHUNK_CHARS = 256
 DEFAULT_MAX_CHUNK_CHARS = 512
 DEFAULT_MAX_CHUNK_DELAY_SECONDS = 0.05
+DEFAULT_THINKING_CHUNK_CHARS = 256
+DEFAULT_THINKING_MAX_DELAY_SECONDS = 0.1
 STATUS_ANSWER_GENERATING = "answer.generating"
 STATUS_ANSWER_COMPLETED = "completed"
 STATUS_ANSWER_FAILED = "failed"
+_PERSONAL_SKILL_RUNTIME_EVENT_TYPES = {
+    "personal_skill.activated",
+    "personal_skill.load_failed",
+}
+_PERSONAL_SKILL_RUNTIME_EVENT_FIELDS = (
+    "event_type",
+    "skill_id",
+    "version_no",
+    "content_hash",
+    "result",
+    "duration_bucket",
+)
 
 
 def _token(value: Any) -> str:
@@ -216,6 +231,34 @@ def _terminal_outcome(payload: dict[str, Any]) -> tuple[bool | None, bool]:
     return None, False
 
 
+def _personal_skill_runtime_event(
+    payload: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Return an allowlisted control event without exposing tool output."""
+    if (
+        _token(payload.get("object")) != "message"
+        or _token(payload.get("status")) not in _SUCCESS_STATES
+    ):
+        return None
+    metadata = payload.get("metadata")
+    if not isinstance(metadata, dict):
+        return None
+    if isinstance(metadata.get("metadata"), dict):
+        metadata = metadata["metadata"]
+    runtime_event = metadata.get("runtime_event")
+    if not isinstance(runtime_event, dict):
+        return None
+    event_type = str(runtime_event.get("event_type", "")).strip()
+    if event_type not in _PERSONAL_SKILL_RUNTIME_EVENT_TYPES:
+        return None
+    safe_event = {
+        key: runtime_event[key]
+        for key in _PERSONAL_SKILL_RUNTIME_EVENT_FIELDS
+        if key in runtime_event
+    }
+    return {"metadata": {"runtime_event": safe_event}}
+
+
 class RuntimeEventProjector:  # pylint: disable=too-many-instance-attributes
     """Stateful native-event to public Runtime-event projector."""
 
@@ -225,29 +268,78 @@ class RuntimeEventProjector:  # pylint: disable=too-many-instance-attributes
         min_chunk_chars: int = DEFAULT_MIN_CHUNK_CHARS,
         max_chunk_chars: int = DEFAULT_MAX_CHUNK_CHARS,
         max_chunk_delay_seconds: float = DEFAULT_MAX_CHUNK_DELAY_SECONDS,
+        thinking_chunk_chars: int = DEFAULT_THINKING_CHUNK_CHARS,
+        thinking_max_delay_seconds: float = DEFAULT_THINKING_MAX_DELAY_SECONDS,
     ) -> None:
         if min_chunk_chars <= 0 or max_chunk_chars < min_chunk_chars:
             raise ValueError("Runtime chunk bounds are invalid.")
         if max_chunk_delay_seconds <= 0:
             raise ValueError("Runtime chunk delay must be positive.")
+        if thinking_chunk_chars <= 0:
+            raise ValueError("Runtime thinking chunk size must be positive.")
+        if thinking_max_delay_seconds <= 0:
+            raise ValueError("Runtime thinking delay must be positive.")
         self.min_chunk_chars = min_chunk_chars
         self.max_chunk_chars = max_chunk_chars
         self.max_chunk_delay_seconds = max_chunk_delay_seconds
+        self.thinking_chunk_chars = thinking_chunk_chars
+        self.thinking_max_delay_seconds = thinking_max_delay_seconds
         self.accepted_sent = False
         self.full_text = ""
         self.buffer = ""
         self.last_flush_at: float | None = None
+        self.answer_chunk_sent = False
+        self.thinking_buffer = ""
+        self.last_thinking_flush_at: float | None = None
+        self.thinking_closed = False
         self.terminal_sent = False
         self.internal_parent_message_ids: set[str] = set()
         self.reasoning_parent_message_ids: set[str] = set()
         self.thinking_snapshot_text: dict[str, str] = {}
+
+    @classmethod
+    def from_environment(cls) -> RuntimeEventProjector:
+        """Build a projector from optional Runtime streaming tunables."""
+        min_chunk_chars = _positive_env_int(
+            "QWENPAW_RUNTIME_ANSWER_MIN_CHUNK_CHARS",
+            DEFAULT_MIN_CHUNK_CHARS,
+        )
+        max_chunk_chars = max(
+            min_chunk_chars,
+            _positive_env_int(
+                "QWENPAW_RUNTIME_ANSWER_MAX_CHUNK_CHARS",
+                DEFAULT_MAX_CHUNK_CHARS,
+            ),
+        )
+        return cls(
+            min_chunk_chars=min_chunk_chars,
+            max_chunk_chars=max_chunk_chars,
+            max_chunk_delay_seconds=(
+                _positive_env_int(
+                    "QWENPAW_RUNTIME_ANSWER_MAX_DELAY_MS",
+                    round(DEFAULT_MAX_CHUNK_DELAY_SECONDS * 1000),
+                )
+                / 1000
+            ),
+            thinking_chunk_chars=_positive_env_int(
+                "QWENPAW_RUNTIME_THINKING_CHUNK_CHARS",
+                DEFAULT_THINKING_CHUNK_CHARS,
+            ),
+            thinking_max_delay_seconds=(
+                _positive_env_int(
+                    "QWENPAW_RUNTIME_THINKING_MAX_DELAY_MS",
+                    round(DEFAULT_THINKING_MAX_DELAY_SECONDS * 1000),
+                )
+                / 1000
+            ),
+        )
 
     def project(
         self,
         native_event: Any,
         *,
         now: float | None = None,
-    ) -> list[dict[str, str]]:
+    ) -> list[dict[str, Any]]:
         """Consume one native event and return zero or more public events."""
         if self.terminal_sent:
             return []
@@ -262,12 +354,23 @@ class RuntimeEventProjector:  # pylint: disable=too-many-instance-attributes
                 now=current_time,
             )
 
-        emitted: list[dict[str, str]] = []
+        emitted: list[dict[str, Any]] = []
+        runtime_event = _personal_skill_runtime_event(payload)
+        if runtime_event is not None:
+            emitted.append(runtime_event)
         thinking_delta = self._thinking_delta(payload)
         if thinking_delta:
-            emitted.append(
-                {"event": "answer.thinking", "text": thinking_delta},
-            )
+            self._append_thinking(thinking_delta, current_time)
+            if not self.accepted_sent:
+                self.accepted_sent = True
+                emitted.append(
+                    {
+                        "event": "status.changed",
+                        "status": STATUS_ANSWER_GENERATING,
+                        "message": "正在生成回答",
+                    },
+                )
+            emitted.extend(self._flush_thinking(current_time, force=False))
 
         parent_message_id = str(payload.get("msg_id") or "").strip()
         if (
@@ -289,15 +392,18 @@ class RuntimeEventProjector:  # pylint: disable=too-many-instance-attributes
                             "message": "正在生成回答",
                         },
                     )
+                emitted.extend(self._flush_thinking(current_time, force=True))
+                self.thinking_closed = True
                 emitted.extend(
-                    self._flush(
+                    self._flush_answer(
                         current_time,
                         force=False,
                         allow_min_chunk=not incremental,
                     ),
                 )
         elif self.buffer:
-            emitted.extend(self._flush(current_time, force=False))
+            emitted.extend(self._flush_thinking(current_time, force=True))
+            emitted.extend(self._flush_answer(current_time, force=False))
 
         if terminal_success is True:
             emitted.extend(self.finish(success=True, now=current_time))
@@ -315,7 +421,8 @@ class RuntimeEventProjector:  # pylint: disable=too-many-instance-attributes
         if self.terminal_sent:
             return []
         current_time = time.monotonic() if now is None else float(now)
-        emitted = self._flush(current_time, force=True)
+        emitted = self._flush_thinking(current_time, force=True)
+        emitted.extend(self._flush_answer(current_time, force=True))
         self.terminal_sent = True
         if success:
             emitted.append(
@@ -344,7 +451,9 @@ class RuntimeEventProjector:  # pylint: disable=too-many-instance-attributes
         if self.terminal_sent:
             return []
         current_time = time.monotonic() if now is None else float(now)
-        return self._flush(current_time, force=False)
+        emitted = self._flush_thinking(current_time, force=False)
+        emitted.extend(self._flush_answer(current_time, force=False))
+        return emitted
 
     def next_flush_delay_seconds(
         self,
@@ -352,18 +461,27 @@ class RuntimeEventProjector:  # pylint: disable=too-many-instance-attributes
         now: float | None = None,
     ) -> float | None:
         """Return one pending flush delay, or None when no text is buffered."""
-        if self.terminal_sent or not self.buffer:
+        if self.terminal_sent:
             return None
         current_time = time.monotonic() if now is None else float(now)
-        started_at = (
-            self.last_flush_at
-            if self.last_flush_at is not None
-            else current_time
-        )
-        return max(
-            0.0,
-            started_at + self.max_chunk_delay_seconds - current_time,
-        )
+        deadlines: list[float] = []
+        if self.buffer:
+            started_at = (
+                self.last_flush_at
+                if self.last_flush_at is not None
+                else current_time
+            )
+            deadlines.append(started_at + self.max_chunk_delay_seconds)
+        if self.thinking_buffer:
+            started_at = (
+                self.last_thinking_flush_at
+                if self.last_thinking_flush_at is not None
+                else current_time
+            )
+            deadlines.append(started_at + self.thinking_max_delay_seconds)
+        if not deadlines:
+            return None
+        return max(0.0, min(deadlines) - current_time)
 
     def _remember_internal_parent(self, payload: dict[str, Any]) -> None:
         if _token(payload.get("object")) != "message":
@@ -377,6 +495,8 @@ class RuntimeEventProjector:  # pylint: disable=too-many-instance-attributes
             self.internal_parent_message_ids.add(message_id)
 
     def _thinking_delta(self, payload: dict[str, Any]) -> str:
+        if self.thinking_closed:
+            return ""
         if _is_reasoning_message(payload):
             message_id = str(payload.get("id") or "").strip()
             text, incremental = _thinking_content_text(payload.get("content"))
@@ -437,7 +557,12 @@ class RuntimeEventProjector:  # pylint: disable=too-many-instance-attributes
         self.buffer += delta
         return delta
 
-    def _flush(
+    def _append_thinking(self, text: str, now: float) -> None:
+        if not self.thinking_buffer:
+            self.last_thinking_flush_at = now
+        self.thinking_buffer += text
+
+    def _flush_answer(
         self,
         now: float,
         *,
@@ -472,4 +597,36 @@ class RuntimeEventProjector:  # pylint: disable=too-many-instance-attributes
     def _pop_chunk(self, length: int) -> dict[str, str]:
         text = self.buffer[:length]
         self.buffer = self.buffer[length:]
+        self.answer_chunk_sent = True
         return {"event": "answer.chunk", "text": text}
+
+    def _flush_thinking(self, now: float, *, force: bool) -> list[dict[str, str]]:
+        if not self.thinking_buffer:
+            return []
+        if self.last_thinking_flush_at is None:
+            self.last_thinking_flush_at = now
+        emitted: list[dict[str, str]] = []
+        while len(self.thinking_buffer) >= self.thinking_chunk_chars:
+            emitted.append(self._pop_thinking(self.thinking_chunk_chars))
+            self.last_thinking_flush_at = now
+        deadline_reached = (
+            now - self.last_thinking_flush_at
+            >= self.thinking_max_delay_seconds
+        )
+        if self.thinking_buffer and (force or deadline_reached):
+            emitted.append(self._pop_thinking(len(self.thinking_buffer)))
+            self.last_thinking_flush_at = now
+        return emitted
+
+    def _pop_thinking(self, length: int) -> dict[str, str]:
+        text = self.thinking_buffer[:length]
+        self.thinking_buffer = self.thinking_buffer[length:]
+        return {"event": "answer.thinking", "text": text}
+
+
+def _positive_env_int(name: str, default: int) -> int:
+    try:
+        value = int(str(os.getenv(name, "") or default))
+    except (TypeError, ValueError):
+        return default
+    return value if value > 0 else default
