@@ -202,7 +202,7 @@ class ToolGuardMixin:
                     tool_input,
                     idempotency_key=self._gateway_idempotency_key(tool_call),
                 )
-                await self._report_runtime_guard_best_effort(client, preflight["tool_call_id"], "allow")
+                await client.report_guard(preflight["tool_call_id"], "allow")
             except RuntimeToolGatewayError as error:
                 await self._emit_runtime_gateway_failure(
                     tool_call,
@@ -315,23 +315,22 @@ class ToolGuardMixin:
 
         if action is not None:
             if gateway_client is not None:
-                if action.kind == "needs_approval":
-                    await self._report_runtime_guard_best_effort(
-                        gateway_client,
-                        gateway_preflight["tool_call_id"],
-                        "allow",
-                    )
-                    return await self._execute_runtime_gateway_tool_call(
-                        tool_call,
-                        gateway_client=gateway_client,
-                        preflight=gateway_preflight,
-                    )
-                guard_decision = "block"
-                await self._report_runtime_guard_best_effort(
-                    gateway_client,
-                    gateway_preflight["tool_call_id"],
-                    guard_decision,
+                guard_decision = (
+                    "require_approval"
+                    if action.kind == "needs_approval"
+                    else "block"
                 )
+                try:
+                    await gateway_client.report_guard(
+                        gateway_preflight["tool_call_id"],
+                        guard_decision,
+                    )
+                except RuntimeToolGatewayError:
+                    await self._emit_runtime_gateway_failure(
+                        tool_call,
+                        "Tool Gateway Guard audit writeback failed.",
+                    )
+                    return None
             return await self._execute_guard_action(
                 action,
                 tool_call,
@@ -340,11 +339,17 @@ class ToolGuardMixin:
             )
 
         if gateway_client is not None:
-            await self._report_runtime_guard_best_effort(
-                gateway_client,
-                gateway_preflight["tool_call_id"],
-                "allow",
-            )
+            try:
+                await gateway_client.report_guard(
+                    gateway_preflight["tool_call_id"],
+                    "allow",
+                )
+            except RuntimeToolGatewayError:
+                await self._emit_runtime_gateway_failure(
+                    tool_call,
+                    "Tool Gateway Guard audit writeback failed.",
+                )
+                return None
         return await self._execute_runtime_gateway_tool_call(
             tool_call,
             gateway_client=gateway_client,
@@ -677,11 +682,17 @@ class ToolGuardMixin:
                 tool_name,
             )
             if gateway_client is not None and gateway_preflight is not None:
-                await self._report_runtime_guard_best_effort(
-                    gateway_client,
-                    gateway_preflight["tool_call_id"],
-                    "allow",
-                )
+                try:
+                    await gateway_client.report_guard(
+                        gateway_preflight["tool_call_id"],
+                        "allow",
+                    )
+                except RuntimeToolGatewayError:
+                    await self._emit_runtime_gateway_failure(
+                        tool_call,
+                        "Tool Gateway Guard audit writeback failed.",
+                    )
+                    return None
             return await self._execute_runtime_gateway_tool_call(
                 tool_call,
                 gateway_client=gateway_client,

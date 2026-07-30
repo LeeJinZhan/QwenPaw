@@ -81,7 +81,7 @@ class RuntimeToolGatewayClient:
             {
                 "phase": "preflight",
                 **self._scope_payload(),
-                "tool_id": str(worker_tool_name),
+                "worker_tool_name": str(worker_tool_name),
                 "input": dict(tool_input),
                 "idempotency_key": idempotency_key,
                 "trace_id": self.trace_id,
@@ -127,7 +127,7 @@ class RuntimeToolGatewayClient:
     async def report_guard(self, tool_call_id: str, guard_decision: str) -> dict[str, Any]:
         if guard_decision not in {"allow", "block", "require_approval"}:
             raise RuntimeToolGatewayError("Tool Guard decision is invalid")
-        return await self._post(
+        response = await self._post(
             self._url,
             {
                 "phase": "guard",
@@ -137,6 +137,20 @@ class RuntimeToolGatewayClient:
             },
             self._headers,
         )
+        expected_status = {
+            "allow": "executing",
+            "block": "cancelled",
+            "require_approval": "pending_approval",
+        }[guard_decision]
+        if (
+            response.get("tool_call_id") != str(tool_call_id)
+            or response.get("guard_decision") != guard_decision
+            or response.get("status") != expected_status
+        ):
+            raise RuntimeToolGatewayError(
+                "Tool Gateway Guard acknowledgement is invalid",
+            )
+        return response
 
     @property
     def _url(self) -> str:
