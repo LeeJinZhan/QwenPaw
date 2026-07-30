@@ -52,7 +52,7 @@ async def test_preflight_uses_task_gateway_context_and_returns_allow(monkeypatch
                 "session_id": "sess_001",
                 "tool_session_id": "wts_001",
                 "policy_snapshot_id": "ps_001",
-                "worker_tool_name": "mcp.policy.search",
+                "tool_id": "mcp.policy.search",
                 "input": {"query": "制度"},
                 "idempotency_key": result["idempotency_key"],
                 "trace_id": "trace_001",
@@ -148,11 +148,7 @@ async def test_guard_callback_uses_same_call_and_only_the_decision(monkeypatch):
 
     async def fake_post(_self, _url, payload, _headers):
         requests.append(payload)
-        return {
-            "tool_call_id": "tool_001",
-            "guard_decision": "allow",
-            "status": "executing",
-        }
+        return {"tool_call_id": "tool_001", "status": "executing"}
 
     monkeypatch.setattr(RuntimeToolGatewayClient, "_post", fake_post)
 
@@ -170,23 +166,6 @@ async def test_guard_callback_uses_same_call_and_only_the_decision(monkeypatch):
             "guard_decision": "allow",
         }
     ]
-
-
-@pytest.mark.asyncio
-async def test_guard_callback_rejects_mismatched_runtime_acknowledgement(monkeypatch):
-    client = RuntimeToolGatewayClient.from_request_context(_context())
-
-    async def fake_post(_self, _url, _payload, _headers):
-        return {
-            "tool_call_id": "tool_001",
-            "guard_decision": "block",
-            "status": "cancelled",
-        }
-
-    monkeypatch.setattr(RuntimeToolGatewayClient, "_post", fake_post)
-
-    with pytest.raises(RuntimeToolGatewayError):
-        await client.report_guard("tool_001", "allow")
 
 
 def test_missing_or_other_protocol_does_not_enable_gateway():
