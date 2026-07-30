@@ -46,9 +46,12 @@ RUNTIME_CHANNEL_META_KEYS = (
     "policy_search_context",
     "identity_json",
     "runtime_governance",
+    "runtime_context",
     "runtime_tool_gateway",
     "attachments_manifest",
     "sandbox_context",
+    "personal_skills_catalog",
+    "personal_skills_access_manifest",
 )
 
 

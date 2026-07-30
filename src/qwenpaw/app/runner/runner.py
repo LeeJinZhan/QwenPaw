@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import sys
+import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, AsyncGenerator, Coroutine
 
@@ -49,6 +50,64 @@ logger = logging.getLogger(__name__)
 
 
 _PRINT_END_SIGNAL = "[END]"
+
+RUNTIME_REQUEST_CONTEXT_KEYS = (
+    "conversation_id",
+    "runtime_task_id",
+    "trace_id",
+    "runtime_execution_mode",
+    "runtime_response_mode",
+    "runtime_generation_controls",
+    "runtime_datetime_context",
+    "runtime_latency_marks",
+    "runtime_constraints",
+    "execution_sandbox",
+    "policy_search_context",
+    "identity_json",
+    "runtime_governance",
+    "runtime_context",
+    "runtime_tool_gateway",
+    "attachments_manifest",
+    "sandbox_context",
+    "personal_skills_catalog",
+    "personal_skills_access_manifest",
+)
+
+_PERSONAL_SKILLS_CONTEXT_KEYS = {
+    "personal_skills_catalog",
+    "personal_skills_access_manifest",
+}
+
+
+def _build_base_request_context(
+    *,
+    session_id: str,
+    user_id: str,
+    channel: str,
+    agent_id: str,
+    channel_meta: dict[str, Any],
+    payload_context: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Build request context while preserving private Runtime Skill fields."""
+    context: dict[str, Any] = {
+        "session_id": session_id,
+        "user_id": user_id,
+        "channel": channel,
+        "agent_id": agent_id,
+        "root_agent_id": agent_id,
+    }
+    for key in RUNTIME_REQUEST_CONTEXT_KEYS:
+        if key in channel_meta:
+            context[key] = channel_meta[key]
+    if isinstance(payload_context, dict):
+        context.update(
+            {
+                key: value
+                for key, value in payload_context.items()
+                if key not in _PERSONAL_SKILLS_CONTEXT_KEYS
+            },
+        )
+    return context
 
 
 async def _cancel_streaming_agent_task(task: asyncio.Task) -> None:
@@ -265,16 +324,40 @@ class AgentRunner(Runner):
                 ],
             )
 
-        # /<name> <input> → rewrite user message with skill body.
+        # /<name> <input> → append the skill body to the user message as
+        # a trailing <skill> block. The typed command stays verbatim at
+        # the head; everything injected lives inside the block.
+        original_text = AgentRunner._extract_text_content(msgs[-1])
         merged = (
-            f"Use the [{display_name}] skill in "
-            f"`{skill_dir}` to fulfill "
-            f"user's task: {user_input}\n\n"
-            f"{post.content}"
+            f"{original_text}\n\n"
+            f'<skill name="{display_name}" dir="{skill_dir}">\n'
+            f"This block was injected because the user invoked the "
+            f"[{display_name}] skill above. It is the full content of "
+            f"the skill's SKILL.md — do not re-read that file. Follow "
+            f"these instructions to fulfill the user's task: "
+            f"{user_input}\n"
+            f"Relative paths inside the skill (e.g. `scripts/`) resolve "
+            f"against the skill directory.\n\n"
+            f"{post.content.strip()}\n"
+            f"</skill>"
         )
         AgentRunner._rewrite_last_message_text(msgs, merged)
         logger.info("Skill invocation: %s", name)
         return None
+
+    @staticmethod
+    def _extract_text_content(msg) -> str:
+        """Return the concatenated text of a Msg's content."""
+        content = getattr(msg, "content", None)
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            return "\n".join(
+                block.get("text") or ""
+                for block in content
+                if isinstance(block, dict) and block.get("type") == "text"
+            )
+        return ""
 
     @staticmethod
     def _rewrite_last_message_text(
@@ -373,8 +456,12 @@ class AgentRunner(Runner):
         Handle agent query.
         """
         logger.debug(
-            f"AgentRunner.query_handler called: agent_id={self.agent_id}, "
-            f"msgs={msgs}, request={request}",
+            "AgentRunner.query_handler called: agent_id=%s, session_id=%s, "
+            "user_id=%s, msgs_len=%s",
+            self.agent_id,
+            getattr(request, "session_id", ""),
+            getattr(request, "user_id", ""),
+            len(msgs) if msgs else 0,
         )
         query = _get_last_user_text(msgs)
         session_id = getattr(request, "session_id", "") or ""
@@ -388,8 +475,9 @@ class AgentRunner(Runner):
             return
 
         logger.debug(
-            f"AgentRunner.stream_query: request={request}, "
-            f"agent_id={self.agent_id}",
+            "AgentRunner.stream_query: agent_id=%s, session_id=%s",
+            self.agent_id,
+            session_id,
         )
 
         # Set agent context for model creation
@@ -518,39 +606,15 @@ class AgentRunner(Runner):
 
             logger.debug(f"Enabled MCP: {mcp_clients}")
 
-            # Build base request context
-            base_request_context = {
-                "session_id": session_id,
-                "user_id": user_id,
-                "channel": channel,
-                "agent_id": self.agent_id,
-                "root_agent_id": self.agent_id,
-            }
-            for runtime_meta_key in (
-                "conversation_id",
-                "runtime_task_id",
-                "trace_id",
-                "runtime_execution_mode",
-                "runtime_response_mode",
-                "runtime_generation_controls",
-                "runtime_datetime_context",
-                "runtime_latency_marks",
-                "runtime_constraints",
-                "execution_sandbox",
-                "policy_search_context",
-                "identity_json",
-                "runtime_governance",
-                "runtime_tool_gateway",
-                "attachments_manifest",
-                "sandbox_context",
-            ):
-                if runtime_meta_key in channel_meta:
-                    base_request_context[runtime_meta_key] = channel_meta[
-                        runtime_meta_key
-                    ]
             payload_context = getattr(request, "request_context", None)
-            if isinstance(payload_context, dict):
-                base_request_context.update(payload_context)
+            base_request_context = _build_base_request_context(
+                session_id=session_id,
+                user_id=user_id,
+                channel=channel,
+                agent_id=self.agent_id,
+                channel_meta=channel_meta,
+                payload_context=payload_context,
+            )
 
             # Extract root_session_id from request payload (agent chat)
             payload_root_session = getattr(request, "root_session_id", "")
@@ -747,6 +811,8 @@ class AgentRunner(Runner):
                 task_tracker=self._task_tracker,
                 plan_notebook=plan_notebook,
             )
+            channel_meta.pop("personal_skills_access_manifest", None)
+            base_request_context.pop("personal_skills_access_manifest", None)
             await agent.register_mcp_clients()
             agent.set_console_output_enabled(enabled=False)
 
@@ -896,43 +962,70 @@ class AgentRunner(Runner):
             agent.rebuild_sys_prompt()
 
             # --- Execution: Mission Mode (phased) or standard -----
-            if mission_info is not None:
-                from ...agents.mission.mission_runner import (
-                    run_mission_phase1,
-                    run_mission_phase2,
-                )
+            from ...observability.langfuse import agent_trace_scope
 
-                phase = mission_info["mission_phase"]
-                loop_dir = Path(mission_info["loop_dir"])
-                max_iters = mission_info.get(
-                    "max_iterations",
-                    20,
-                )
+            root_session_id = base_request_context.get(
+                "root_session_id",
+                session_id,
+            )
+            trace_metadata = {
+                "session_id": session_id,
+                "root_session_id": root_session_id,
+                "user_id": user_id,
+                "channel": channel,
+                "agent_id": self.agent_id,
+                "root_agent_id": base_request_context.get("root_agent_id"),
+                "source": base_request_context.get("source"),
+            }
+            async with agent_trace_scope(
+                trace_id=uuid.uuid4().hex,
+                name="qwenpaw.agent.react_loop",
+                metadata=trace_metadata,
+                input={
+                    "query": query,
+                    "messages_count": len(msgs) if msgs else 0,
+                },
+            ):
+                if mission_info is not None:
+                    from ...agents.mission.mission_runner import (
+                        run_mission_phase1,
+                        run_mission_phase2,
+                    )
 
-                if phase == 1:
-                    async for msg, last in run_mission_phase1(
-                        agent=agent,
-                        msgs=msgs,
-                        loop_dir=loop_dir,
-                        max_iterations=max_iters,
-                        agent_id=self.agent_id,
-                    ):
-                        yield msg, last
+                    phase = mission_info["mission_phase"]
+                    loop_dir = Path(mission_info["loop_dir"])
+                    max_iters = mission_info.get(
+                        "max_iterations",
+                        20,
+                    )
+
+                    if phase == 1:
+                        async for msg, last in run_mission_phase1(
+                            agent=agent,
+                            msgs=msgs,
+                            loop_dir=loop_dir,
+                            max_iterations=max_iters,
+                            agent_id=self.agent_id,
+                        ):
+                            yield msg, last
+                    else:
+                        async for msg, last in run_mission_phase2(
+                            agent=agent,
+                            msgs=msgs,
+                            loop_dir=loop_dir,
+                            max_iterations=max_iters,
+                            agent_id=self.agent_id,
+                        ):
+                            yield msg, last
                 else:
-                    async for msg, last in run_mission_phase2(
-                        agent=agent,
-                        msgs=msgs,
-                        loop_dir=loop_dir,
-                        max_iterations=max_iters,
-                        agent_id=self.agent_id,
+                    async for (
+                        msg,
+                        last,
+                    ) in _stream_printing_messages_interruptible(
+                        agents=[agent],
+                        coroutine_task=agent(msgs),
                     ):
                         yield msg, last
-            else:
-                async for msg, last in _stream_printing_messages_interruptible(
-                    agents=[agent],
-                    coroutine_task=agent(msgs),
-                ):
-                    yield msg, last
 
         except asyncio.CancelledError as exc:
             logger.info(f"query_handler: {session_id} cancelled!")
@@ -952,11 +1045,14 @@ class AgentRunner(Runner):
             )
             if cancelled_count > 0:
                 logger.info(
-                    "Auto-denied %d pending approval(s) for root session %s",
+                    "Auto-denied %d pending approval(s) for root "
+                    "session %s",
                     cancelled_count,
-                    root_session_id[:8]
-                    if len(root_session_id) >= 8
-                    else root_session_id,
+                    (
+                        root_session_id[:8]
+                        if len(root_session_id) >= 8
+                        else root_session_id
+                    ),
                 )
 
             if agent is not None:
@@ -1018,12 +1114,16 @@ class AgentRunner(Runner):
                         session_id,
                     )
 
+                await agent.prepare_personal_skills_for_persistence()
+
                 await self.session.save_session_state(
                     session_id=session_id,
                     user_id=user_id,
                     channel=channel,
                     agent=agent,
                 )
+            elif agent is not None:
+                await agent.prepare_personal_skills_for_persistence()
 
             if self._chat_manager is not None and chat is not None:
                 await self._chat_manager.touch_chat(chat.id)

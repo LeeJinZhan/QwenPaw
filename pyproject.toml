@@ -30,6 +30,7 @@ dependencies = [
     "twilio>=9.10.2",
     "pywebview>=4.0",
     "aiofiles>=24.1.0",
+    "oss2>=2.18,<3.0",
     "paho-mqtt>=2.0.0",
     "wecom-aibot-python-sdk==1.0.2",
     "matrix-nio>=0.24.0",
@@ -44,13 +45,14 @@ dependencies = [
     "modelscope>=1.35.0",
     "huggingface_hub>=0.20.0",
     "pillow>=10.0.0",
-    "agent-client-protocol>=0.9.0",
+    "agent-client-protocol==0.10.1",
     "psutil>=6.0.0",
     "openai>=2.0.0,<=2.33.0",
     # anyio 4.13.0: _deliver_cancellation busy-loop / getpid storm (QwenPaw#2632)
     "anyio>=4.0.0,<4.13.0",
     "watchfiles>=0.22",
     "orjson>=3.9",
+    "oss2>=2.19.1",
     # Coding Mode — Python LSP server bundled as a zero-config fallback
     # so the `lsp` tool always works for .py files (see PROPOSAL §3.4).
     "python-lsp-server[all]>=1.10",
