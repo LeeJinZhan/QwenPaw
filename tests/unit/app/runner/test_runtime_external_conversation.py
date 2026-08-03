@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+from contextvars import ContextVar, copy_context
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -209,3 +210,26 @@ def test_runtime_request_context_is_empty_after_reply_scope() -> None:
     assert get_current_runtime_attachments_manifest() is None
     assert get_current_runtime_sandbox_context() is None
     assert get_current_runtime_discovered_file_ids() == frozenset()
+
+
+def test_agent_context_token_can_be_restored_after_stream_context_handoff() -> None:
+    from qwenpaw.app.agent_context import restore_context_token
+
+    current_request = ContextVar("test_runtime_request", default=None)
+    producer_context = copy_context()
+    token = producer_context.run(current_request.set, "runtime-request")
+
+    restore_context_token(token)
+
+    assert current_request.get() is None
+
+
+def test_agent_context_token_reuse_remains_an_error() -> None:
+    from qwenpaw.app.agent_context import restore_context_token
+
+    current_request = ContextVar("test_reused_runtime_request", default=None)
+    token = current_request.set("runtime-request")
+    restore_context_token(token)
+
+    with pytest.raises(RuntimeError, match="already been used once"):
+        restore_context_token(token)

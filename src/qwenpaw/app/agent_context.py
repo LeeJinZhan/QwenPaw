@@ -42,6 +42,23 @@ _current_channel: ContextVar[Optional[str]] = ContextVar(
 )
 
 
+def restore_context_token(token: Token) -> None:
+    """Restore a ContextVar token after an async stream context handoff.
+
+    Async-generator consumers may resume finalization in a copied Context.
+    Python rejects resetting a token created by the producer Context, so in
+    that one case restore the token's previous value in the current Context.
+    Reused or otherwise invalid tokens remain errors.
+    """
+    try:
+        token.var.reset(token)
+    except ValueError as exc:
+        if "different Context" not in str(exc):
+            raise
+        previous = token.old_value
+        token.var.set(None if previous is Token.MISSING else previous)
+
+
 async def get_agent_for_request(
     request: Request,
     agent_id: Optional[str] = None,

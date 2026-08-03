@@ -493,11 +493,7 @@ class AgentRunner(Runner):
 
         # Set agent context for model creation
         from ..agent_context import (
-            reset_current_agent_id,
-            reset_current_channel,
-            reset_current_root_session_id,
-            reset_current_session_id,
-            reset_current_user_id,
+            restore_context_token,
             set_current_agent_id,
             set_current_session_id,
             set_current_root_session_id,
@@ -505,14 +501,14 @@ class AgentRunner(Runner):
             set_current_channel,
         )
 
-        agent_context_tokens: list[tuple[Any, Any]] = []
+        agent_context_tokens: list[Any] = []
         agent_context_tokens.append(
-            (reset_current_agent_id, set_current_agent_id(self.agent_id)),
+            set_current_agent_id(self.agent_id),
         )
 
         # Set session_id in context for token usage tracking
         agent_context_tokens.append(
-            (reset_current_session_id, set_current_session_id(session_id)),
+            set_current_session_id(session_id),
         )
 
         agent = None
@@ -525,10 +521,10 @@ class AgentRunner(Runner):
             user_id = request.user_id
             channel = getattr(request, "channel", DEFAULT_CHANNEL)
             agent_context_tokens.append(
-                (reset_current_user_id, set_current_user_id(user_id)),
+                set_current_user_id(user_id),
             )
             agent_context_tokens.append(
-                (reset_current_channel, set_current_channel(channel)),
+                set_current_channel(channel),
             )
 
             logger.info(
@@ -651,10 +647,7 @@ class AgentRunner(Runner):
             if payload_root_session and isinstance(payload_root_session, str):
                 base_request_context["root_session_id"] = payload_root_session
                 agent_context_tokens.append(
-                    (
-                        reset_current_root_session_id,
-                        set_current_root_session_id(payload_root_session),
-                    ),
+                    set_current_root_session_id(payload_root_session),
                 )
                 root_preview = (
                     payload_root_session[:12]
@@ -669,10 +662,7 @@ class AgentRunner(Runner):
                 # Current session is the root
                 base_request_context["root_session_id"] = session_id
                 agent_context_tokens.append(
-                    (
-                        reset_current_root_session_id,
-                        set_current_root_session_id(session_id),
-                    ),
+                    set_current_root_session_id(session_id),
                 )
                 session_preview = (
                     session_id[:12] if len(session_id) >= 12 else session_id
@@ -1171,8 +1161,8 @@ class AgentRunner(Runner):
             if self._chat_manager is not None and chat is not None:
                 await self._chat_manager.touch_chat(chat.id)
 
-            for reset_context, token in reversed(agent_context_tokens):
-                reset_context(token)
+            for token in reversed(agent_context_tokens):
+                restore_context_token(token)
 
     async def init_handler(self, *args, **kwargs):
         """

@@ -241,11 +241,7 @@ class TaskAttachmentCache:
         if not isinstance(sandbox_context, dict):
             raise RuntimeError("Sandbox context is invalid.")
         task_id = _safe_cache_id(sandbox_context.get("task_id"), "task_id")
-        context_id = _safe_cache_id(
-            sandbox_context.get("context_id")
-            or sandbox_context.get("sandbox_context_id"),
-            "sandbox_context_id",
-        )
+        context_id = _sandbox_cache_context_id(sandbox_context)
         with self.reserve_task_io(task_id):
             self.sweep_expired(exclude_task_ids={task_id})
             self._ensure_task_marker(task_id, context_id)
@@ -292,11 +288,7 @@ class TaskAttachmentCache:
                 sandbox_context.get("task_id"),
                 "task_id",
             )
-            context_id = _safe_cache_id(
-                sandbox_context.get("context_id")
-                or sandbox_context.get("sandbox_context_id"),
-                "sandbox_context_id",
-            )
+            context_id = _sandbox_cache_context_id(sandbox_context)
         except RuntimeError as exc:
             raise RuntimeAttachmentPreparationError(
                 ordered[0],
@@ -512,11 +504,7 @@ class TaskAttachmentCache:
         if not isinstance(sandbox_context, dict):
             raise RuntimeError("Sandbox context is invalid.")
         task_id = _safe_cache_id(sandbox_context.get("task_id"), "task_id")
-        context_id = _safe_cache_id(
-            sandbox_context.get("context_id")
-            or sandbox_context.get("sandbox_context_id"),
-            "sandbox_context_id",
-        )
+        context_id = _sandbox_cache_context_id(sandbox_context)
         cache_key = (task_id, context_id, safe_file_id)
         with self._lock:
             if task_id in self._cleaning_tasks:
@@ -1354,6 +1342,17 @@ def _safe_cache_id(value: Any, field_name: str) -> str:
     ):
         raise RuntimeError(f"Sandbox attachment {field_name} is invalid.")
     return text
+
+
+def _sandbox_cache_context_id(sandbox_context: dict[str, Any]) -> str:
+    """Resolve legacy and runtime-worker/v1 task cache identities."""
+    return _safe_cache_id(
+        sandbox_context.get("context_id")
+        or sandbox_context.get("sandbox_context_id")
+        or sandbox_context.get("sandbox_instance_id")
+        or sandbox_context.get("context_manifest_id"),
+        "sandbox_context_id",
+    )
 
 
 def _safe_original_name(value: Any) -> str:

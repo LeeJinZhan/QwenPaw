@@ -554,6 +554,26 @@ def test_concurrent_same_task_marker_writes_remain_valid(
     assert not list(tmp_path.rglob("*.part.*"))
 
 
+def test_prepare_task_workspace_accepts_runtime_worker_v1_sandbox_instance_id(
+    tmp_path,
+) -> None:
+    cache = runtime_sandbox_oss_module.TaskAttachmentCache(root=tmp_path)
+
+    task_root = cache.prepare_task_workspace(
+        {
+            "task_id": "task_hello",
+            "sandbox_instance_id": "sbox_hello",
+            "context_manifest_id": "ctxm_hello",
+        },
+    )
+
+    marker_payload = json.loads(
+        (task_root / ".task-marker.json").read_text(encoding="utf-8"),
+    )
+    assert marker_payload["task_id"] == "task_hello"
+    assert marker_payload["sandbox_context_id"] == "sbox_hello"
+
+
 def test_sandboxed_oss_client_streams_local_object_in_bounded_chunks(
     tmp_path,
     monkeypatch,
