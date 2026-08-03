@@ -12,7 +12,9 @@ import pytest
 from agentscope.message import Msg
 
 from qwenpaw.config.context import (
+    get_current_file_sandbox_root,
     get_current_runtime_discovered_file_ids,
+    get_current_workspace_dir,
     reset_current_runtime_discovered_file_ids,
     set_current_runtime_attachments_manifest,
     set_current_runtime_discovered_file_ids,
@@ -274,6 +276,53 @@ async def test_agent_reply_clears_request_discovered_file_ids(monkeypatch) -> No
     assert restored == frozenset({"outer"})
 
 
+@pytest.mark.asyncio
+async def test_runtime_agent_reply_uses_task_local_workspace(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    sandbox_module = importlib.import_module(
+        "qwenpaw.agents.tools.runtime_sandbox_oss",
+    )
+    cache = sandbox_module.TaskAttachmentCache(
+        root=tmp_path / "task-cache",
+        ttl_seconds=60,
+    )
+    monkeypatch.setattr(
+        sandbox_module,
+        "_DEFAULT_TASK_ATTACHMENT_CACHE",
+        cache,
+    )
+    observed: dict[str, object] = {}
+
+    async def fake_reply(msg=None, structured_model=None):
+        del msg, structured_model
+        observed["workspace"] = get_current_workspace_dir()
+        observed["sandbox_root"] = get_current_file_sandbox_root()
+        return "done"
+
+    fake_agent = SimpleNamespace(
+        _request_context={
+            "sandbox_context": {
+                "task_id": "task_user_b",
+                "context_id": "ctx_user_b",
+            },
+        },
+        _workspace_dir=tmp_path / "shared-agent-workspace",
+        _reply_with_request_context=fake_reply,
+    )
+
+    reply_impl = QwenPawAgent.reply
+    while hasattr(reply_impl, "__wrapped__"):
+        reply_impl = reply_impl.__wrapped__
+    result = await reply_impl(fake_agent, None)
+
+    expected = cache._task_root("task_user_b").resolve()
+    assert result == "done"
+    assert observed == {"workspace": expected, "sandbox_root": expected}
+    assert get_current_file_sandbox_root() is None
+
+
 def test_build_runtime_tool_gateway_context_guides_controlled_tool_usage() -> None:
     context = _build_runtime_tool_gateway_context(
         {
@@ -321,8 +370,9 @@ def test_build_runtime_tool_gateway_context_guides_controlled_tool_usage() -> No
     assert "只在当前文件不足以完成请求时" in context
     assert "只能读取搜索结果返回的 file_id" in context
     assert "不得构造路径或对象键" in context
-    assert "file_001" in context
-    assert "客户材料.md" in context
+    assert "file_001" not in context
+    assert "客户材料.md" not in context
+    assert "expires_at" not in context
     assert "read_url" not in context
     assert "object_key" not in context
     assert "bucket" not in context
@@ -987,6 +1037,7 @@ async def test_runtime_attachment_read_fetches_only_manifest_file_id(
             }
         ]
     )
+    set_current_runtime_discovered_file_ids({"file_001"})
 
     try:
         response = await module.runtime_attachment_read("file_001", max_bytes=12)
@@ -1048,6 +1099,7 @@ async def test_runtime_attachment_read_requests_only_limit_plus_one(
             },
         ],
     )
+    set_current_runtime_discovered_file_ids({"file_001"})
 
     response = await module.runtime_attachment_read("file_001", max_bytes=12)
     payload = json.loads(_text(response))
@@ -1111,6 +1163,7 @@ async def test_runtime_attachment_read_reserves_before_thread_submission(
             },
         ],
     )
+    set_current_runtime_discovered_file_ids({"file_read"})
 
     response = await module.runtime_attachment_read("file_read")
 
@@ -1151,6 +1204,7 @@ async def test_runtime_attachment_read_hides_local_paths_from_read_errors(
             },
         ],
     )
+    set_current_runtime_discovered_file_ids({"file_read"})
 
     response = await module.runtime_attachment_read("file_read")
     text = _text(response)
@@ -1188,6 +1242,7 @@ async def test_runtime_attachment_read_hides_post_read_processing_errors(
             },
         ],
     )
+    set_current_runtime_discovered_file_ids({"file_read"})
 
     response = await module.runtime_attachment_read("file_read")
 
@@ -1217,6 +1272,7 @@ async def test_runtime_attachment_read_does_not_swallow_cancelled_error(
             },
         ],
     )
+    set_current_runtime_discovered_file_ids({"file_read"})
 
     with pytest.raises(asyncio.CancelledError):
         await module.runtime_attachment_read("file_read")
@@ -1254,6 +1310,38 @@ async def test_runtime_attachment_read_rejects_unknown_file_without_downloading(
     assert called is False
     assert "not available" in _text(response)
     assert "grant-token" not in _text(response)
+
+
+@pytest.mark.asyncio
+async def test_runtime_attachment_read_rejects_current_task_manifest_file(monkeypatch) -> None:
+    module = importlib.import_module("qwenpaw.agents.tools.runtime_attachment_read")
+    called = False
+
+    class FakeSandboxedOssClient:
+        def read_file(self, *_args, **_kwargs):
+            nonlocal called
+            called = True
+            raise AssertionError("current task files are Worker-prepared before model invocation")
+
+    monkeypatch.setattr(module, "SandboxedOssClient", FakeSandboxedOssClient)
+    set_current_runtime_sandbox_context(
+        {"task_id": "task_001", "context_id": "ctx_001", "signature": "signed"},
+    )
+    set_current_runtime_attachments_manifest(
+        [
+            {
+                "file_id": "file_current",
+                "source": "current_task",
+                "access_mode": "sandbox_oss",
+            },
+        ],
+    )
+    set_current_runtime_discovered_file_ids(frozenset())
+
+    response = await module.runtime_attachment_read("file_current")
+
+    assert called is False
+    assert "not available" in _text(response)
 
 
 @pytest.mark.asyncio
@@ -1397,6 +1485,7 @@ async def test_runtime_attachment_read_requires_sandbox_context(monkeypatch) -> 
             }
         ]
     )
+    set_current_runtime_discovered_file_ids({"file_001"})
 
     response = await module.runtime_attachment_read("file_001")
 

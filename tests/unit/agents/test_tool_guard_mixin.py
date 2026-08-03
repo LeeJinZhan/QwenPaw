@@ -485,6 +485,36 @@ class TestRuntimeToolGatewayExecution:
     """The native tool executes only after Runtime preflight allows it."""
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "tool_name",
+        ["runtime_attachment_read", "runtime_sandbox_files_search"],
+    )
+    async def test_runtime_sandbox_broker_tools_use_dedicated_runtime_authorization(
+        self,
+        tool_name,
+    ):
+        m = _make_mixin()
+        gateway = MagicMock()
+        gateway.preflight = AsyncMock(
+            side_effect=AssertionError(
+                "sandbox broker tools must not use the generic Tool Gateway",
+            ),
+        )
+        m._runtime_tool_gateway_client = MagicMock(return_value=gateway)
+        m._call_parent_tool = AsyncMock(return_value={"status": "authorized"})
+        tool_call = {
+            "id": "call_sandbox_001",
+            "name": tool_name,
+            "input": {"file_id": "file_001"},
+        }
+
+        result = await m._acting(tool_call)
+
+        assert result == {"status": "authorized"}
+        gateway.preflight.assert_not_awaited()
+        m._call_parent_tool.assert_awaited_once_with(tool_call)
+
+    @pytest.mark.asyncio
     async def test_gateway_denial_returns_tool_failure_without_execution(self):
         m = _make_mixin()
         gateway = MagicMock()

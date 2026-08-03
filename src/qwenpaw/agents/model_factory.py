@@ -671,18 +671,9 @@ _FORMATTER_SKIPPED_TYPES = frozenset({"thinking", "file"})
 
 def _runtime_attachment_file_text(block: dict) -> str:
     filename = str(block.get("filename") or block.get("name") or "file").strip()
-    file_id = str(block.get(_RUNTIME_ATTACHMENT_FILE_ID_FIELD) or "").strip()
-    if file_id:
-        return (
-            f"Runtime attachment '{filename}' is authorized for this task "
-            f"as file_id '{file_id}'. Use "
-            f"`runtime_attachment_read(file_id=\"{file_id}\")` if you need "
-            "the file content."
-        )
     return (
-        f"Runtime attachment '{filename}' is authorized for this task. "
-        "Use `runtime_attachment_read` with the provided file_id if you need "
-        "the file content."
+        f"Attachment '{filename}' could not be inlined by the Worker. "
+        "Continue with the other available attachment content."
     )
 
 

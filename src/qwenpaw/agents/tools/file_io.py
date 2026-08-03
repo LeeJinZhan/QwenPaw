@@ -15,10 +15,15 @@ from .utils import (
     DEFAULT_MAX_BYTES,
 )
 from ...config.context import (
+    get_current_file_sandbox_root,
     get_current_workspace_dir,
     get_current_recent_max_bytes,
 )
 from ...constant import WORKING_DIR, TRUNCATION_NOTICE_MARKER
+
+
+class SandboxPathViolation(ValueError):
+    """Raised when a Runtime-managed tool path escapes its task root."""
 
 
 def _resolve_file_path(file_path: str) -> str:
@@ -31,13 +36,40 @@ def _resolve_file_path(file_path: str) -> str:
     Returns:
         The resolved absolute file path as string.
     """
-    path = Path(file_path).expanduser()
-    if path.is_absolute():
-        return str(path)
-    else:
-        # Use current workspace_dir from context, fallback to WORKING_DIR
-        workspace_dir = get_current_workspace_dir() or WORKING_DIR
-        return str(workspace_dir / file_path)
+    sandbox_root = get_current_file_sandbox_root()
+    normalized_input = (
+        str(file_path).replace("\\", "/")
+        if sandbox_root is not None
+        else str(file_path)
+    )
+    path = Path(normalized_input).expanduser()
+    workspace_dir = Path(
+        sandbox_root or get_current_workspace_dir() or WORKING_DIR,
+    )
+    candidate = path if path.is_absolute() else workspace_dir / path
+    if sandbox_root is None:
+        return str(candidate)
+
+    resolved_root = Path(sandbox_root).expanduser().resolve(strict=False)
+    resolved_candidate = candidate.resolve(strict=False)
+    try:
+        resolved_candidate.relative_to(resolved_root)
+    except ValueError as exc:
+        raise SandboxPathViolation(
+            "Path is outside the current Runtime task sandbox.",
+        ) from exc
+    return str(resolved_candidate)
+
+
+def _sandbox_path_error(exc: SandboxPathViolation) -> ToolResponse:
+    return ToolResponse(
+        content=[
+            TextBlock(
+                type="text",
+                text=f"Error: {exc}",
+            ),
+        ],
+    )
 
 
 def _get_encoding_for_file(file_path: str) -> str:
@@ -110,7 +142,10 @@ async def read_file(  # pylint: disable=too-many-return-statements
                 ],
             )
 
-    file_path = _resolve_file_path(file_path)
+    try:
+        file_path = _resolve_file_path(file_path)
+    except SandboxPathViolation as exc:
+        return _sandbox_path_error(exc)
 
     if not os.path.exists(file_path):
         return ToolResponse(
@@ -229,7 +264,10 @@ async def write_file(
             ],
         )
 
-    file_path = _resolve_file_path(file_path)
+    try:
+        file_path = _resolve_file_path(file_path)
+    except SandboxPathViolation as exc:
+        return _sandbox_path_error(exc)
     encoding = _get_encoding_for_file(file_path)
 
     try:
@@ -282,7 +320,10 @@ async def edit_file(
             ],
         )
 
-    resolved_path = _resolve_file_path(file_path)
+    try:
+        resolved_path = _resolve_file_path(file_path)
+    except SandboxPathViolation as exc:
+        return _sandbox_path_error(exc)
 
     if not os.path.exists(resolved_path):
         return ToolResponse(
@@ -371,7 +412,10 @@ async def append_file(
             ],
         )
 
-    file_path = _resolve_file_path(file_path)
+    try:
+        file_path = _resolve_file_path(file_path)
+    except SandboxPathViolation as exc:
+        return _sandbox_path_error(exc)
     encoding = _get_encoding_for_file(file_path)
 
     try:

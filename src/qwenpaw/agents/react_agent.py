@@ -76,6 +76,11 @@ from .tools import (
 )
 from .tools import runtime_sandbox_oss
 from .utils import process_file_and_media_blocks_in_message
+from .attachments import (
+    RuntimeAttachmentProcessingConfig,
+    RuntimeAttachmentProcessingError,
+    RuntimeAttachmentProcessor,
+)
 from ..constant import (
     MEDIA_UNSUPPORTED_PLACEHOLDER,
     WORKING_DIR,
@@ -217,28 +222,17 @@ def _build_runtime_attachments_context(
         "URLs, headers, tokens, object keys, storage locations, credentials, or "
         "local paths.",
     ]
-    safe_items: list[str] = []
-    for item in manifest:
-        file_id = str(item.get("file_id", "")).strip()
-        if not file_id:
-            continue
-        original_name = str(item.get("original_name", "")).strip()
-        content_type = str(item.get("content_type", "")).strip()
-        size_bytes = str(item.get("size_bytes", "")).strip()
-        expires_at = str(item.get("expires_at", "")).strip()
-        summary = f"  - file_id={file_id}"
-        if original_name:
-            summary += f", name={original_name}"
-        if content_type:
-            summary += f", content_type={content_type}"
-        if size_bytes:
-            summary += f", size_bytes={size_bytes}"
-        if expires_at:
-            summary += f", expires_at={expires_at}"
-        safe_items.append(summary)
-    if safe_items:
-        lines.append("- Authorized Runtime attachments:")
-        lines.extend(safe_items)
+    current_task_count = sum(
+        1
+        for item in manifest
+        if str(item.get("source", "")).strip() == "current_task"
+    )
+    if current_task_count:
+        lines.append(
+            f"- {current_task_count} current-task attachment(s) were already "
+            "materialized and added as untrusted content parts by the Worker; "
+            "do not call an attachment read tool for them.",
+        )
     return lines
 
 
@@ -272,6 +266,7 @@ def _runtime_current_task_attachment_ids(request_context: dict[str, Any]) -> lis
 async def _append_runtime_attachment_content_parts(
     msg: Msg | list[Msg] | None,
     request_context: dict[str, Any],
+    processing_config: RuntimeAttachmentProcessingConfig | None = None,
 ) -> Msg | list[Msg] | None:
     if msg is None:
         return msg
@@ -310,15 +305,37 @@ async def _append_runtime_attachment_content_parts(
             file_ids[0],
             "ATTACHMENT_READ_FAILED",
         ) from exc
+    try:
+        processing_result = await runtime_sandbox_oss.run_task_io_in_thread(
+            cache,
+            task_id,
+            RuntimeAttachmentProcessor(processing_config).process,
+            prepared_files,
+            file_id=file_ids[0],
+        )
+    except RuntimeAttachmentProcessingError as exc:
+        raise runtime_sandbox_oss.RuntimeAttachmentPreparationError(
+            exc.file_id or file_ids[0],
+            exc.reason_code,
+        ) from exc
+    except runtime_sandbox_oss.RuntimeAttachmentPreparationError:
+        raise
+    except Exception as exc:
+        raise runtime_sandbox_oss.RuntimeAttachmentPreparationError(
+            file_ids[0],
+            "ATTACHMENT_PROCESSING_FAILED",
+        ) from exc
     if isinstance(target.content, list):
         content_parts = target.content
     else:
         content_parts = [{"type": "text", "text": target.get_text_content()}]
         target.content = content_parts
-    for prepared in prepared_files:
-        content_parts.append(
-            runtime_sandbox_oss.content_part_for_prepared_file(prepared),
-        )
+    content_parts.extend(processing_result.content_parts)
+    request_context["runtime_attachment_processing"] = {
+        "safe_attachment_refs": processing_result.safe_attachment_refs,
+        "warnings": processing_result.warnings,
+        "metrics": processing_result.metrics,
+    }
     return msg
 
 
@@ -2033,18 +2050,43 @@ class QwenPawAgent(CodingModeMixin, ToolGuardMixin, ReActAgent):
     ) -> Msg:
         """Run one reply with an isolated supplemental-file discovery set."""
         from ..config.context import (
+            reset_current_file_sandbox_root,
             reset_current_runtime_discovered_file_ids,
+            reset_current_workspace_dir,
+            set_current_file_sandbox_root,
             set_current_runtime_discovered_file_ids,
+            set_current_workspace_dir,
         )
+        from .tools import runtime_sandbox_oss
 
         discovered_token = set_current_runtime_discovered_file_ids(
             frozenset(),
         )
         try:
-            return await self._reply_with_request_context(
-                msg=msg,
-                structured_model=structured_model,
+            request_context = getattr(self, "_request_context", {})
+            if not isinstance(request_context, dict):
+                request_context = {}
+            sandbox_context = request_context.get("sandbox_context")
+            request_workspace = getattr(self, "_workspace_dir", None)
+            file_sandbox_root = None
+            if isinstance(sandbox_context, dict):
+                request_workspace = (
+                    runtime_sandbox_oss._DEFAULT_TASK_ATTACHMENT_CACHE
+                    .prepare_task_workspace(sandbox_context)
+                )
+                file_sandbox_root = request_workspace
+            workspace_token = set_current_workspace_dir(request_workspace)
+            file_sandbox_token = set_current_file_sandbox_root(
+                file_sandbox_root,
             )
+            try:
+                return await self._reply_with_request_context(
+                    msg=msg,
+                    structured_model=structured_model,
+                )
+            finally:
+                reset_current_file_sandbox_root(file_sandbox_token)
+                reset_current_workspace_dir(workspace_token)
         finally:
             reset_current_runtime_discovered_file_ids(discovered_token)
 
@@ -2064,7 +2106,6 @@ class QwenPawAgent(CodingModeMixin, ToolGuardMixin, ReActAgent):
         """
         # Set workspace_dir and recent_max_bytes in context for tool functions
         from ..config.context import (
-            set_current_workspace_dir,
             set_current_recent_max_bytes,
             set_current_session_id,
             set_current_runtime_attachments_manifest,
@@ -2075,7 +2116,6 @@ class QwenPawAgent(CodingModeMixin, ToolGuardMixin, ReActAgent):
             set_current_toolkit,
         )
 
-        set_current_workspace_dir(self._workspace_dir)
         set_current_toolkit(getattr(self, "toolkit", None))
         set_current_session_id(
             self._request_context.get("session_id") or None,
@@ -2114,6 +2154,18 @@ class QwenPawAgent(CodingModeMixin, ToolGuardMixin, ReActAgent):
             msg = await _append_runtime_attachment_content_parts(
                 msg,
                 self._request_context,
+                RuntimeAttachmentProcessingConfig(
+                    inline_file_max_chars=getattr(
+                        self._agent_config.running,
+                        "runtime_attachment_inline_file_max_chars",
+                        128_000,
+                    ),
+                    inline_task_max_chars=getattr(
+                        self._agent_config.running,
+                        "runtime_attachment_inline_task_max_chars",
+                        384_000,
+                    ),
+                ),
             )
             await process_file_and_media_blocks_in_message(msg)
 

@@ -30,13 +30,41 @@ def get_current_workspace_dir() -> Path | None:
     return current_workspace_dir.get()
 
 
-def set_current_workspace_dir(workspace_dir: Path | None) -> None:
+def set_current_workspace_dir(workspace_dir: Path | None) -> Token:
     """Set the current agent's workspace directory in context.
 
     Args:
         workspace_dir: Path to the agent's workspace directory.
     """
-    current_workspace_dir.set(workspace_dir)
+    return current_workspace_dir.set(workspace_dir)
+
+
+def reset_current_workspace_dir(token: Token) -> None:
+    """Restore the workspace directory from before the current request."""
+    current_workspace_dir.reset(token)
+
+
+current_file_sandbox_root: ContextVar[Path | None] = ContextVar(
+    "current_file_sandbox_root",
+    default=None,
+)
+
+
+def get_current_file_sandbox_root() -> Path | None:
+    """Return the request-local root enforced by generic file tools."""
+    return current_file_sandbox_root.get()
+
+
+def set_current_file_sandbox_root(
+    sandbox_root: Path | None,
+) -> Token:
+    """Set the request-local file sandbox root and return a reset token."""
+    return current_file_sandbox_root.set(sandbox_root)
+
+
+def reset_current_file_sandbox_root(token: Token) -> None:
+    """Restore the file sandbox root from before the current request."""
+    current_file_sandbox_root.reset(token)
 
 
 # Context variable to store the recent_max_bytes limit

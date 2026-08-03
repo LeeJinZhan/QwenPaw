@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from types import SimpleNamespace
 
 import pytest
@@ -24,6 +25,16 @@ from qwenpaw.app.channels.console.runtime_event_projection import (
 )
 from qwenpaw.app.routers.console import _stream_runtime_console_events
 from qwenpaw.app.runner.utils import agentscope_msg_to_message
+
+
+@pytest.fixture
+def console_log_capture(caplog):
+    channel_logger = logging.getLogger("qwenpaw.app.channels.console.channel")
+    channel_logger.addHandler(caplog.handler)
+    try:
+        yield caplog
+    finally:
+        channel_logger.removeHandler(caplog.handler)
 
 
 def _runtime_projector(**kwargs):
@@ -117,8 +128,19 @@ async def test_console_stream_adds_runtime_completed_event() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "reason_code",
+    [
+        "FILE_ACCESS_EXPIRED",
+        "ATTACHMENT_READ_FAILED",
+        "ATTACHMENT_TYPE_MISMATCH",
+        "ATTACHMENT_PDF_PARSE_FAILED",
+        "MODEL_MEDIA_UNSUPPORTED",
+    ],
+)
 async def test_runtime_attachment_failure_streams_one_failed_terminal(
     monkeypatch,
+    reason_code,
 ) -> None:
     media_processing_called = False
     channel = ConsoleChannel(
@@ -138,10 +160,10 @@ async def test_runtime_attachment_failure_streams_one_failed_terminal(
         },
     )
 
-    async def fail_preload(_msg, _request_context):
+    async def fail_preload(_msg, _request_context, _processing_config=None):
         raise RuntimeAttachmentPreparationError(
             "file_denied",
-            "FILE_ACCESS_DENIED",
+            reason_code,
         )
 
     async def observe_media_processing(_msg):
@@ -196,6 +218,9 @@ async def test_runtime_attachment_failure_streams_one_failed_terminal(
     assert payloads[0]["event"] == "answer.failed"
     assert payloads[0]["status"] == "failed"
     assert payloads[0]["message"] == "附件读取失败"
+    assert reason_code not in json.dumps(payloads[0], ensure_ascii=False)
+    assert "runtime_attachment_read" not in json.dumps(payloads[0], ensure_ascii=False)
+    assert "sandbox_context" not in json.dumps(payloads[0], ensure_ascii=False)
     assert all(
         payload.get("event") != "answer.completed"
         for payload in payloads
@@ -307,6 +332,9 @@ async def test_attachment_filesystem_error_streams_failed_not_completed(
 
         def reserve_task_io(self, *_args, **_kwargs):
             return self.Reservation()
+
+        def prepare_task_workspace(self, *_args, **_kwargs):
+            return None
 
         def prepare_files(self, *_args, **_kwargs):
             raise OSError("temporary attachment directory is unavailable")
@@ -1733,7 +1761,7 @@ async def test_runtime_terminal_precedes_slow_upstream_close() -> None:
 
 
 @pytest.mark.asyncio
-async def test_runtime_close_error_cannot_swallow_terminal(caplog) -> None:
+async def test_runtime_close_error_cannot_swallow_terminal(console_log_capture) -> None:
     class CloseErrorEvents:
         def __init__(self) -> None:
             self.emitted = False
@@ -1779,7 +1807,7 @@ async def test_runtime_close_error_cannot_swallow_terminal(caplog) -> None:
     await stream.aclose()
 
     assert terminal_payload["event"] == "answer.completed"
-    assert "runtime native event iterator aclose failed" in caplog.text
+    assert "runtime native event iterator aclose failed" in console_log_capture.text
 
 
 @pytest.mark.asyncio
@@ -1837,7 +1865,7 @@ async def test_runtime_disconnect_after_status_closes_upstream() -> None:
 
 
 @pytest.mark.asyncio
-async def test_runtime_pending_cleanup_error_is_logged(caplog) -> None:
+async def test_runtime_pending_cleanup_error_is_logged(console_log_capture) -> None:
     upstream_blocked = asyncio.Event()
     release_upstream = asyncio.Event()
     channel = ConsoleChannel(
@@ -1891,12 +1919,12 @@ async def test_runtime_pending_cleanup_error_is_logged(caplog) -> None:
         status_event.removeprefix("data:").strip(),
     )
     assert status_payload["event"] == "status.changed"
-    assert "runtime pending native event cleanup failed" in caplog.text
+    assert "runtime pending native event cleanup failed" in console_log_capture.text
     assert leaked_tasks == []
 
 
 @pytest.mark.asyncio
-async def test_runtime_close_error_does_not_replace_main_error(caplog) -> None:
+async def test_runtime_close_error_does_not_replace_main_error(console_log_capture) -> None:
     class MainAndCloseErrorEvents:
         def __aiter__(self):
             return self
@@ -1935,8 +1963,8 @@ async def test_runtime_close_error_does_not_replace_main_error(caplog) -> None:
             "message": "回答生成失败",
         },
     ]
-    assert "PRIMARY-UPSTREAM-SECRET" in caplog.text
-    assert "SECONDARY-ACLOSE-SECRET" in caplog.text
+    assert "PRIMARY-UPSTREAM-SECRET" in console_log_capture.text
+    assert "SECONDARY-ACLOSE-SECRET" in console_log_capture.text
 
 
 @pytest.mark.asyncio

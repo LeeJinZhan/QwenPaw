@@ -25,10 +25,11 @@ async def runtime_attachment_read(
     file_id: str,
     max_bytes: int = DEFAULT_MAX_BYTES,
 ) -> ToolResponse:
-    """Read a current-task or request-discovered file by ``file_id``.
+    """Read a request-discovered supplemental file by ``file_id``.
 
-    The caller can only select a current-task manifest ``file_id`` or a
-    ``file_id`` returned by ``runtime_sandbox_files_search`` in this request.
+    Current-task files are materialized and processed before the first model
+    call, so this tool accepts only a ``file_id`` returned by
+    ``runtime_sandbox_files_search`` in this request.
     Runtime re-authorizes the read with the request sandbox context, and
     locators, object keys, URLs, headers and credentials are never accepted as
     tool arguments or returned in tool output.
@@ -36,12 +37,12 @@ async def runtime_attachment_read(
     normalized_file_id = str(file_id or "").strip()
     if not normalized_file_id:
         return _text_response("Runtime attachment file_id is required.")
-    entry = _manifest_entry(normalized_file_id)
     discovered = normalized_file_id in get_current_runtime_discovered_file_ids()
-    if entry is None and not discovered:
+    if not discovered:
         return _text_response(
             f"Runtime attachment '{normalized_file_id}' is not available.",
         )
+    entry = _manifest_entry(normalized_file_id)
     if entry is not None and str(entry.get("access_mode", "")).strip() != (
         "sandbox_oss"
     ):

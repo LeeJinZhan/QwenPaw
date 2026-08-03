@@ -963,6 +963,18 @@ class AgentsRunningConfig(BaseModel):
         ),
     )
 
+    runtime_attachment_inline_file_max_chars: int = Field(
+        default=128_000,
+        gt=0,
+        description="Maximum Worker-extracted attachment characters inlined per file.",
+    )
+
+    runtime_attachment_inline_task_max_chars: int = Field(
+        default=384_000,
+        gt=0,
+        description="Maximum Worker-extracted attachment characters inlined per task.",
+    )
+
     @model_validator(mode="after")
     def validate_llm_retry_backoff(self) -> "AgentsRunningConfig":
         """Validate LLM retry backoff relationships."""
@@ -972,6 +984,17 @@ class AgentsRunningConfig(BaseModel):
                 message=(
                     "llm_backoff_cap must be greater than or equal to "
                     "llm_backoff_base"
+                ),
+            )
+        if (
+            self.runtime_attachment_inline_task_max_chars
+            < self.runtime_attachment_inline_file_max_chars
+        ):
+            raise ConfigurationException(
+                config_key="runtime_attachment_inline",
+                message=(
+                    "runtime_attachment_inline_task_max_chars must be greater "
+                    "than or equal to runtime_attachment_inline_file_max_chars"
                 ),
             )
         return self

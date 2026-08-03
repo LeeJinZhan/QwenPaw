@@ -229,6 +229,28 @@ class TaskAttachmentCache:
                 lambda: reader.authorize_file(safe_file_id, sandbox_context),
             )
 
+    def prepare_task_workspace(
+        self,
+        sandbox_context: dict[str, Any],
+    ) -> Path:
+        """Create and return the private root for one Runtime task request."""
+        if not isinstance(sandbox_context, dict):
+            raise RuntimeError("Sandbox context is invalid.")
+        task_id = _safe_cache_id(sandbox_context.get("task_id"), "task_id")
+        context_id = _safe_cache_id(
+            sandbox_context.get("context_id")
+            or sandbox_context.get("sandbox_context_id"),
+            "sandbox_context_id",
+        )
+        with self.reserve_task_io(task_id):
+            self.sweep_expired(exclude_task_ids={task_id})
+            self._ensure_task_marker(task_id, context_id)
+            task_root = self._task_root(task_id).resolve(strict=False)
+            for directory in (task_root / "scratch", task_root / "output"):
+                self._ensure_private_dir(directory)
+            self._assert_cache_path(task_root)
+            return task_root
+
     def prepare_files(
         self,
         file_ids: list[str],

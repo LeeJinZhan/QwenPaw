@@ -23,6 +23,23 @@ runtime_sandbox_oss_module = importlib.import_module(
 )
 
 
+def test_task_attachment_cache_prepares_private_request_workspace(tmp_path) -> None:
+    cache = runtime_sandbox_oss_module.TaskAttachmentCache(
+        root=tmp_path / "cache",
+        ttl_seconds=60,
+    )
+
+    workspace = cache.prepare_task_workspace(
+        {"task_id": "task_user_b", "context_id": "ctx_user_b"},
+    )
+
+    assert workspace == cache._task_root("task_user_b").resolve()
+    assert workspace.is_dir()
+    assert (workspace / "scratch").is_dir()
+    assert (workspace / "output").is_dir()
+    assert stat.S_IMODE(workspace.stat().st_mode) == 0o700
+
+
 def test_qwenpaw_runtime_dependencies_include_oss_reader() -> None:
     try:
         import tomllib
@@ -2031,7 +2048,8 @@ def test_runtime_attachment_prompt_does_not_show_local_paths() -> None:
     prompt = "\n".join(react_agent._build_runtime_attachments_context(context))
 
     assert "runtime_attachment_read" in prompt
-    assert "file_001" in prompt
+    assert "file_001" not in prompt
+    assert "expires_at" not in prompt
     assert "file://" not in prompt
     assert "object_key" not in prompt
     assert "bucket" not in prompt
@@ -2044,12 +2062,12 @@ async def test_append_runtime_attachment_content_parts_adds_current_task_files(
 ) -> None:
     react_agent = importlib.import_module("qwenpaw.agents.react_agent")
     local_path = tmp_path / "photo.png"
-    local_path.write_bytes(b"png")
+    local_path.write_bytes(b"\x89PNG\r\n\x1a\n")
     prepared = runtime_sandbox_oss_module.PreparedSandboxFile(
         file_id="file_001",
         local_path=local_path,
         content_type="image/png",
-        size_bytes=3,
+        size_bytes=8,
         original_name="photo.png",
         expires_at="2999-01-01T00:00:00+08:00",
     )
@@ -2102,6 +2120,59 @@ async def test_append_runtime_attachment_content_parts_adds_current_task_files(
     assert message.content[0] == {"type": "text", "text": "识别一下图片"}
     assert message.content[1]["type"] == "image"
     assert message.content[1]["source"]["url"] == local_path.resolve().as_uri()
+
+
+@pytest.mark.asyncio
+async def test_current_task_text_is_inlined_without_attachment_read_prompt(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    react_agent = importlib.import_module("qwenpaw.agents.react_agent")
+    local_path = tmp_path / "policy.md"
+    local_path.write_text("# Policy\n人工复核", encoding="utf-8")
+    prepared = runtime_sandbox_oss_module.PreparedSandboxFile(
+        file_id="file_policy",
+        local_path=local_path,
+        content_type="text/markdown",
+        size_bytes=local_path.stat().st_size,
+        original_name="policy.md",
+        expires_at="",
+    )
+
+    class FakeTaskAttachmentCache(runtime_sandbox_oss_module.TaskAttachmentCache):
+        def __init__(self):
+            super().__init__(root=tmp_path / "cache")
+
+        def prepare_files(self, *_args, **_kwargs):
+            return [prepared]
+
+    monkeypatch.setattr(
+        react_agent.runtime_sandbox_oss,
+        "_DEFAULT_TASK_ATTACHMENT_CACHE",
+        FakeTaskAttachmentCache(),
+    )
+    message = Msg("user", "总结文件", "user")
+    request_context = {
+        "sandbox_context": {"task_id": "task_text", "context_id": "ctx_text"},
+        "attachments_manifest": [
+            {"file_id": "file_policy", "source": "current_task"},
+        ],
+    }
+
+    await react_agent._append_runtime_attachment_content_parts(message, request_context)
+
+    rendered = json.dumps(message.content, ensure_ascii=False)
+    assert "人工复核" in rendered
+    assert "runtime_attachment_read" not in rendered
+    assert "file://" not in rendered
+    assert request_context["runtime_attachment_processing"]["safe_attachment_refs"] == [
+        {
+            "file_id": "file_policy",
+            "display_name": "policy.md",
+            "content_type": "text/markdown",
+            "handler": "text",
+        },
+    ]
 
 
 @pytest.mark.asyncio
@@ -2250,12 +2321,12 @@ async def test_runtime_attachment_preload_does_not_block_event_loop(
 ) -> None:
     react_agent = importlib.import_module("qwenpaw.agents.react_agent")
     local_path = tmp_path / "photo.png"
-    local_path.write_bytes(b"png")
+    local_path.write_bytes(b"\x89PNG\r\n\x1a\n")
     prepared = runtime_sandbox_oss_module.PreparedSandboxFile(
         file_id="file_001",
         local_path=local_path,
         content_type="image/png",
-        size_bytes=3,
+        size_bytes=8,
         original_name="photo.png",
         expires_at="2999-01-01T00:00:00+08:00",
     )
@@ -2358,7 +2429,7 @@ async def test_runtime_attachment_preload_reserves_before_thread_submission(
     )
 
     assert isinstance(updated, Msg)
-    assert observed == [1]
+    assert observed == [1, 1]
     assert cache._io_reservations == {}
 
 
@@ -2448,8 +2519,8 @@ def test_runtime_attachment_file_fixup_uses_file_id_without_local_path(tmp_path)
 
     assert items[0]["type"] == "text"
     assert "cline-rules.md" in items[0]["text"]
-    assert "file_001" in items[0]["text"]
-    assert "runtime_attachment_read" in items[0]["text"]
+    assert "file_001" not in items[0]["text"]
+    assert "runtime_attachment_read" not in items[0]["text"]
     assert str(local_path) not in items[0]["text"]
     assert "file://" not in items[0]["text"]
 

@@ -16,12 +16,17 @@ from unittest.mock import patch
 import pytest
 
 from qwenpaw.agents.tools.file_io import (
+    SandboxPathViolation,
     _get_encoding_for_file,
     _resolve_file_path,
     append_file,
     edit_file,
     read_file,
     write_file,
+)
+from qwenpaw.config.context import (
+    reset_current_file_sandbox_root,
+    set_current_file_sandbox_root,
 )
 
 
@@ -67,6 +72,62 @@ class TestResolveFilePath:
         # When workspace is None, WORKING_DIR is used
         result = _resolve_file_path("file.txt")
         assert result.endswith("file.txt")
+
+    @pytest.mark.parametrize(
+        "requested",
+        ["../user-a/session.json", "..\\user-a\\session.json"],
+    )
+    def test_runtime_sandbox_rejects_relative_path_escape(
+        self,
+        tmp_path,
+        requested,
+    ):
+        sandbox_root = tmp_path / "user-b"
+        sandbox_root.mkdir()
+        token = set_current_file_sandbox_root(sandbox_root)
+        try:
+            with pytest.raises(SandboxPathViolation):
+                _resolve_file_path(requested)
+        finally:
+            reset_current_file_sandbox_root(token)
+
+    def test_runtime_sandbox_rejects_absolute_path_escape(self, tmp_path):
+        sandbox_root = tmp_path / "user-b"
+        sandbox_root.mkdir()
+        victim = tmp_path / "user-a" / "session.json"
+        victim.parent.mkdir()
+        victim.write_text("victim", encoding="utf-8")
+        token = set_current_file_sandbox_root(sandbox_root)
+        try:
+            with pytest.raises(SandboxPathViolation):
+                _resolve_file_path(str(victim))
+        finally:
+            reset_current_file_sandbox_root(token)
+
+    def test_runtime_sandbox_rejects_symlink_escape(self, tmp_path):
+        sandbox_root = tmp_path / "user-b"
+        sandbox_root.mkdir()
+        victim = tmp_path / "user-a"
+        victim.mkdir()
+        (victim / "session.json").write_text("victim", encoding="utf-8")
+        (sandbox_root / "linked-user-a").symlink_to(victim, target_is_directory=True)
+        token = set_current_file_sandbox_root(sandbox_root)
+        try:
+            with pytest.raises(SandboxPathViolation):
+                _resolve_file_path("linked-user-a/session.json")
+        finally:
+            reset_current_file_sandbox_root(token)
+
+    def test_runtime_sandbox_allows_path_inside_root(self, tmp_path):
+        sandbox_root = tmp_path / "user-b"
+        sandbox_root.mkdir()
+        token = set_current_file_sandbox_root(sandbox_root)
+        try:
+            assert _resolve_file_path("notes.txt") == str(
+                (sandbox_root / "notes.txt").resolve(),
+            )
+        finally:
+            reset_current_file_sandbox_root(token)
 
 
 # ---------------------------------------------------------------------------

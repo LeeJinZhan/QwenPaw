@@ -15,6 +15,12 @@ from qwenpaw.agents.tools.file_search import (
     _MAX_MATCHES,
     _MAX_OUTPUT_CHARS,
     _walk_and_grep,
+    glob_search,
+    grep_search,
+)
+from qwenpaw.config.context import (
+    reset_current_file_sandbox_root,
+    set_current_file_sandbox_root,
 )
 
 
@@ -47,6 +53,43 @@ class FakeCancelAfter(FakeCancel):
     def is_set(self) -> bool:
         self._checks += 1
         return self._checks > self.after
+
+
+@pytest.mark.asyncio
+async def test_runtime_sandbox_glob_cannot_enumerate_sibling_user(tmp_path):
+    sandbox_root = tmp_path / "user-b"
+    victim_root = tmp_path / "user-a"
+    sandbox_root.mkdir()
+    victim_root.mkdir()
+    (victim_root / "session.json").write_text("victim", encoding="utf-8")
+    token = set_current_file_sandbox_root(sandbox_root)
+    try:
+        result = await glob_search("**/*.json", path="../user-a")
+    finally:
+        reset_current_file_sandbox_root(token)
+
+    text = result.content[0]["text"]
+    assert "outside the current Runtime task sandbox" in text
+    assert "session.json" not in text
+
+
+@pytest.mark.asyncio
+async def test_runtime_sandbox_grep_cannot_read_sibling_user(tmp_path):
+    sandbox_root = tmp_path / "user-b"
+    victim_root = tmp_path / "user-a"
+    sandbox_root.mkdir()
+    victim_root.mkdir()
+    marker = "CROSS_USER_MARKER"
+    (victim_root / "session.json").write_text(marker, encoding="utf-8")
+    token = set_current_file_sandbox_root(sandbox_root)
+    try:
+        result = await grep_search(marker, path="../user-a")
+    finally:
+        reset_current_file_sandbox_root(token)
+
+    text = result.content[0]["text"]
+    assert "outside the current Runtime task sandbox" in text
+    assert marker not in text
 
 
 # ---------------------------------------------------------------------------

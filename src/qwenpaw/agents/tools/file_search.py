@@ -15,9 +15,7 @@ from typing import Optional
 from agentscope.message import TextBlock
 from agentscope.tool import ToolResponse
 
-from ...constant import WORKING_DIR
-from ...config.context import get_current_workspace_dir
-from .file_io import _resolve_file_path
+from .file_io import SandboxPathViolation, _resolve_file_path
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -139,11 +137,14 @@ def _resolve_search_root(
 
     Returns a ``Path`` on success or a ``ToolResponse`` error.
     """
-    search_root = (
-        Path(_resolve_file_path(path))
-        if path
-        else (get_current_workspace_dir() or WORKING_DIR)
-    )
+    try:
+        search_root = (
+            Path(_resolve_file_path(path))
+            if path
+            else Path(_resolve_file_path("."))
+        )
+    except SandboxPathViolation as exc:
+        return _make_response(f"Error: {exc}")
     try:
         exists = search_root.exists()
     except OSError as e:

@@ -39,6 +39,10 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+_RUNTIME_SANDBOX_BROKER_TOOLS = frozenset(
+    {"runtime_attachment_read", "runtime_sandbox_files_search"},
+)
+
 
 def _normalize_tool_guard_ui_lang(raw: Any) -> str:
     """Map language code to tool-guard UI bundle (en/zh/ru/ja)."""
@@ -259,6 +263,16 @@ class ToolGuardMixin:
         pre-approved and non-guarded) runs **outside** the lock for
         true parallelism.
         """
+        tool_name = str(tool_call.get("name", ""))
+        if tool_name in _RUNTIME_SANDBOX_BROKER_TOOLS:
+            # These built-ins are not assistant-bindable tools. They call the
+            # dedicated Runtime sandbox APIs, which revalidate the signed
+            # request context and file scope on every search/read and audit the
+            # file access. Sending them through the generic Tool Gateway would
+            # incorrectly require a worker-tool mapping before that stronger,
+            # file-specific authorization can run.
+            return await self._call_parent_tool(tool_call)
+
         try:
             gateway_client = self._runtime_tool_gateway_client()
         except RuntimeToolGatewayError:
@@ -267,7 +281,6 @@ class ToolGuardMixin:
 
         gateway_preflight: dict[str, Any] | None = None
         if gateway_client is not None:
-            tool_name = str(tool_call.get("name", ""))
             tool_input = tool_call.get("input", {})
             if not tool_name or not isinstance(tool_input, dict):
                 await self._emit_runtime_gateway_failure(tool_call, "Tool Gateway rejected an invalid tool call.")
