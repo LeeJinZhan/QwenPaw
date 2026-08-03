@@ -47,10 +47,15 @@ from .skill_system import (
 )
 from .coding_mode_mixin import CodingModeMixin
 from .tool_guard_mixin import ToolGuardMixin
+from .runtime_worker_protocol import (
+    RuntimeWorkerProtocolError,
+    validate_message as validate_runtime_worker_message,
+)
 from .tools import (
     browser_use,
     delegate_external_agent,
     chat_with_agent,
+    conversation_context_expand,
     check_agent_task,
     spawn_subagent,
     submit_to_agent,
@@ -743,6 +748,11 @@ class QwenPawAgent(CodingModeMixin, ToolGuardMixin, ReActAgent):
             ),
             **(
                 {"runtime_sandbox_files_search": runtime_sandbox_files_search}
+                if runtime_gateway_enabled and runtime_attachment_available
+                else {}
+            ),
+            **(
+                {"conversation_context_expand": conversation_context_expand}
                 if runtime_gateway_enabled and runtime_attachment_available
                 else {}
             ),
@@ -2053,12 +2063,15 @@ class QwenPawAgent(CodingModeMixin, ToolGuardMixin, ReActAgent):
             reset_current_file_sandbox_root,
             reset_current_runtime_discovered_file_ids,
             reset_current_workspace_dir,
+            restore_request_local_context,
             set_current_file_sandbox_root,
             set_current_runtime_discovered_file_ids,
             set_current_workspace_dir,
+            snapshot_request_local_context,
         )
         from .tools import runtime_sandbox_oss
 
+        request_context_snapshot = snapshot_request_local_context()
         discovered_token = set_current_runtime_discovered_file_ids(
             frozenset(),
         )
@@ -2067,6 +2080,39 @@ class QwenPawAgent(CodingModeMixin, ToolGuardMixin, ReActAgent):
             if not isinstance(request_context, dict):
                 request_context = {}
             sandbox_context = request_context.get("sandbox_context")
+            worker_protocol = request_context.get("worker_protocol")
+            if isinstance(worker_protocol, dict):
+                gateway_context = request_context.get("runtime_tool_gateway")
+                expected_capability_hash = (
+                    str(gateway_context.get("capability_snapshot_hash") or "")
+                    if isinstance(gateway_context, dict)
+                    else ""
+                )
+                try:
+                    validated_start = validate_runtime_worker_message(
+                        worker_protocol,
+                        expected_type="task.start",
+                        expected_task_scope_id=(
+                            str(sandbox_context.get("task_scope_id") or "")
+                            if isinstance(sandbox_context, dict)
+                            else ""
+                        ),
+                        expected_capability_snapshot_hash=(
+                            expected_capability_hash
+                        ),
+                    )
+                except RuntimeWorkerProtocolError as exc:
+                    raise RuntimeError(
+                        "Runtime task protocol validation failed",
+                    ) from exc
+                if (
+                    isinstance(sandbox_context, dict)
+                    and str(validated_start["payload"].get("task_id") or "")
+                    != str(sandbox_context.get("task_id") or "")
+                ):
+                    raise RuntimeError(
+                        "Runtime task protocol validation failed",
+                    )
             request_workspace = getattr(self, "_workspace_dir", None)
             file_sandbox_root = None
             if isinstance(sandbox_context, dict):
@@ -2089,6 +2135,7 @@ class QwenPawAgent(CodingModeMixin, ToolGuardMixin, ReActAgent):
                 reset_current_workspace_dir(workspace_token)
         finally:
             reset_current_runtime_discovered_file_ids(discovered_token)
+            restore_request_local_context(request_context_snapshot)
 
     async def _reply_with_request_context(
         self,

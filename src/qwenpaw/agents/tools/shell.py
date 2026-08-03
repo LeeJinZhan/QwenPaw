@@ -17,6 +17,8 @@ from typing import Optional
 from agentscope.message import TextBlock
 from agentscope.tool import ToolResponse
 
+from ..sandbox_executor_client import RuntimeSandboxExecutorClient, SandboxExecutorClientError
+
 from ...constant import WORKING_DIR
 from ...config.context import (
     get_current_shell_command_executable,
@@ -459,6 +461,29 @@ async def execute_shell_command(
             standard error of the executed command. If timeout occurs, the
             return code will be -1 and stderr will contain timeout information.
     """
+
+    try:
+        runtime_client = RuntimeSandboxExecutorClient.from_current_context()
+        if runtime_client is not None:
+            result = await runtime_client.execute("shell.exec")
+            exit_code = int(result.get("exit_code", 1))
+            stdout = str(result.get("stdout", ""))
+            stderr = str(result.get("stderr", ""))
+            if exit_code == 0:
+                response_text = stdout or "Command executed successfully (no output)."
+                if stderr:
+                    response_text += f"\n[stderr]\n{stderr}"
+            else:
+                response_text = f"Command failed with exit code {exit_code}."
+                if stdout:
+                    response_text += f"\n[stdout]\n{stdout}"
+                if stderr:
+                    response_text += f"\n[stderr]\n{stderr}"
+            return ToolResponse(content=[TextBlock(type="text", text=response_text)])
+    except SandboxExecutorClientError:
+        return ToolResponse(
+            content=[TextBlock(type="text", text="Error: Runtime task sandbox command failed.")],
+        )
 
     cmd = _collapse_embedded_newlines((command or "").strip())
 

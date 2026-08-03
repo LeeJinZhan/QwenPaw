@@ -19,7 +19,11 @@ from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import urljoin, urlparse, urlunparse
 
-from ...config.context import get_current_runtime_tool_gateway
+if os.environ.get("QWENPAW_SANDBOX_DAEMON_MODE") == "1":
+    def get_current_runtime_tool_gateway() -> None:
+        return None
+else:
+    from ...config.context import get_current_runtime_tool_gateway
 
 
 logger = logging.getLogger(__name__)
@@ -1087,6 +1091,7 @@ class SandboxedOssClient:
         self,
         query: str,
         content_types: list[str],
+        sources: list[str],
         limit: int,
         sandbox_context: dict[str, Any],
     ) -> dict[str, Any]:
@@ -1097,6 +1102,7 @@ class SandboxedOssClient:
                 "sandbox_context": sandbox_context,
                 "query": query,
                 "content_types": content_types,
+                "sources": sources,
                 "limit": limit,
             },
         )
@@ -1106,6 +1112,29 @@ class SandboxedOssClient:
             list,
         ):
             raise RuntimeError("Runtime returned invalid sandbox search results.")
+        return data
+
+    def expand_conversation_context(
+        self,
+        before_turn_id: str,
+        limit: int,
+        sandbox_context: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Fetch earlier messages from the active Runtime conversation."""
+        parsed = self._post_json(
+            "/runtime/internal/conversation/context/expand",
+            {
+                "sandbox_context": sandbox_context,
+                "before_turn_id": before_turn_id,
+                "limit": limit,
+            },
+        )
+        data = parsed.get("data", parsed)
+        if not isinstance(data, dict) or not isinstance(
+            data.get("messages", []),
+            list,
+        ):
+            raise RuntimeError("Runtime returned invalid conversation context.")
         return data
 
     def _post_json(

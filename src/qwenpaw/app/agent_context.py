@@ -3,7 +3,7 @@
 
 Provides utilities to get the correct agent instance for each request.
 """
-from contextvars import ContextVar
+from contextvars import ContextVar, Token
 from pathlib import Path
 from typing import Optional, TYPE_CHECKING
 from fastapi import Request
@@ -163,13 +163,17 @@ def get_active_agent_id() -> str:
         return "default"
 
 
-def set_current_agent_id(agent_id: str) -> None:
+def set_current_agent_id(agent_id: str) -> Token:
     """Set current agent ID in context.
 
     Args:
         agent_id: Agent ID to set
     """
-    _current_agent_id.set(agent_id)
+    return _current_agent_id.set(agent_id)
+
+
+def reset_current_agent_id(token: Token) -> None:
+    _current_agent_id.reset(token)
 
 
 def get_current_agent_id() -> str:
@@ -184,21 +188,29 @@ def get_current_agent_id() -> str:
     return get_active_agent_id()
 
 
-def set_current_session_id(session_id: str) -> None:
-    _current_session_id.set(session_id)
+def set_current_session_id(session_id: str) -> Token:
+    return _current_session_id.set(session_id)
+
+
+def reset_current_session_id(token: Token) -> None:
+    _current_session_id.reset(token)
 
 
 def get_current_session_id() -> Optional[str]:
     return _current_session_id.get()
 
 
-def set_current_root_session_id(root_session_id: Optional[str]) -> None:
+def set_current_root_session_id(root_session_id: Optional[str]) -> Token:
     """Set current root session ID in context.
 
     Args:
         root_session_id: Root session ID to set
     """
-    _current_root_session_id.set(root_session_id)
+    return _current_root_session_id.set(root_session_id)
+
+
+def reset_current_root_session_id(token: Token) -> None:
+    _current_root_session_id.reset(token)
 
 
 def get_current_root_session_id() -> Optional[str]:
@@ -210,9 +222,13 @@ def get_current_root_session_id() -> Optional[str]:
     return _current_root_session_id.get()
 
 
-def set_current_user_id(user_id: Optional[str]) -> None:
+def set_current_user_id(user_id: Optional[str]) -> Token:
     """Set current user ID in context."""
-    _current_user_id.set(user_id)
+    return _current_user_id.set(user_id)
+
+
+def reset_current_user_id(token: Token) -> None:
+    _current_user_id.reset(token)
 
 
 def get_current_user_id() -> Optional[str]:
@@ -220,9 +236,13 @@ def get_current_user_id() -> Optional[str]:
     return _current_user_id.get()
 
 
-def set_current_channel(channel: Optional[str]) -> None:
+def set_current_channel(channel: Optional[str]) -> Token:
     """Set current channel in context."""
-    _current_channel.set(channel)
+    return _current_channel.set(channel)
+
+
+def reset_current_channel(token: Token) -> None:
+    _current_channel.reset(token)
 
 
 def get_current_channel() -> Optional[str]:

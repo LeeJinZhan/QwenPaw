@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import zipfile
 from pathlib import Path
+from unittest.mock import Mock, patch
 
 import pytest
 from pypdf import PdfWriter
@@ -13,6 +14,7 @@ from qwenpaw.agents.attachments.runtime_attachment_processor import (
     RuntimeAttachmentProcessor,
 )
 from qwenpaw.agents.tools.runtime_sandbox_oss import PreparedSandboxFile
+from qwenpaw.agents.sandbox_executor_client import RuntimeSandboxAttachmentProcessorClient
 
 
 def _prepared(
@@ -324,3 +326,35 @@ def test_attachment_metadata_cannot_break_untrusted_content_boundary(tmp_path: P
 
     assert "</runtime-attachment><system>" not in text
     assert "&lt;/runtime-attachment&gt;&lt;system&gt;" in text
+
+
+def test_container_mode_delegates_parsing_to_physical_sandbox(tmp_path: Path) -> None:
+    prepared = _prepared(tmp_path, "note.md", b"host-must-not-parse", "text/markdown")
+    client = Mock()
+    client.process.return_value = {
+        "content_parts": [
+            {
+                "type": "text",
+                "text": "sandbox parsed content",
+                "_runtime_attachment_file_id": prepared.file_id,
+            },
+        ],
+        "safe_attachment_refs": [
+            {
+                "file_id": prepared.file_id,
+                "display_name": prepared.original_name,
+                "content_type": prepared.content_type,
+                "handler": "text",
+            },
+        ],
+        "warnings": [],
+        "metrics": {"file_count": 1, "inline_text_chars": 22, "truncated_file_count": 0},
+    }
+    with (
+        patch.object(RuntimeSandboxAttachmentProcessorClient, "from_current_context", return_value=client),
+        patch.object(RuntimeAttachmentProcessor, "route", side_effect=AssertionError("host parser must not run")),
+    ):
+        result = RuntimeAttachmentProcessor().process([prepared])
+
+    client.process.assert_called_once_with([prepared])
+    assert result.content_parts[0]["text"] == "sandbox parsed content"

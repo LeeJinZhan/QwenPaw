@@ -7,6 +7,7 @@ does not know about OSS credentials, object keys, URLs, or Runtime headers.
 from __future__ import annotations
 
 import html
+import os
 import re
 import zipfile
 from dataclasses import dataclass, field
@@ -18,6 +19,11 @@ from ..tools.runtime_sandbox_oss import (
     PreparedSandboxFile,
     content_part_for_prepared_file,
 )
+if os.environ.get("QWENPAW_SANDBOX_DAEMON_MODE") != "1":
+    from ..sandbox_executor_client import (
+        RuntimeSandboxAttachmentProcessorClient,
+        SandboxExecutorClientError,
+    )
 
 
 _TEXT_EXTENSIONS = {
@@ -156,6 +162,20 @@ class RuntimeAttachmentProcessor:
         self,
         prepared_files: list[PreparedSandboxFile],
     ) -> RuntimeAttachmentProcessingResult:
+        if os.environ.get("QWENPAW_SANDBOX_DAEMON_MODE") != "1":
+            try:
+                sandbox_client = RuntimeSandboxAttachmentProcessorClient.from_current_context()
+                if sandbox_client is not None:
+                    return _remote_processing_result(
+                        sandbox_client.process(prepared_files),
+                        prepared_files,
+                    )
+            except SandboxExecutorClientError as exc:
+                file_id = prepared_files[0].file_id if prepared_files else ""
+                raise RuntimeAttachmentProcessingError(
+                    file_id,
+                    "ATTACHMENT_SANDBOX_PROCESSING_FAILED",
+                ) from exc
         result = RuntimeAttachmentProcessingResult()
         remaining = self.config.inline_task_max_chars
         for prepared in prepared_files:
@@ -208,7 +228,6 @@ class RuntimeAttachmentProcessor:
             result.metrics["inline_text_chars"] += len(inlined)
             remaining = max(remaining - len(inlined), 0)
         return result
-
     def _extract(self, handler: str, prepared: PreparedSandboxFile) -> str:
         try:
             if handler == "text":
@@ -247,6 +266,34 @@ class RuntimeAttachmentProcessor:
                 prepared.file_id,
                 "ATTACHMENT_LOCAL_FILE_MISSING",
             )
+
+
+def _remote_processing_result(
+    payload: dict[str, Any],
+    prepared_files: list[PreparedSandboxFile],
+) -> RuntimeAttachmentProcessingResult:
+    content_parts = payload.get("content_parts", [])
+    safe_refs = payload.get("safe_attachment_refs", [])
+    warnings = payload.get("warnings", [])
+    metrics = payload.get("metrics", {})
+    if not all(isinstance(value, list) for value in (content_parts, safe_refs, warnings)) or not isinstance(metrics, dict):
+        raise SandboxExecutorClientError("Runtime sandbox attachment result is invalid")
+    prepared_by_id = {prepared.file_id: prepared for prepared in prepared_files}
+    safe_parts: list[dict[str, Any]] = []
+    for part in content_parts:
+        if not isinstance(part, dict):
+            continue
+        file_id = str(part.get("_runtime_attachment_file_id", ""))
+        if part.get("type") in {"image", "audio", "video"} and file_id in prepared_by_id:
+            safe_parts.append(content_part_for_prepared_file(prepared_by_id[file_id]))
+        else:
+            safe_parts.append(dict(part))
+    return RuntimeAttachmentProcessingResult(
+        content_parts=safe_parts,
+        safe_attachment_refs=[dict(item) for item in safe_refs if isinstance(item, dict)],
+        warnings=[dict(item) for item in warnings if isinstance(item, dict)],
+        metrics={str(key): int(value) for key, value in metrics.items()},
+    )
 
 
 def _declared_handler(content_type: str, suffix: str) -> str:

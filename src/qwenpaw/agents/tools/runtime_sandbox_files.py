@@ -37,6 +37,7 @@ _CONTENT_TYPE_PATTERN = re.compile(
 async def runtime_sandbox_files_search(
     query: str,
     content_types: list[str] | None = None,
+    sources: list[str] | None = None,
     limit: int = 20,
 ) -> ToolResponse:
     """Search supplemental files visible to the current Runtime sandbox."""
@@ -46,11 +47,13 @@ async def runtime_sandbox_files_search(
     try:
         safe_query = _safe_query(query)
         safe_content_types = _safe_content_types(content_types)
+        safe_sources = _safe_sources(sources)
         safe_limit = _safe_limit(limit)
         result = await asyncio.to_thread(
             SandboxedOssClient().search_files,
             safe_query,
             safe_content_types,
+            safe_sources,
             safe_limit,
             sandbox_context,
         )
@@ -96,6 +99,22 @@ def _safe_limit(value: int) -> int:
         return min(max(int(value), 1), 50)
     except (TypeError, ValueError):
         return 20
+
+
+def _safe_sources(value: list[str] | None) -> list[str]:
+    if value is None:
+        return ["conversation", "assistant_workspace"]
+    if not isinstance(value, list):
+        raise TypeError("Runtime sandbox sources are invalid.")
+    allowed = {"conversation", "assistant_workspace"}
+    normalized: list[str] = []
+    for item in value:
+        source = str(item or "").strip()
+        if source not in allowed:
+            raise ValueError("Runtime sandbox source is invalid.")
+        if source not in normalized:
+            normalized.append(source)
+    return normalized
 
 
 def _public_files(result: Any) -> list[dict[str, Any]]:

@@ -90,10 +90,18 @@ async def test_runtime_sandbox_search_sends_only_signed_scope_and_safe_filters(
     }
 
     class FakeSandboxedOssClient:
-        def search_files(self, query, content_types, limit, request_context):
+        def search_files(
+            self,
+            query,
+            content_types,
+            sources,
+            limit,
+            request_context,
+        ):
             captured.update(
                 query=query,
                 content_types=content_types,
+                sources=sources,
                 limit=limit,
                 sandbox_context=request_context,
             )
@@ -128,6 +136,7 @@ async def test_runtime_sandbox_search_sends_only_signed_scope_and_safe_filters(
     response = await module.runtime_sandbox_files_search(
         " history ",
         ["text/markdown", "text/markdown"],
+        ["conversation", "assistant_workspace", "conversation"],
         500,
     )
     rendered = _text(response)
@@ -137,6 +146,7 @@ async def test_runtime_sandbox_search_sends_only_signed_scope_and_safe_filters(
     assert captured == {
         "query": "history",
         "content_types": ["text/markdown"],
+        "sources": ["conversation", "assistant_workspace"],
         "limit": 50,
         "sandbox_context": sandbox_context,
     }

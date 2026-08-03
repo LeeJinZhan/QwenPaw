@@ -15,6 +15,8 @@ from typing import Optional
 from agentscope.message import TextBlock
 from agentscope.tool import ToolResponse
 
+from ..sandbox_executor_client import RuntimeSandboxExecutorClient, SandboxExecutorClientError
+
 from .file_io import SandboxPathViolation, _resolve_file_path
 
 # ---------------------------------------------------------------------------
@@ -127,6 +129,28 @@ def _relative_display(target: Path, root: Path) -> str:
 
 def _make_response(text: str) -> ToolResponse:
     return ToolResponse(content=[TextBlock(type="text", text=text)])
+
+
+async def _runtime_search(operation: str) -> "ToolResponse | None":
+    try:
+        client = RuntimeSandboxExecutorClient.from_current_context()
+        if client is None:
+            return None
+        data = await client.execute(operation)
+    except SandboxExecutorClientError:
+        return _make_response("Error: Runtime task sandbox search failed.")
+    items = data.get("items", [])
+    if not isinstance(items, list) or not items:
+        return _make_response("No matches found.")
+    lines = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        if "line" in item:
+            lines.append(f"{item.get('path', '')}:{item.get('line', '')}: {item.get('text', '')}")
+        else:
+            lines.append(str(item.get("path", "")))
+    return _make_response("\n".join(lines) or "No matches found.")
 
 
 def _resolve_search_root(
@@ -503,6 +527,9 @@ async def grep_search(
             Only search files whose **name** matches this glob
             (e.g. ``"*.py"``).  Defaults to None (all text files).
     """
+    runtime_response = await _runtime_search("file.grep")
+    if runtime_response is not None:
+        return runtime_response
     if not pattern:
         return _make_response("Error: No search `pattern` provided.")
 
@@ -590,6 +617,9 @@ async def glob_search(
         path (`str`, optional):
             Root directory to search from.  Defaults to WORKING_DIR.
     """
+    runtime_response = await _runtime_search("file.glob")
+    if runtime_response is not None:
+        return runtime_response
     if not pattern:
         return _make_response("Error: No glob `pattern` provided.")
 

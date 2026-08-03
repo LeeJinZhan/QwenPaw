@@ -9,6 +9,11 @@ import aiofiles
 from agentscope.message import TextBlock
 from agentscope.tool import ToolResponse
 
+from ..sandbox_executor_client import (
+    RuntimeSandboxExecutorClient,
+    SandboxExecutorClientError,
+)
+
 from .utils import (
     truncate_text_output,
     read_file_safe,
@@ -24,6 +29,24 @@ from ...constant import WORKING_DIR, TRUNCATION_NOTICE_MARKER
 
 class SandboxPathViolation(ValueError):
     """Raised when a Runtime-managed tool path escapes its task root."""
+
+
+async def _runtime_file_operation(operation: str) -> "dict | None":
+    try:
+        client = RuntimeSandboxExecutorClient.from_current_context()
+        return None if client is None else await client.execute(operation)
+    except SandboxExecutorClientError:
+        return {"_error": "Runtime task sandbox operation failed."}
+
+
+def _runtime_file_response(result: dict, *, verb: str) -> ToolResponse:
+    if result.get("_error"):
+        return ToolResponse(content=[TextBlock(type="text", text=f"Error: {result['_error']}")])
+    if "content" in result:
+        return ToolResponse(content=[TextBlock(type="text", text=str(result.get("content", "")))])
+    path = str(result.get("path", "output"))
+    size = int(result.get("bytes", 0) or 0)
+    return ToolResponse(content=[TextBlock(type="text", text=f"{verb} {size} bytes to {path}.")])
 
 
 def _resolve_file_path(file_path: str) -> str:
@@ -114,6 +137,10 @@ async def read_file(  # pylint: disable=too-many-return-statements
         end_line (`int`, optional):
             Last line to read (1-based, inclusive).
     """
+
+    runtime_result = await _runtime_file_operation("file.read")
+    if runtime_result is not None:
+        return _runtime_file_response(runtime_result, verb="Read")
 
     # Convert start_line/end_line to int if they are strings
     if start_line is not None:
@@ -254,6 +281,10 @@ async def write_file(
             Content to write.
     """
 
+    runtime_result = await _runtime_file_operation("file.write")
+    if runtime_result is not None:
+        return _runtime_file_response(runtime_result, verb="Wrote")
+
     if not file_path:
         return ToolResponse(
             content=[
@@ -309,6 +340,10 @@ async def edit_file(
         new_text (`str`):
             Replacement text.
     """
+
+    runtime_result = await _runtime_file_operation("file.edit")
+    if runtime_result is not None:
+        return _runtime_file_response(runtime_result, verb="Edited")
 
     if not file_path:
         return ToolResponse(
@@ -401,6 +436,10 @@ async def append_file(
         content (`str`):
             Content to append.
     """
+
+    runtime_result = await _runtime_file_operation("file.append")
+    if runtime_result is not None:
+        return _runtime_file_response(runtime_result, verb="Appended")
 
     if not file_path:
         return ToolResponse(

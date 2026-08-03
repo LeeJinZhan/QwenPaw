@@ -251,6 +251,26 @@ current_runtime_discovered_file_ids: ContextVar[frozenset[str]] = ContextVar(
 )
 
 
+current_runtime_tool_execution: ContextVar[dict[str, Any] | None] = ContextVar(
+    "current_runtime_tool_execution",
+    default=None,
+)
+
+
+def get_current_runtime_tool_execution() -> dict[str, Any] | None:
+    """Return the permit-bound tool call currently entering a tool body."""
+    value = current_runtime_tool_execution.get()
+    return dict(value) if isinstance(value, dict) else None
+
+
+def push_current_runtime_tool_execution(value: dict[str, Any]) -> Token:
+    return current_runtime_tool_execution.set(dict(value))
+
+
+def reset_current_runtime_tool_execution(token: Token) -> None:
+    current_runtime_tool_execution.reset(token)
+
+
 def get_current_runtime_discovered_file_ids() -> frozenset[str]:
     """Get file IDs discovered during the current Runtime request."""
     return current_runtime_discovered_file_ids.get()
@@ -271,3 +291,37 @@ def set_current_runtime_discovered_file_ids(
 def reset_current_runtime_discovered_file_ids(token: Token) -> None:
     """Restore discovered file IDs to the value before this request."""
     current_runtime_discovered_file_ids.reset(token)
+
+
+_REQUEST_LOCAL_CONTEXT_VARS: tuple[ContextVar[Any], ...] = (
+    current_workspace_dir,
+    current_file_sandbox_root,
+    current_recent_max_bytes,
+    current_shell_command_timeout,
+    current_shell_command_executable,
+    current_session_id,
+    current_toolkit,
+    current_runtime_tool_gateway,
+    current_runtime_attachments_manifest,
+    current_runtime_sandbox_context,
+    current_runtime_discovered_file_ids,
+    current_runtime_tool_execution,
+)
+
+
+def snapshot_request_local_context() -> list[tuple[ContextVar[Any], Token]]:
+    """Create a reset boundary around all tool/request ContextVars.
+
+    The values are copied into the current context solely to obtain reset
+    tokens.  Any setters invoked while the request runs are then rolled back
+    as a group, including legacy setters whose callers do not retain tokens.
+    """
+    return [(variable, variable.set(variable.get())) for variable in _REQUEST_LOCAL_CONTEXT_VARS]
+
+
+def restore_request_local_context(
+    snapshot: list[tuple[ContextVar[Any], Token]],
+) -> None:
+    """Restore a snapshot created by :func:`snapshot_request_local_context`."""
+    for variable, token in reversed(snapshot):
+        variable.reset(token)

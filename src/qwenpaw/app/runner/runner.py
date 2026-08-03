@@ -67,6 +67,7 @@ RUNTIME_REQUEST_CONTEXT_KEYS = (
     "runtime_governance",
     "runtime_context",
     "runtime_tool_gateway",
+    "worker_protocol",
     "attachments_manifest",
     "sandbox_context",
     "personal_skills_catalog",
@@ -77,6 +78,11 @@ _PERSONAL_SKILLS_CONTEXT_KEYS = {
     "personal_skills_catalog",
     "personal_skills_access_manifest",
 }
+
+
+def _is_runtime_external_request(request: AgentRequest | Any) -> bool:
+    """Return whether Runtime, rather than QwenPaw, owns conversation state."""
+    return str(getattr(request, "channel", "") or "").strip() == "bank-runtime"
 
 
 def _build_base_request_context(
@@ -465,10 +471,15 @@ class AgentRunner(Runner):
         )
         query = _get_last_user_text(msgs)
         session_id = getattr(request, "session_id", "") or ""
+        runtime_external = _is_runtime_external_request(request)
 
         # Check if query is a command (including /approval)
-        logger.debug(f"Query: {query!r}, is_command: {_is_command(query)}")
-        if query and _is_command(query):
+        logger.debug(
+            "Query received: is_command=%s, runtime_external=%s",
+            _is_command(query),
+            runtime_external,
+        )
+        if not runtime_external and query and _is_command(query):
             logger.info("Command path: %s", query.strip()[:50])
             async for msg, last in run_command_path(request, msgs, self):
                 yield msg, last
@@ -482,6 +493,11 @@ class AgentRunner(Runner):
 
         # Set agent context for model creation
         from ..agent_context import (
+            reset_current_agent_id,
+            reset_current_channel,
+            reset_current_root_session_id,
+            reset_current_session_id,
+            reset_current_user_id,
             set_current_agent_id,
             set_current_session_id,
             set_current_root_session_id,
@@ -489,21 +505,31 @@ class AgentRunner(Runner):
             set_current_channel,
         )
 
-        set_current_agent_id(self.agent_id)
+        agent_context_tokens: list[tuple[Any, Any]] = []
+        agent_context_tokens.append(
+            (reset_current_agent_id, set_current_agent_id(self.agent_id)),
+        )
 
         # Set session_id in context for token usage tracking
-        set_current_session_id(session_id)
+        agent_context_tokens.append(
+            (reset_current_session_id, set_current_session_id(session_id)),
+        )
 
         agent = None
         chat = None
         session_state_loaded = False
         _cron_memory_snapshot = None
+        base_request_context: dict[str, Any] = {}
         try:
             session_id = request.session_id
             user_id = request.user_id
             channel = getattr(request, "channel", DEFAULT_CHANNEL)
-            set_current_user_id(user_id)
-            set_current_channel(channel)
+            agent_context_tokens.append(
+                (reset_current_user_id, set_current_user_id(user_id)),
+            )
+            agent_context_tokens.append(
+                (reset_current_channel, set_current_channel(channel)),
+            )
 
             logger.info(
                 "Handle agent query:\n%s",
@@ -513,7 +539,11 @@ class AgentRunner(Runner):
                         "user_id": user_id,
                         "channel": channel,
                         "msgs_len": len(msgs) if msgs else 0,
-                        "msgs_str": str(msgs)[:300] + "...",
+                        **(
+                            {}
+                            if runtime_external
+                            else {"msgs_str": str(msgs)[:300] + "..."}
+                        ),
                     },
                     ensure_ascii=False,
                     indent=2,
@@ -620,7 +650,12 @@ class AgentRunner(Runner):
             payload_root_session = getattr(request, "root_session_id", "")
             if payload_root_session and isinstance(payload_root_session, str):
                 base_request_context["root_session_id"] = payload_root_session
-                set_current_root_session_id(payload_root_session)
+                agent_context_tokens.append(
+                    (
+                        reset_current_root_session_id,
+                        set_current_root_session_id(payload_root_session),
+                    ),
+                )
                 root_preview = (
                     payload_root_session[:12]
                     if len(payload_root_session) >= 12
@@ -633,7 +668,12 @@ class AgentRunner(Runner):
             else:
                 # Current session is the root
                 base_request_context["root_session_id"] = session_id
-                set_current_root_session_id(session_id)
+                agent_context_tokens.append(
+                    (
+                        reset_current_root_session_id,
+                        set_current_root_session_id(session_id),
+                    ),
+                )
                 session_preview = (
                     session_id[:12] if len(session_id) >= 12 else session_id
                 )
@@ -646,15 +686,17 @@ class AgentRunner(Runner):
             _ws = self.workspace_dir or WORKING_DIR
             mission_info: dict | None = None
 
-            mission_result = await maybe_handle_mission_command(
-                query=query,
-                msgs=msgs,
-                workspace_dir=_ws,
-                agent_id=self.agent_id,
-                rewrite_fn=self._rewrite_last_message_text,
-                session_id=session_id,
-                agent_name=self.agent_name,
-            )
+            mission_result = None
+            if not runtime_external:
+                mission_result = await maybe_handle_mission_command(
+                    query=query,
+                    msgs=msgs,
+                    workspace_dir=_ws,
+                    agent_id=self.agent_id,
+                    rewrite_fn=self._rewrite_last_message_text,
+                    session_id=session_id,
+                    agent_name=self.agent_name,
+                )
             if isinstance(mission_result, Msg):
                 await self._persist_exchange_to_session(
                     session_id,
@@ -670,7 +712,7 @@ class AgentRunner(Runner):
 
             # Active mission: auto-detect follow-up messages
             # (e.g., user confirms PRD without typing /mission again)
-            if mission_info is None:
+            if not runtime_external and mission_info is None:
                 mission_info = detect_active_mission_phase(
                     _ws,
                     session_id=session_id,
@@ -715,7 +757,7 @@ class AgentRunner(Runner):
                 getattr(agent_config, "plan", None),
                 "enabled",
                 False,
-            )
+            ) and not runtime_external
             if plan_enabled:
                 try:
                     from agentscope.plan import (
@@ -816,9 +858,8 @@ class AgentRunner(Runner):
             await agent.register_mcp_clients()
             agent.set_console_output_enabled(enabled=False)
 
-            logger.debug(
-                f"Agent Query msgs {msgs}",
-            )
+            if not runtime_external:
+                logger.debug("Agent Query msgs %s", msgs)
 
             name = "New Chat"
             if len(msgs) > 0:
@@ -835,7 +876,7 @@ class AgentRunner(Runner):
                 f"agent_id={self.agent_id}",
             )
 
-            if self._chat_manager is not None:
+            if self._chat_manager is not None and not runtime_external:
                 _req_extra = getattr(request, "model_extra", None) or {}
                 _session_source = _req_extra.get("session_source", "chat")
                 logger.debug(
@@ -852,7 +893,7 @@ class AgentRunner(Runner):
                     source=_session_source,
                 )
                 logger.debug(f"Runner: Got chat: {chat.id}")
-            else:
+            elif not runtime_external:
                 logger.warning(
                     f"ChatManager is None! Cannot auto-register chat for "
                     f"session_id={session_id}",
@@ -866,19 +907,20 @@ class AgentRunner(Runner):
                     agent.toolkit.skills,
                 )
                 if skill_response is not None:
-                    await self._persist_exchange_to_session(
-                        session_id,
-                        user_id,
-                        channel,
-                        msgs,
-                        skill_response,
-                    )
+                    if not runtime_external:
+                        await self._persist_exchange_to_session(
+                            session_id,
+                            user_id,
+                            channel,
+                            msgs,
+                            skill_response,
+                        )
                     yield skill_response, True
                     return
 
             # Ensure session file has a valid plan_notebook dict
             # to prevent TypeError/KeyError during load_state_dict
-            if plan_notebook is not None:
+            if plan_notebook is not None and not runtime_external:
                 try:
                     _states = await self.session.get_session_state_dict(
                         session_id=session_id,
@@ -906,33 +948,32 @@ class AgentRunner(Runner):
                         exc_info=True,
                     )
 
-            if plan_notebook is not None:
-                setattr(
-                    plan_notebook,
-                    "_loading_from_state",
-                    True,  # pylint: disable=protected-access
-                )
-            try:
-                await self.session.load_session_state(
-                    session_id=session_id,
-                    user_id=user_id,
-                    channel=channel,
-                    agent=agent,
-                )
-            except KeyError as e:
-                logger.warning(
-                    "load_session_state skipped (state schema mismatch): %s; "
-                    "will save fresh state on completion to recover file",
-                    e,
-                )
-            finally:
+            if not runtime_external:
                 if plan_notebook is not None:
                     setattr(
                         plan_notebook,
-                        "_loading_from_state",
-                        False,  # pylint: disable=protected-access
+                        "_loading_from_state", True,
                     )
-            session_state_loaded = True
+                try:
+                    await self.session.load_session_state(
+                        session_id=session_id,
+                        user_id=user_id,
+                        channel=channel,
+                        agent=agent,
+                    )
+                except KeyError as e:
+                    logger.warning(
+                        "load_session_state skipped (state schema mismatch): %s; "
+                        "will save fresh state on completion to recover file",
+                        e,
+                    )
+                finally:
+                    if plan_notebook is not None:
+                        setattr(
+                            plan_notebook,
+                            "_loading_from_state", False,
+                        )
+                session_state_loaded = True
 
             if plan_notebook is not None:
                 from ...plan.hints import clear_plan_awaiting_user_confirm
@@ -982,8 +1023,8 @@ class AgentRunner(Runner):
                 name="qwenpaw.agent.react_loop",
                 metadata=trace_metadata,
                 input={
-                    "query": query,
                     "messages_count": len(msgs) if msgs else 0,
+                    **({} if runtime_external else {"query": query}),
                 },
             ):
                 if mission_info is not None:
@@ -1068,11 +1109,13 @@ class AgentRunner(Runner):
             converted = convert_model_exception(e, model_name)
 
             # Preserve all original error dump logic
-            debug_dump_path = write_query_error_dump(
-                request=request,
-                exc=converted,
-                locals_=locals(),
-            )
+            debug_dump_path = None
+            if not runtime_external:
+                debug_dump_path = write_query_error_dump(
+                    request=request,
+                    exc=converted,
+                    locals_=locals(),
+                )
             path_hint = (
                 f"\n(Details:  {debug_dump_path})" if debug_dump_path else ""
             )
@@ -1122,11 +1165,14 @@ class AgentRunner(Runner):
                     channel=channel,
                     agent=agent,
                 )
-            elif agent is not None:
+            elif agent is not None and not runtime_external:
                 await agent.prepare_personal_skills_for_persistence()
 
             if self._chat_manager is not None and chat is not None:
                 await self._chat_manager.touch_chat(chat.id)
+
+            for reset_context, token in reversed(agent_context_tokens):
+                reset_context(token)
 
     async def init_handler(self, *args, **kwargs):
         """

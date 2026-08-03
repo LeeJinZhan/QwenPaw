@@ -346,6 +346,18 @@ async def post_console_chat(
         sender_id=native_payload["sender_id"],
         channel_meta=native_payload["meta"],
     )
+    # Runtime owns conversation history and task tracking.  Do not mirror a
+    # Runtime-managed request into QwenPaw's chats.json, title generator, or
+    # reconnect tracker: those stores live in the shared Agent workspace.
+    if _is_runtime_native_payload(native_payload):
+        return StreamingResponse(
+            _stream_runtime_console_events(console_channel, native_payload),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+            },
+        )
     name, first_text = _extract_placeholder_name(
         native_payload["content_parts"],
     )
@@ -378,15 +390,6 @@ async def post_console_chat(
         queue = await tracker.attach(chat.id)
         if queue is None:
             return
-    elif _is_runtime_native_payload(native_payload):
-        return StreamingResponse(
-            _stream_runtime_console_events(console_channel, native_payload),
-            media_type="text/event-stream",
-            headers={
-                "Cache-Control": "no-cache",
-                "Connection": "keep-alive",
-            },
-        )
     else:
         queue, _ = await tracker.attach_or_start(
             chat.id,

@@ -13,8 +13,10 @@ import asyncio
 import atexit
 from collections.abc import Iterable
 from concurrent import futures
+from dataclasses import dataclass
 import json
 import logging
+import os
 import re
 import shlex
 from pathlib import Path
@@ -27,15 +29,54 @@ from typing import Any, Optional
 from urllib.parse import urljoin
 from urllib import request as urllib_request
 
-from agentscope.message import TextBlock
-from agentscope.tool import ToolResponse
+_SANDBOX_DAEMON_MODE = os.environ.get("QWENPAW_SANDBOX_DAEMON_MODE") == "1"
 
-from ...config import (
-    get_playwright_chromium_executable_path,
-    get_system_default_browser,
-    is_running_in_container,
-)
-from ...config.context import get_current_workspace_dir
+if _SANDBOX_DAEMON_MODE:
+    class TextBlock(dict):
+        """Small AgentScope-compatible text block for the isolated daemon."""
+
+        def __init__(self, *, type: str, text: str) -> None:  # noqa: A002
+            super().__init__(type=type, text=text)
+
+    @dataclass
+    class ToolResponse:
+        """Small AgentScope-compatible response for sandbox serialization."""
+
+        content: list[dict[str, Any]]
+else:
+    from agentscope.message import TextBlock
+    from agentscope.tool import ToolResponse
+
+if not _SANDBOX_DAEMON_MODE:
+    from ..sandbox_executor_client import RuntimeSandboxExecutorClient, SandboxExecutorClientError
+
+if _SANDBOX_DAEMON_MODE:
+    def get_playwright_chromium_executable_path() -> str | None:
+        for candidate in (
+            os.environ.get("PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH", ""),
+            "/usr/bin/chromium",
+            "/usr/bin/chromium-browser",
+            "/usr/lib/chromium/chromium",
+        ):
+            if candidate and Path(candidate).is_file():
+                return candidate
+        return None
+
+    def get_system_default_browser() -> tuple[None, None]:
+        return (None, None)
+
+    def is_running_in_container() -> bool:
+        return True
+
+    def get_current_workspace_dir() -> Path:
+        return Path("/workspace/scratch")
+else:
+    from ...config import (
+        get_playwright_chromium_executable_path,
+        get_system_default_browser,
+        is_running_in_container,
+    )
+    from ...config.context import get_current_workspace_dir
 from ...constant import WORKING_DIR, EnvVarLoader
 
 from .browser_snapshot import build_role_snapshot_from_aria
@@ -4562,10 +4603,23 @@ async def browser_use(  # pylint: disable=R0911,R0912
             Upper bound of port range for action=list_cdp_targets.
             Defaults to 10000 when not specified.
     """
+    if not _SANDBOX_DAEMON_MODE:
+        try:
+            runtime_client = RuntimeSandboxExecutorClient.from_current_context()
+            if runtime_client is not None:
+                result = await runtime_client.execute("browser.execute")
+                content = result.get("content")
+                if isinstance(content, list) and all(isinstance(block, dict) for block in content):
+                    return ToolResponse(content=content)
+                return ToolResponse(
+                    content=[TextBlock(type="text", text=json.dumps(result, ensure_ascii=False))],
+                )
+        except SandboxExecutorClientError:
+            return ToolResponse(
+                content=[TextBlock(type="text", text="Error: Runtime task sandbox browser operation failed.")],
+            )
     # Resolve per-workspace state using context var set by react_agent.py
-    from ...config.context import get_current_workspace_dir as _get_cwd
-
-    _cwd = _get_cwd()
+    _cwd = get_current_workspace_dir()
     _ws_id = _cwd.name if _cwd else "default"
     _ws_dir = str(_cwd) if _cwd else ""
     state = _get_workspace_state(_ws_id, _ws_dir)

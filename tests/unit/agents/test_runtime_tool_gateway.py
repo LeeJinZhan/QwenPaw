@@ -5,12 +5,14 @@ from __future__ import annotations
 
 import io
 import json
+from datetime import datetime, timedelta, timezone
 from urllib.error import HTTPError
 
 import pytest
 
 import qwenpaw.agents.runtime_tool_gateway as gateway_module
 from qwenpaw.agents.runtime_tool_gateway import RuntimeToolGatewayClient, RuntimeToolGatewayError
+from qwenpaw.agents.runtime_worker_protocol import build_message, payload_hash
 
 
 def _context() -> dict:
@@ -27,6 +29,63 @@ def _context() -> dict:
         },
         "trace_id": "trace_001",
     }
+
+
+def _v1_context() -> dict:
+    context = _context()
+    context["runtime_tool_gateway"].update(
+        worker_protocol_version="runtime-worker/v1",
+        task_scope_id="tscope_001",
+        capability_snapshot_hash="sha256:capabilities",
+    )
+    return context
+
+
+@pytest.mark.asyncio
+async def test_v1_preflight_requires_exact_single_use_permit(monkeypatch):
+    client = RuntimeToolGatewayClient.from_request_context(_v1_context())
+    requests: list[dict] = []
+
+    async def fake_post(_self, _url, payload, _headers):
+        requests.append(payload)
+        permit = build_message(
+            "tool.permit",
+            task_scope_id="tscope_001",
+            trace_id="trace_001",
+            call_id="call_001",
+            idempotency_key="qwenpaw:call_001",
+            capability_snapshot_hash="sha256:capabilities",
+            payload={
+                "permit_id": "tgrant_001",
+                "permit_nonce": "nonce-once",
+                "tool_id": "execute_shell_command",
+                "input_hash": payload_hash({"command": "pwd"}),
+                "expires_at": (
+                    datetime.now(timezone.utc) + timedelta(seconds=30)
+                ).isoformat(),
+                "single_use": True,
+            },
+        )
+        return {
+            "phase": "allow",
+            "tool_call_id": "tool_001",
+            "decision": "allow",
+            "status": "allowed",
+            "permit": permit,
+        }
+
+    monkeypatch.setattr(RuntimeToolGatewayClient, "_post", fake_post)
+
+    result = await client.preflight(
+        "execute_shell_command",
+        {"command": "pwd"},
+        idempotency_key="qwenpaw:call_001",
+    )
+
+    assert result["permit"]["payload"]["permit_id"] == "tgrant_001"
+    assert requests[0]["protocol_version"] == "runtime-worker/v1"
+    assert requests[0]["task_scope_id"] == "tscope_001"
+    assert requests[0]["input_hash"] == payload_hash({"command": "pwd"})
 
 
 @pytest.mark.asyncio
@@ -139,6 +198,36 @@ async def test_result_retries_three_times_without_tool_output(monkeypatch):
 
     assert result["status"] == "completed"
     assert attempts == 3
+
+
+@pytest.mark.asyncio
+async def test_v1_result_failure_enters_persistent_outbox(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("QWENPAW_RUNTIME_TOOL_OUTBOX_ROOT", str(tmp_path))
+    client = RuntimeToolGatewayClient.from_request_context(_v1_context())
+
+    async def unavailable(_self, _url, _payload, _headers):
+        raise RuntimeError("offline")
+
+    async def no_sleep(_delay):
+        return None
+
+    monkeypatch.setattr(RuntimeToolGatewayClient, "_post", unavailable)
+    monkeypatch.setattr(
+        "qwenpaw.agents.runtime_tool_gateway.asyncio.sleep",
+        no_sleep,
+    )
+
+    result = await client.report_result("tool_001", "completed", 42)
+
+    assert result["status"] == "result_pending"
+    records = list(tmp_path.glob("*.json"))
+    assert len(records) == 1
+    rendered = records[0].read_text(encoding="utf-8")
+    assert '"status": "completed"' in rendered
+    assert "output" not in rendered
 
 
 @pytest.mark.asyncio

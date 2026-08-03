@@ -32,6 +32,10 @@ from ..constant import (
     TOOL_GUARD_APPROVAL_HEARTBEAT_INTERVAL,
 )
 from .runtime_tool_gateway import RuntimeToolGatewayClient, RuntimeToolGatewayError
+from ..config.context import (
+    push_current_runtime_tool_execution,
+    reset_current_runtime_tool_execution,
+)
 
 if TYPE_CHECKING:
     from qwenpaw.app.approvals import PendingApproval
@@ -179,6 +183,24 @@ class ToolGuardMixin:
         except RuntimeToolGatewayError:
             logger.warning("Tool Gateway Guard audit writeback failed", exc_info=True)
 
+    @staticmethod
+    async def _report_runtime_guard(
+        gateway_client: RuntimeToolGatewayClient,
+        preflight: dict[str, Any],
+        guard_decision: str,
+    ) -> dict[str, Any]:
+        permit = preflight.get("permit")
+        if permit is None:
+            return await gateway_client.report_guard(
+                preflight["tool_call_id"],
+                guard_decision,
+            )
+        return await gateway_client.report_guard(
+            preflight["tool_call_id"],
+            guard_decision,
+            permit,
+        )
+
     async def _execute_runtime_gateway_tool_call(
         self,
         tool_call: dict[str, Any],
@@ -206,7 +228,7 @@ class ToolGuardMixin:
                     tool_input,
                     idempotency_key=self._gateway_idempotency_key(tool_call),
                 )
-                await client.report_guard(preflight["tool_call_id"], "allow")
+                await self._report_runtime_guard(client, preflight, "allow")
             except RuntimeToolGatewayError as error:
                 await self._emit_runtime_gateway_failure(
                     tool_call,
@@ -215,6 +237,13 @@ class ToolGuardMixin:
                 return None
 
         started_at = time.monotonic()
+        execution_context_token = push_current_runtime_tool_execution(
+            {
+                "tool_call_id": str(preflight["tool_call_id"]),
+                "tool_name": tool_name,
+                "tool_input": dict(tool_input),
+            },
+        )
         try:
             result = await self._call_parent_tool(tool_call)
         except asyncio.CancelledError:
@@ -235,6 +264,8 @@ class ToolGuardMixin:
                 await self._emit_runtime_gateway_failure(tool_call, "Tool Gateway audit writeback failed.")
                 return None
             raise
+        finally:
+            reset_current_runtime_tool_execution(execution_context_token)
         try:
             await client.report_result(preflight["tool_call_id"], "completed", int((time.monotonic() - started_at) * 1000))
         except RuntimeToolGatewayError:
@@ -334,8 +365,9 @@ class ToolGuardMixin:
                     else "block"
                 )
                 try:
-                    await gateway_client.report_guard(
-                        gateway_preflight["tool_call_id"],
+                    await self._report_runtime_guard(
+                        gateway_client,
+                        gateway_preflight,
                         guard_decision,
                     )
                 except RuntimeToolGatewayError:
@@ -353,8 +385,9 @@ class ToolGuardMixin:
 
         if gateway_client is not None:
             try:
-                await gateway_client.report_guard(
-                    gateway_preflight["tool_call_id"],
+                await self._report_runtime_guard(
+                    gateway_client,
+                    gateway_preflight,
                     "allow",
                 )
             except RuntimeToolGatewayError:
@@ -696,8 +729,9 @@ class ToolGuardMixin:
             )
             if gateway_client is not None and gateway_preflight is not None:
                 try:
-                    await gateway_client.report_guard(
-                        gateway_preflight["tool_call_id"],
+                    await self._report_runtime_guard(
+                        gateway_client,
+                        gateway_preflight,
                         "allow",
                     )
                 except RuntimeToolGatewayError:
