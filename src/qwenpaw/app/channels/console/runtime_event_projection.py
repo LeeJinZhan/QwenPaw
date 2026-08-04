@@ -499,9 +499,13 @@ class RuntimeEventProjector:  # pylint: disable=too-many-instance-attributes
             return ""
         if _is_reasoning_message(payload):
             message_id = str(payload.get("id") or "").strip()
-            text, incremental = _thinking_content_text(payload.get("content"))
+            text, _incremental = _thinking_content_text(payload.get("content"))
             key = f"message:{message_id}" if message_id else "message"
-            return self._new_thinking_delta(key, text, incremental=incremental)
+            # A message event is a snapshot of the reasoning accumulated for
+            # that message. Nested content items may still retain delta=True,
+            # but treating the parent snapshot as another delta duplicates the
+            # reasoning already emitted by its child content events.
+            return self._new_thinking_delta(key, text, incremental=False)
 
         if _token(payload.get("object")) != "content":
             return ""
@@ -512,7 +516,11 @@ class RuntimeEventProjector:  # pylint: disable=too-many-instance-attributes
         ):
             return ""
         text, incremental = _thinking_content_text(payload)
-        key = f"content:{parent_message_id or payload.get('id') or ''}"
+        key = (
+            f"message:{parent_message_id}"
+            if parent_message_id
+            else f"content:{payload.get('id') or ''}"
+        )
         return self._new_thinking_delta(key, text, incremental=incremental)
 
     def _new_thinking_delta(
@@ -525,6 +533,9 @@ class RuntimeEventProjector:  # pylint: disable=too-many-instance-attributes
         if not text:
             return ""
         if incremental:
+            self.thinking_snapshot_text[key] = (
+                self.thinking_snapshot_text.get(key, "") + text
+            )
             return text
         previous = self.thinking_snapshot_text.get(key, "")
         if text == previous or previous.startswith(text):

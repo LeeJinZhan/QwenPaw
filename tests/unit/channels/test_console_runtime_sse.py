@@ -547,6 +547,71 @@ def test_runtime_projection_streams_reasoning_before_first_answer_chunk() -> Non
     ]
 
 
+def test_runtime_projection_deduplicates_completed_reasoning_snapshot_after_deltas() -> None:
+    projector = _runtime_projector(
+        min_chunk_chars=1,
+        thinking_chunk_chars=256,
+        thinking_max_delay_seconds=0.1,
+    )
+    full_thinking = "工具授权了，重新尝试。"
+    emitted: list[dict] = []
+
+    emitted.extend(
+        projector.project(
+            {
+                "object": "message",
+                "id": "msg-reasoning",
+                "role": "assistant",
+                "type": "reasoning",
+                "status": "in_progress",
+                "content": None,
+            },
+            now=0.0,
+        ),
+    )
+    for index, text in enumerate(("工具授权了，", "重新尝试。"), start=1):
+        emitted.extend(
+            projector.project(
+                {
+                    "object": "content",
+                    "msg_id": "msg-reasoning",
+                    "type": "text",
+                    "status": "in_progress",
+                    "delta": True,
+                    "text": text,
+                },
+                now=index * 0.01,
+            ),
+        )
+    emitted.extend(
+        projector.project(
+            {
+                "object": "message",
+                "id": "msg-reasoning",
+                "role": "assistant",
+                "type": "reasoning",
+                "status": "completed",
+                "content": [
+                    {
+                        "type": "text",
+                        "delta": True,
+                        "text": full_thinking,
+                    },
+                ],
+            },
+            now=0.03,
+        ),
+    )
+    emitted.extend(projector.finish(success=True, now=0.04))
+
+    thinking = "".join(
+        item["text"]
+        for item in emitted
+        if item["event"] == "answer.thinking"
+    )
+    assert thinking == full_thinking
+
+
 def test_runtime_projection_flushes_pending_reasoning_before_answer() -> None:
     projector = _runtime_projector(
         min_chunk_chars=1,
