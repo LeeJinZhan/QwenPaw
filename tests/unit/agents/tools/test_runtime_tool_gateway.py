@@ -768,6 +768,11 @@ def test_simple_text_fast_mode_builds_minimal_prompt(monkeypatch) -> None:
 
     assert "直接回答" in prompt
     assert "不要调用工具" in prompt
+    assert "银行智能助手" in prompt
+    assert "轻量文本助手" not in prompt
+    assert "不要读写文件" not in prompt
+    assert "完整任务模式" not in prompt
+    assert "不要向用户描述内部执行模式" in prompt
     assert "2026-07-02" in prompt
     assert "Asia/Shanghai" in prompt
     assert "task_001" in prompt

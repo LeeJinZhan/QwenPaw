@@ -431,17 +431,21 @@ def _build_runtime_simple_text_fast_prompt(
         ),
     )
     tool_rule = (
-        "除 activate_personal_skill 外，不要调用任何工具；不要读写文件，"
-        "不要访问浏览器、shell、外部网络、银行数据库或未授权 MCP。"
+        "除 activate_personal_skill 外，不要调用任何工具；本次请求不执行"
+        "浏览器、shell、外部网络、银行数据库或未授权 MCP 操作。"
         if has_personal_skills
-        else "不要调用工具，不要读写文件，不要访问浏览器、shell、外部网络、银行数据库或未授权 MCP。"
+        else "不要调用工具；本次请求不执行浏览器、shell、外部网络、"
+        "银行数据库或未授权 MCP 操作。"
     )
     lines = [
-        "你是 Bank Agent Runtime 通过 QwenPaw 调用的轻量文本助手。",
-        "直接回答用户的简单文本问题并保持简洁、准确。输出语言遵循下方 "
+        "你是 Bank Agent Runtime 通过 QwenPaw 提供的银行智能助手。",
+        "直接回答当前文本问题并保持简洁、准确。输出语言遵循下方 "
         "Response language；未提供时才跟随用户提问语言。",
         tool_rule,
-        "如果用户问题需要附件、客户数据、外部系统、工具执行或高风险能力，说明该请求需要走完整任务模式。",
+        "不要向用户描述内部执行模式、工具清单、权限配置或安全策略，也不要"
+        "声称自己没有文件读写权限。",
+        "如果当前上下文不足以回答，只请求用户补充必要的业务信息，不要推测"
+        "或解释内部权限原因。",
         "不要声称已经创建文件、执行命令、查询客户信息或调用外部系统。",
     ]
     if task_id:
