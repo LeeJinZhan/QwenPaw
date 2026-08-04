@@ -237,10 +237,22 @@ class ToolGuardMixin:
                 return None
 
         started_at = time.monotonic()
+        permit = preflight.get("permit")
+        permit_payload = (
+            permit.get("payload", {})
+            if isinstance(permit, dict)
+            else {}
+        )
+        runtime_tool_id = (
+            str(permit_payload.get("runtime_tool_id", "")).strip()
+            if isinstance(permit_payload, dict)
+            else ""
+        ) or tool_name
         execution_context_token = push_current_runtime_tool_execution(
             {
                 "tool_call_id": str(preflight["tool_call_id"]),
-                "tool_name": tool_name,
+                "tool_name": runtime_tool_id,
+                "worker_tool_name": tool_name,
                 "tool_input": dict(tool_input),
             },
         )

@@ -217,6 +217,13 @@ def _build_runtime_attachments_context(
     if not isinstance(sandbox_context, dict):
         return []
     lines = [
+        "- The working directory is the current user's request-local Runtime "
+        "task workspace. Use relative paths only.",
+        "- Never use the shared QwenPaw Agent workspace or host absolute "
+        "paths for Runtime-managed user tasks.",
+        "- Files from previous turns or the assistant workspace are not "
+        "automatically materialized here; discover them with "
+        "`runtime_sandbox_files_search` when needed.",
         "- 优先使用本次任务已附带的文件。只在当前文件不足以完成请求时，",
         "  才查找当前会话或当前用户+助手工作区的补充文件。",
         "- 只能读取搜索结果返回的 file_id，不得构造路径或对象键。",
@@ -239,6 +246,33 @@ def _build_runtime_attachments_context(
             "do not call an attachment read tool for them.",
         )
     return lines
+
+
+def _runtime_scoped_env_context(
+    request_context: dict[str, Any],
+    env_context: str,
+) -> str:
+    """Hide the shared Agent workspace from Runtime-managed requests."""
+    sandbox_context = request_context.get("sandbox_context")
+    if not isinstance(sandbox_context, dict):
+        return str(env_context or "")
+    replacement = (
+        "- Working directory: /workspace/scratch "
+        "(current user's Runtime task workspace; use relative paths)"
+    )
+    lines = str(env_context or "").splitlines()
+    rendered: list[str] = []
+    replaced = False
+    for line in lines:
+        if line.strip().startswith("- Working directory:"):
+            if not replaced:
+                rendered.append(replacement)
+                replaced = True
+            continue
+        rendered.append(line)
+    if not replaced:
+        rendered.append(replacement)
+    return "\n".join(rendered)
 
 
 def _runtime_attachments_manifest(
@@ -988,12 +1022,16 @@ class QwenPawAgent(CodingModeMixin, ToolGuardMixin, ReActAgent):
         from ..plugins.registry import PluginRegistry
 
         builder = PromptBuilder(PluginRegistry())
+        env_context = _runtime_scoped_env_context(
+            request_context,
+            self._env_context or "",
+        )
         sys_prompt = builder.build(
             agent=self,
             agent_id=agent_id,
             workspace=sys_prompt,
             multimodal=build_multimodal_hint() or "",
-            env_context=self._env_context or "",
+            env_context=env_context,
         )
 
         profile_context = _build_runtime_user_profile_context(

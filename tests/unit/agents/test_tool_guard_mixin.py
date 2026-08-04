@@ -27,6 +27,7 @@ from qwenpaw.agents.tool_guard_mixin import (
 )
 from qwenpaw.agents.runtime_tool_gateway import RuntimeToolGatewayError
 from qwenpaw.agents.sandbox_executor_client import SandboxExecutorClientError
+from qwenpaw.config.context import get_current_runtime_tool_execution
 from qwenpaw.security.tool_guard.approval import ApprovalDecision
 from qwenpaw.security.tool_guard.execution_level import ToolExecutionLevel
 from qwenpaw.security.tool_guard.models import (
@@ -609,6 +610,45 @@ class TestRuntimeToolGatewayExecution:
         assert report_args[0] == "tool_001"
         assert report_args[1] == "failed"
         assert report_args[3] == "TOOL_EXECUTION_FAILED"
+
+    @pytest.mark.asyncio
+    async def test_gateway_uses_runtime_tool_id_for_sandbox_execution(self):
+        m = _make_mixin()
+        gateway = MagicMock()
+        gateway.report_result = AsyncMock(return_value={"status": "completed"})
+        observed: dict[str, object] = {}
+
+        async def execute_native(_tool_call):
+            observed.update(get_current_runtime_tool_execution() or {})
+            return {"status": "ok"}
+
+        m._call_parent_tool = AsyncMock(side_effect=execute_native)
+        tool_call = {
+            "id": "call_shell_001",
+            "name": "execute_shell_command",
+            "input": {"command": "pwd"},
+        }
+        preflight = {
+            "tool_call_id": "tool_001",
+            "permit": {
+                "payload": {
+                    "tool_id": "execute_shell_command",
+                    "runtime_tool_id": "shell.exec",
+                },
+            },
+        }
+
+        result = await m._execute_runtime_gateway_tool_call(
+            tool_call,
+            gateway_client=gateway,
+            preflight=preflight,
+        )
+
+        assert result == {"status": "ok"}
+        assert observed["tool_call_id"] == "tool_001"
+        assert observed["tool_name"] == "shell.exec"
+        assert observed["worker_tool_name"] == "execute_shell_command"
+        assert observed["tool_input"] == {"command": "pwd"}
 
     @pytest.mark.asyncio
     async def test_runtime_gateway_cannot_bypass_guard_when_headless_flag_is_false(self):

@@ -6,6 +6,7 @@ import asyncio
 import importlib
 import inspect
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -714,6 +715,52 @@ def test_runtime_gateway_builds_prompt_with_native_memory_manager(monkeypatch) -
     assert prompt.index("Runtime user profile preferences") < prompt.index(
         "Runtime Tool Gateway preflight is enabled",
     )
+
+
+def test_runtime_gateway_prompt_replaces_shared_agent_workspace(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "qwenpaw.agents.react_agent.build_system_prompt_from_working_dir",
+        lambda **_kwargs: "base prompt",
+    )
+    monkeypatch.setattr(
+        "qwenpaw.agents.react_agent.build_multimodal_hint",
+        lambda: "",
+    )
+    fake_agent = SimpleNamespace(
+        _request_context={
+            "sandbox_context": {
+                "task_id": "task_user_001",
+                "context_id": "ctx_user_001",
+                "signature": "signed",
+            },
+            "runtime_tool_gateway": {
+                "base_url": "http://127.0.0.1:8765",
+                "endpoint": "/runtime/v1/tool-calls",
+                "task_id": "task_user_001",
+            },
+        },
+        _agent_config=SimpleNamespace(heartbeat=None),
+        _workspace_dir=Path("/Users/shared/.qwenpaw/workspaces/default"),
+        _language="zh",
+        _env_context=(
+            "- User ID: u001\n"
+            "- Working directory: /Users/shared/.qwenpaw/workspaces/default\n"
+            "- Current date: 2026-08-04"
+        ),
+        memory_manager=None,
+    )
+    fake_agent._runtime_simple_text_fast_enabled = (
+        lambda: QwenPawAgent._runtime_simple_text_fast_enabled(fake_agent)
+    )
+
+    prompt = QwenPawAgent._build_sys_prompt(fake_agent)
+
+    assert "/Users/shared/.qwenpaw/workspaces/default" not in prompt
+    assert "Working directory: /workspace/scratch" in prompt
+    assert "current user's Runtime task workspace" in prompt
+    assert "use relative paths" in prompt
+    assert "Never use the shared QwenPaw Agent workspace" in prompt
+    assert "not automatically materialized" in prompt
 
 
 def test_simple_text_fast_mode_builds_minimal_prompt(monkeypatch) -> None:
