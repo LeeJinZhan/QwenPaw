@@ -22,6 +22,15 @@ class SandboxExecutorClientError(RuntimeError):
     pass
 
 
+def _runtime_service_token() -> str:
+    """Return the service credential accepted by Runtime internal APIs."""
+    return str(
+        os.environ.get("QWENPAW_SERVICE_TOKEN")
+        or os.environ.get("RUNTIME_QWENPAW_SERVICE_TOKEN")
+        or "",
+    ).strip()
+
+
 @dataclass(frozen=True)
 class RuntimeSandboxExecutorClient:
     base_url: str
@@ -45,11 +54,13 @@ class RuntimeSandboxExecutorClient:
         ):
             raise SandboxExecutorClientError("Runtime sandbox execution context is incomplete")
         base_url = str(gateway.get("base_url", "")).strip().rstrip("/")
-        token = str(gateway.get("token", "")).strip()
+        token = _runtime_service_token()
         tool_call_id = str(execution.get("tool_call_id", "")).strip()
         tool_name = str(execution.get("tool_name", "")).strip()
         tool_input = execution.get("tool_input", {})
-        if not base_url or not token or not tool_call_id or not tool_name or not isinstance(tool_input, dict):
+        if not token:
+            raise SandboxExecutorClientError("Runtime service token is unavailable")
+        if not base_url or not tool_call_id or not tool_name or not isinstance(tool_input, dict):
             raise SandboxExecutorClientError("Runtime sandbox execution context is incomplete")
         return cls(
             base_url=base_url,
@@ -109,8 +120,10 @@ class RuntimeSandboxAttachmentProcessorClient:
         if not isinstance(gateway, dict):
             raise SandboxExecutorClientError("Runtime sandbox attachment context is incomplete")
         base_url = str(gateway.get("base_url", "")).strip().rstrip("/")
-        token = str(gateway.get("token", "")).strip()
-        if not base_url or not token:
+        token = _runtime_service_token()
+        if not token:
+            raise SandboxExecutorClientError("Runtime service token is unavailable")
+        if not base_url:
             raise SandboxExecutorClientError("Runtime sandbox attachment context is incomplete")
         return cls(base_url=base_url, token=token, sandbox_context=dict(sandbox_context))
 

@@ -26,6 +26,7 @@ from qwenpaw.agents.tool_guard_mixin import (
     _tool_guard_t,
 )
 from qwenpaw.agents.runtime_tool_gateway import RuntimeToolGatewayError
+from qwenpaw.agents.sandbox_executor_client import SandboxExecutorClientError
 from qwenpaw.security.tool_guard.approval import ApprovalDecision
 from qwenpaw.security.tool_guard.execution_level import ToolExecutionLevel
 from qwenpaw.security.tool_guard.models import (
@@ -582,6 +583,32 @@ class TestRuntimeToolGatewayExecution:
         assert report_args[0] == "tool_001"
         assert report_args[1] == "completed"
         assert "sensitive_native_output" not in str(gateway.report_result.await_args)
+
+    @pytest.mark.asyncio
+    async def test_gateway_reports_failed_when_runtime_sandbox_execution_raises(self):
+        m = _make_mixin()
+        gateway = MagicMock()
+        gateway.preflight = AsyncMock(return_value={"tool_call_id": "tool_001"})
+        gateway.report_guard = AsyncMock(return_value={"status": "executing"})
+        gateway.report_result = AsyncMock(return_value={"status": "failed"})
+        m._runtime_tool_gateway_client = MagicMock(return_value=gateway)
+        m._call_parent_tool = AsyncMock(
+            side_effect=SandboxExecutorClientError("Runtime sandbox operation failed"),
+        )
+        tool_call = {
+            "id": "call_001",
+            "name": "execute_shell_command",
+            "input": {"command": "pwd"},
+        }
+
+        with pytest.raises(SandboxExecutorClientError):
+            await m._execute_runtime_gateway_tool_call(tool_call)
+
+        gateway.report_result.assert_awaited_once()
+        report_args = gateway.report_result.await_args.args
+        assert report_args[0] == "tool_001"
+        assert report_args[1] == "failed"
+        assert report_args[3] == "TOOL_EXECUTION_FAILED"
 
     @pytest.mark.asyncio
     async def test_runtime_gateway_cannot_bypass_guard_when_headless_flag_is_false(self):

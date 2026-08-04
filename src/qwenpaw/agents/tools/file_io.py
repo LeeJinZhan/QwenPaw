@@ -11,7 +11,6 @@ from agentscope.tool import ToolResponse
 
 from ..sandbox_executor_client import (
     RuntimeSandboxExecutorClient,
-    SandboxExecutorClientError,
 )
 
 from .utils import (
@@ -32,11 +31,8 @@ class SandboxPathViolation(ValueError):
 
 
 async def _runtime_file_operation(operation: str) -> "dict | None":
-    try:
-        client = RuntimeSandboxExecutorClient.from_current_context()
-        return None if client is None else await client.execute(operation)
-    except SandboxExecutorClientError:
-        return {"_error": "Runtime task sandbox operation failed."}
+    client = RuntimeSandboxExecutorClient.from_current_context()
+    return None if client is None else await client.execute(operation)
 
 
 def _runtime_file_response(result: dict, *, verb: str) -> ToolResponse:

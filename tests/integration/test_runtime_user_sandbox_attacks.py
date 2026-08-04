@@ -5,7 +5,10 @@ from unittest.mock import patch
 
 import pytest
 
-from qwenpaw.agents.sandbox_executor_client import RuntimeSandboxExecutorClient
+from qwenpaw.agents.sandbox_executor_client import (
+    RuntimeSandboxExecutorClient,
+    SandboxExecutorClientError,
+)
 from qwenpaw.agents.tools.file_io import read_file
 from qwenpaw.agents.tools.shell import execute_shell_command
 from qwenpaw.config.context import (
@@ -20,10 +23,13 @@ async def test_incomplete_runtime_context_fails_closed_without_host_shell() -> N
     sandbox_token = current_runtime_sandbox_context.set({"task_id": "task-a"})
     try:
         with patch("asyncio.create_subprocess_shell", side_effect=AssertionError("host shell bypass")):
-            response = await execute_shell_command("cat /etc/passwd")
+            with pytest.raises(
+                SandboxExecutorClientError,
+                match="Runtime sandbox execution context is incomplete",
+            ):
+                await execute_shell_command("cat /etc/passwd")
     finally:
         current_runtime_sandbox_context.reset(sandbox_token)
-    assert "Runtime task sandbox" in response.content[0]["text"]
 
 
 @pytest.mark.asyncio
@@ -32,15 +38,19 @@ async def test_incomplete_runtime_context_fails_closed_without_host_file_read(tm
     secret.write_text("must-not-read", encoding="utf-8")
     sandbox_token = current_runtime_sandbox_context.set({"task_id": "task-a"})
     try:
-        response = await read_file(str(secret))
+        with pytest.raises(
+            SandboxExecutorClientError,
+            match="Runtime sandbox execution context is incomplete",
+        ):
+            await read_file(str(secret))
     finally:
         current_runtime_sandbox_context.reset(sandbox_token)
-    assert "must-not-read" not in response.content[0]["text"]
-    assert "Runtime task sandbox" in response.content[0]["text"]
 
 
 @pytest.mark.asyncio
-async def test_parallel_contextvars_do_not_cross_tool_calls() -> None:
+async def test_parallel_contextvars_do_not_cross_tool_calls(monkeypatch) -> None:
+    monkeypatch.setenv("QWENPAW_SERVICE_TOKEN", "runtime-service-token")
+
     async def resolve(suffix: str) -> tuple[str, str]:
         sandbox_token = current_runtime_sandbox_context.set({"task_id": f"task-{suffix}"})
         gateway_token = current_runtime_tool_gateway.set(
@@ -64,5 +74,5 @@ async def test_parallel_contextvars_do_not_cross_tool_calls() -> None:
             current_runtime_sandbox_context.reset(sandbox_token)
 
     left, right = await asyncio.gather(resolve("a"), resolve("b"))
-    assert left == ("call-a", "token-a")
-    assert right == ("call-b", "token-b")
+    assert left == ("call-a", "runtime-service-token")
+    assert right == ("call-b", "runtime-service-token")

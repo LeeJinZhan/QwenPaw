@@ -4615,9 +4615,7 @@ async def browser_use(  # pylint: disable=R0911,R0912
                     content=[TextBlock(type="text", text=json.dumps(result, ensure_ascii=False))],
                 )
         except SandboxExecutorClientError:
-            return ToolResponse(
-                content=[TextBlock(type="text", text="Error: Runtime task sandbox browser operation failed.")],
-            )
+            raise
     # Resolve per-workspace state using context var set by react_agent.py
     _cwd = get_current_workspace_dir()
     _ws_id = _cwd.name if _cwd else "default"

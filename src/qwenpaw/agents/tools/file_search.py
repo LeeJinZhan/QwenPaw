@@ -15,7 +15,7 @@ from typing import Optional
 from agentscope.message import TextBlock
 from agentscope.tool import ToolResponse
 
-from ..sandbox_executor_client import RuntimeSandboxExecutorClient, SandboxExecutorClientError
+from ..sandbox_executor_client import RuntimeSandboxExecutorClient
 
 from .file_io import SandboxPathViolation, _resolve_file_path
 
@@ -132,13 +132,10 @@ def _make_response(text: str) -> ToolResponse:
 
 
 async def _runtime_search(operation: str) -> "ToolResponse | None":
-    try:
-        client = RuntimeSandboxExecutorClient.from_current_context()
-        if client is None:
-            return None
-        data = await client.execute(operation)
-    except SandboxExecutorClientError:
-        return _make_response("Error: Runtime task sandbox search failed.")
+    client = RuntimeSandboxExecutorClient.from_current_context()
+    if client is None:
+        return None
+    data = await client.execute(operation)
     items = data.get("items", [])
     if not isinstance(items, list) or not items:
         return _make_response("No matches found.")

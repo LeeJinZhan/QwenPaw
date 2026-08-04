@@ -481,9 +481,7 @@ async def execute_shell_command(
                     response_text += f"\n[stderr]\n{stderr}"
             return ToolResponse(content=[TextBlock(type="text", text=response_text)])
     except SandboxExecutorClientError:
-        return ToolResponse(
-            content=[TextBlock(type="text", text="Error: Runtime task sandbox command failed.")],
-        )
+        raise
 
     cmd = _collapse_embedded_newlines((command or "").strip())
 
