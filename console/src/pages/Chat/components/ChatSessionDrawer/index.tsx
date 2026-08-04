@@ -1,6 +1,12 @@
-import React, { useCallback, useMemo, useRef, useState } from "react";
+import React, {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { useNavigate } from "react-router-dom";
-import { Drawer, Spin, Tooltip } from "antd";
+import { Button, Drawer, Input, Modal, Space, Spin, Tooltip } from "antd";
 import { FixedSizeList, type ListChildComponentProps } from "react-window";
 import { IconButton } from "@agentscope-ai/design";
 import {
@@ -25,6 +31,11 @@ import {
   formatCreatedAt,
 } from "./useSessionListData";
 import styles from "./index.module.less";
+import {
+  isRuntimeManagedChat,
+  RUNTIME_CONNECTION_CHANGED_EVENT,
+  runtimeConsoleApi,
+} from "../../../../api/modules/runtimeConsole";
 
 /** Fixed height of each session item in pixels (matches CSS min-height) */
 const ITEM_HEIGHT = 77;
@@ -59,6 +70,7 @@ const SessionRow = React.memo(function SessionRow({
     ? getChannelLabel(channelKey, data.t)
     : undefined;
   const isEditing = data.editingSessionId === session.id;
+  const runtimeManaged = isRuntimeManagedChat(session);
   const isDisabled =
     !!data.switchingSessionId && session.id !== data.switchingSessionId;
 
@@ -78,9 +90,9 @@ const SessionRow = React.memo(function SessionRow({
         editing={isEditing}
         editValue={isEditing ? data.editValue : undefined}
         onClick={data.handleSessionClick}
-        onEdit={data.handleEditStart}
-        onDelete={data.handleDelete}
-        onPin={data.handlePinToggle}
+        onEdit={runtimeManaged ? undefined : data.handleEditStart}
+        onDelete={runtimeManaged ? undefined : data.handleDelete}
+        onPin={runtimeManaged ? undefined : data.handlePinToggle}
         onEditChange={data.handleEditChange}
         onEditSubmit={data.handleEditSubmit}
         onEditCancel={data.handleEditCancel}
@@ -108,6 +120,25 @@ const ChatSessionDrawer: React.FC<ChatSessionDrawerProps> = (props) => {
     useChatAnywhereSessionsState();
   const { codingMode } = useCodingMode();
   const { createSession } = useChatAnywhereSessions();
+  const [runtimeConnected, setRuntimeConnected] = useState(() =>
+    runtimeConsoleApi.isConnected(),
+  );
+  const [runtimeLoginOpen, setRuntimeLoginOpen] = useState(false);
+  const [runtimeUsername, setRuntimeUsername] = useState("");
+  const [runtimePassword, setRuntimePassword] = useState("");
+  const [runtimeLoginLoading, setRuntimeLoginLoading] = useState(false);
+  const [runtimeLoginError, setRuntimeLoginError] = useState("");
+
+  useEffect(() => {
+    const syncConnection = () =>
+      setRuntimeConnected(runtimeConsoleApi.isConnected());
+    window.addEventListener(RUNTIME_CONNECTION_CHANGED_EVENT, syncConnection);
+    return () =>
+      window.removeEventListener(
+        RUNTIME_CONNECTION_CHANGED_EVENT,
+        syncConnection,
+      );
+  }, []);
 
   /** Create a new session; close the drawer only when not pinned */
   const handleCreateSession = useCallback(async () => {
@@ -192,11 +223,42 @@ const ChatSessionDrawer: React.FC<ChatSessionDrawerProps> = (props) => {
     handleItemContextMenu,
     contextMenu: sharedContextMenu,
     contextMenuItems,
+    refreshSessions,
   } = useSessionListData(extSessions, setExtSessions, {
     active: props.open,
     currentSessionId,
     onSessionClick,
   });
+
+  const handleRuntimeLogin = useCallback(async () => {
+    if (!runtimeUsername.trim() || !runtimePassword) return;
+    setRuntimeLoginLoading(true);
+    setRuntimeLoginError("");
+    try {
+      await runtimeConsoleApi.login(runtimeUsername.trim(), runtimePassword);
+      setRuntimePassword("");
+      setRuntimeLoginOpen(false);
+      await refreshSessions();
+    } catch {
+      setRuntimeLoginError(
+        t(
+          "chat.runtime.loginFailed",
+          "Connection failed. Check your Runtime account and try again.",
+        ),
+      );
+    } finally {
+      setRuntimeLoginLoading(false);
+    }
+  }, [refreshSessions, runtimePassword, runtimeUsername, t]);
+
+  const handleRuntimeDisconnect = useCallback(async () => {
+    const currentWasRuntimeManaged =
+      (window as Window & { currentChannel?: string }).currentChannel ===
+      "bank-runtime";
+    runtimeConsoleApi.disconnect();
+    await refreshSessions();
+    if (currentWasRuntimeManaged) await createSession();
+  }, [createSession, refreshSessions]);
 
   /** Stable data object for FixedSizeList */
   const itemData = useMemo<SessionRowData>(
@@ -263,6 +325,22 @@ const ChatSessionDrawer: React.FC<ChatSessionDrawerProps> = (props) => {
           <span className={styles.headerTitle}>{t("chat.allChats")}</span>
         </div>
         <div className={styles.headerRight}>
+          {runtimeConnected ? (
+            <Button type="text" size="small" onClick={handleRuntimeDisconnect}>
+              {t("chat.runtime.disconnect", "Disconnect Runtime")}
+            </Button>
+          ) : (
+            <Button
+              type="text"
+              size="small"
+              onClick={() => {
+                setRuntimeLoginError("");
+                setRuntimeLoginOpen(true);
+              }}
+            >
+              {t("chat.runtime.connect", "Connect Runtime")}
+            </Button>
+          )}
           <Tooltip
             title={
               props.pinned
@@ -336,6 +414,51 @@ const ChatSessionDrawer: React.FC<ChatSessionDrawerProps> = (props) => {
         items={contextMenuItems}
         onClose={sharedContextMenu.hide}
       />
+
+      <Modal
+        open={runtimeLoginOpen}
+        title={t("chat.runtime.connectTitle", "Connect Bank Runtime")}
+        okText={t("chat.runtime.connect", "Connect Runtime")}
+        cancelText={t("common.cancel", "Cancel")}
+        confirmLoading={runtimeLoginLoading}
+        okButtonProps={{
+          disabled: !runtimeUsername.trim() || !runtimePassword,
+        }}
+        onOk={() => void handleRuntimeLogin()}
+        onCancel={() => {
+          if (runtimeLoginLoading) return;
+          setRuntimePassword("");
+          setRuntimeLoginError("");
+          setRuntimeLoginOpen(false);
+        }}
+      >
+        <p>
+          {t(
+            "chat.runtime.connectDescription",
+            "Sign in with your Runtime user account to view only your own managed conversation history.",
+          )}
+        </p>
+        <Space direction="vertical" size={12} style={{ width: "100%" }}>
+          <Input
+            autoComplete="username"
+            value={runtimeUsername}
+            placeholder={t("auth.username", "Username")}
+            onChange={(event) => setRuntimeUsername(event.target.value)}
+          />
+          <Input.Password
+            autoComplete="current-password"
+            value={runtimePassword}
+            placeholder={t("auth.password", "Password")}
+            onChange={(event) => setRuntimePassword(event.target.value)}
+            onPressEnter={() => void handleRuntimeLogin()}
+          />
+          {runtimeLoginError ? (
+            <div role="alert" style={{ color: "var(--ant-color-error)" }}>
+              {runtimeLoginError}
+            </div>
+          ) : null}
+        </Space>
+      </Modal>
     </Drawer>
   );
 };

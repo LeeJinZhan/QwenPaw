@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import type { ChatSpec } from "../../../api";
 import { filterConsoleVisibleChats } from ".";
+import { runtimeSummaryToChatSpec } from "../../../api/modules/runtimeConsole";
+import { getBackendId } from "../components/ChatSessionDrawer/useSessionListData";
 
 const chat = (id: string, channel: string): ChatSpec =>
   ({
@@ -23,5 +25,16 @@ describe("filterConsoleVisibleChats", () => {
       "console-chat",
       "dingtalk-chat",
     ]);
+  });
+});
+
+describe("Runtime-managed history mutations", () => {
+  it("never resolves a Runtime conversation to a native QwenPaw mutation id", () => {
+    const runtimeChat = runtimeSummaryToChatSpec({
+      conversation_id: "conv-runtime-001",
+      title: "Runtime history",
+    });
+
+    expect(getBackendId(runtimeChat)).toBeNull();
   });
 });

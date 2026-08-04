@@ -197,7 +197,7 @@ const ChatSessionItem: React.FC<ChatSessionItemProps> = (props) => {
         </div>
       </div>
       {/* Pin button - always visible when pinned, positioned independently */}
-      {!props.editing && (
+      {!props.editing && props.onPin && (
         <IconButton
           bordered={false}
           size="small"
@@ -208,20 +208,24 @@ const ChatSessionItem: React.FC<ChatSessionItemProps> = (props) => {
         />
       )}
       {/* Action buttons - edit and delete, only visible on hover */}
-      {!props.editing && (
+      {!props.editing && (props.onEdit || props.onDelete) && (
         <div className={styles.actions}>
-          <IconButton
-            bordered={false}
-            size="small"
-            icon={<SparkEditLine />}
-            onClick={handleEdit}
-          />
-          <IconButton
-            bordered={false}
-            size="small"
-            icon={<SparkDeleteLine />}
-            onClick={handleDelete}
-          />
+          {props.onEdit ? (
+            <IconButton
+              bordered={false}
+              size="small"
+              icon={<SparkEditLine />}
+              onClick={handleEdit}
+            />
+          ) : null}
+          {props.onDelete ? (
+            <IconButton
+              bordered={false}
+              size="small"
+              icon={<SparkDeleteLine />}
+              onClick={handleDelete}
+            />
+          ) : null}
         </div>
       )}
     </div>

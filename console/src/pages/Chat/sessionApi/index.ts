@@ -9,6 +9,13 @@ import api, {
   type ChatStatus,
   type Message,
 } from "../../../api";
+import {
+  isRuntimeManagedChat,
+  runtimeConsoleApi,
+  runtimeConversationIdFromSessionId,
+  runtimeConversationToChatHistory,
+  runtimeSummaryToChatSpec,
+} from "../../../api/modules/runtimeConsole";
 import { toDisplayUrl } from "../utils";
 import { extractTurnUsageFromOutputMessages } from "../turnUsage";
 
@@ -573,6 +580,9 @@ class SessionApi implements IAgentScopeRuntimeWebUISessionAPI {
     | ((sessionId: string | null | undefined, realId: string | null) => void)
     | null = null;
 
+  /** Called whenever the selected session's channel or metadata is applied. */
+  onSessionContextChanged: ((session: ExtendedSession) => void) | null = null;
+
   /**
    * The last chatId that onSessionSelected navigated to. ChatSessionInitializer
    * checks this to avoid re-triggering setCurrentSessionId for a URL change
@@ -653,6 +663,7 @@ class SessionApi implements IAgentScopeRuntimeWebUISessionAPI {
     window.currentSessionId = session.sessionId || "";
     window.currentUserId = session.userId || DEFAULT_USER_ID;
     window.currentChannel = session.channel || DEFAULT_CHANNEL;
+    this.onSessionContextChanged?.(session);
   }
 
   private getLocalSession(sessionId: string): IAgentScopeRuntimeWebUISession {
@@ -672,6 +683,7 @@ class SessionApi implements IAgentScopeRuntimeWebUISessionAPI {
     const s = this.sessionList.find((x) => x.id === sessionId) as
       | ExtendedSession
       | undefined;
+    if (isRuntimeManagedChat(s)) return null;
     return s?.realId ?? null;
   }
 
@@ -757,6 +769,16 @@ class SessionApi implements IAgentScopeRuntimeWebUISessionAPI {
     this.sessionListRequest = (async () => {
       try {
         const chats = filterConsoleVisibleChats(await api.listChats());
+        if (runtimeConsoleApi.isConnected()) {
+          try {
+            const runtimePage = await runtimeConsoleApi.listConversations();
+            chats.push(...runtimePage.items.map(runtimeSummaryToChatSpec));
+          } catch (error) {
+            // An optional Runtime connection must never make native QwenPaw
+            // testing/history unavailable.
+            console.warn("Unable to load Runtime-managed conversations", error);
+          }
+        }
         return this.applyChatsToSessionList(chats);
       } finally {
         this.sessionListRequest = null;
@@ -814,10 +836,27 @@ class SessionApi implements IAgentScopeRuntimeWebUISessionAPI {
     backendId: string,
     listEntry: ExtendedSession | undefined,
   ): Promise<ExtendedSession> {
-    const chatHistory = await api.getChat(backendId);
+    const runtimeManaged = isRuntimeManagedChat(listEntry);
+    const runtimeConversationId = runtimeManaged
+      ? String(
+          listEntry?.meta?.runtimeConversationId ||
+            runtimeConversationIdFromSessionId(backendId) ||
+            "",
+        )
+      : "";
+    if (runtimeManaged && !runtimeConversationId) {
+      throw new Error("Runtime conversation id is missing");
+    }
+    const chatHistory = runtimeManaged
+      ? runtimeConversationToChatHistory(
+          await runtimeConsoleApi.getConversation(runtimeConversationId),
+        )
+      : await api.getChat(backendId);
     const generating = isGenerating(chatHistory);
     const messages = convertMessages(chatHistory.messages || []);
-    this.patchLastUserMessage(messages, generating, backendId);
+    if (!runtimeManaged) {
+      this.patchLastUserMessage(messages, generating, backendId);
+    }
 
     const session: ExtendedSession = {
       id: displayId,
@@ -827,7 +866,7 @@ class SessionApi implements IAgentScopeRuntimeWebUISessionAPI {
       channel: listEntry?.channel || DEFAULT_CHANNEL,
       messages,
       meta: listEntry?.meta || {},
-      realId: listEntry?.realId,
+      realId: runtimeManaged ? undefined : listEntry?.realId,
       generating,
     };
     this.updateWindowVariables(session);
@@ -935,6 +974,8 @@ class SessionApi implements IAgentScopeRuntimeWebUISessionAPI {
     const existing = this.sessionList.find((s) => s.id === sessionId) as
       | ExtendedSession
       | undefined;
+
+    if (isRuntimeManagedChat(existing)) return [...this.sessionList];
 
     const deleteId =
       existing?.realId ?? (isLocalTimestamp(sessionId) ? null : sessionId);

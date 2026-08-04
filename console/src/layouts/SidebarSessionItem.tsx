@@ -1,6 +1,6 @@
 import React, { useCallback, useRef, useState } from "react";
 import { Dropdown, Input } from "antd";
-import type { InputRef } from "antd";
+import type { InputRef, MenuProps } from "antd";
 import { useTranslation } from "react-i18next";
 import {
   SparkMoreLine,
@@ -63,14 +63,17 @@ const SidebarSessionItem: React.FC<SidebarSessionItemProps> = (props) => {
     }
   }, [props.editValue, props.name, props.onEditSubmit, props.onEditCancel]);
 
-  const dropdownItems = [
-    {
+  const dropdownItems: MenuProps["items"] = [];
+  if (props.onEdit) {
+    dropdownItems.push({
       key: "rename",
       icon: <SparkEditLine size={14} />,
       label: t("chat.contextMenu.rename", "Rename"),
       onClick: handleStartEdit,
-    },
-    {
+    });
+  }
+  if (props.onPin) {
+    dropdownItems.push({
       key: "pin",
       icon: props.pinned ? (
         <SparkMarkFill size={14} />
@@ -81,16 +84,18 @@ const SidebarSessionItem: React.FC<SidebarSessionItemProps> = (props) => {
         ? t("chat.contextMenu.unpin", "Unpin")
         : t("chat.contextMenu.pin", "Pin"),
       onClick: () => props.onPin?.(props.sessionId),
-    },
-    { type: "divider" as const },
-    {
+    });
+  }
+  if (props.onDelete) {
+    if (dropdownItems.length > 0) dropdownItems.push({ type: "divider" });
+    dropdownItems.push({
       key: "delete",
       icon: <SparkDeleteLine size={14} />,
       label: t("chat.contextMenu.delete", "Delete"),
       danger: true,
       onClick: () => props.onDelete?.(props.sessionId),
-    },
-  ];
+    });
+  }
 
   const cls = [
     styles.item,
@@ -104,7 +109,7 @@ const SidebarSessionItem: React.FC<SidebarSessionItemProps> = (props) => {
   const itemContent = (
     <div className={cls} onClick={handleClick} role="button" tabIndex={0}>
       {/* Status slot — leftmost, fixed width */}
-      {!props.editing && (
+      {!props.editing && dropdownItems.length > 0 && (
         <span className={styles.statusSlot}>
           {inProgress && <span className={styles.runningDot} />}
           {isIdle && <span className={styles.idleDot} />}
@@ -161,10 +166,12 @@ const SidebarSessionItem: React.FC<SidebarSessionItemProps> = (props) => {
   );
 
   // Wrap with right-click context menu as well
-  return (
+  return dropdownItems.length > 0 ? (
     <Dropdown menu={{ items: dropdownItems }} trigger={["contextMenu"]}>
       {itemContent}
     </Dropdown>
+  ) : (
+    itemContent
   );
 };
 

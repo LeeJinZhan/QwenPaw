@@ -11,6 +11,7 @@ import {
 } from "../../../../components/ContextMenu";
 import { getChannelLabel } from "../../../Control/Channels/components";
 import { syncSessionsGlobal } from "../../../../stores/sessionListStore";
+import { isRuntimeManagedChat } from "../../../../api/modules/runtimeConsole";
 
 export { ContextMenu, useContextMenu, type ContextMenuItem, getChannelLabel };
 
@@ -29,7 +30,13 @@ export interface ExtendedChatSession extends IAgentScopeRuntimeWebUISession {
 }
 
 /** Resolve the real backend UUID from an extended session (id may be a local timestamp) */
-export const getBackendId = (session: ExtendedChatSession): string | null => {
+export const getBackendId = (session: {
+  id: string;
+  realId?: string;
+  channel?: string;
+  meta?: Record<string, unknown>;
+}): string | null => {
+  if (isRuntimeManagedChat(session)) return null;
   if (session.realId) return session.realId;
   const id = session.id;
   if (!/^\d+$/.test(id)) return id;
@@ -193,6 +200,7 @@ export function useSessionListData(
   const handleDelete = useCallback(
     async (sessionId: string) => {
       const session = sessions.find((s) => s.id === sessionId);
+      if (isRuntimeManagedChat(session)) return;
       const backendId = session ? getBackendId(session) : null;
       if (backendId) await chatApi.deleteChat(backendId);
       await refreshSessions();
@@ -202,10 +210,12 @@ export function useSessionListData(
 
   const handleEditStart = useCallback(
     (sessionId: string, currentName: string) => {
+      const session = sessions.find((item) => item.id === sessionId);
+      if (isRuntimeManagedChat(session)) return;
       setEditingSessionId(sessionId);
       setEditValue(currentName);
     },
-    [],
+    [sessions],
   );
 
   const handleEditChange = useCallback((value: string) => {
@@ -215,6 +225,11 @@ export function useSessionListData(
   const handleEditSubmit = useCallback(async () => {
     if (!editingSessionId) return;
     const session = sessions.find((s) => s.id === editingSessionId);
+    if (isRuntimeManagedChat(session)) {
+      setEditingSessionId(null);
+      setEditValue("");
+      return;
+    }
     const backendId = session ? getBackendId(session) : null;
     const newName = editValue.trim();
     if (backendId && newName) {
@@ -233,6 +248,7 @@ export function useSessionListData(
   const handlePinToggle = useCallback(
     async (sessionId: string) => {
       const session = sessions.find((s) => s.id === sessionId);
+      if (isRuntimeManagedChat(session)) return;
       const backendId = session ? getBackendId(session) : null;
       if (backendId && session) {
         try {
@@ -257,6 +273,15 @@ export function useSessionListData(
   const contextMenuItems: ContextMenuItem[] = useMemo(() => {
     if (!contextMenuSessionId) return [];
     const session = sessions.find((s) => s.id === contextMenuSessionId);
+    if (isRuntimeManagedChat(session)) {
+      return [
+        {
+          key: "open",
+          label: t("chat.contextMenu.open", "Open"),
+          onClick: () => handleSessionClick(contextMenuSessionId),
+        },
+      ];
+    }
     return [
       {
         key: "open",

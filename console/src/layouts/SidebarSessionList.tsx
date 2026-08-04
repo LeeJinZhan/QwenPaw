@@ -16,6 +16,7 @@ import {
 } from "../stores/sessionListStore";
 import SidebarSessionItem from "./SidebarSessionItem";
 import styles from "./sidebarSessionList.module.less";
+import { isRuntimeManagedChat } from "../api/modules/runtimeConsole";
 
 // ── Date grouping ─────────────────────────────────────────────────────────
 
@@ -183,6 +184,7 @@ export default function SidebarSessionList({
       ? getChannelLabel(channelKey, t)
       : undefined;
     const isEditing = editingSessionId === session.id;
+    const runtimeManaged = isRuntimeManagedChat(session);
     const isDisabled =
       !!switchingSessionId && session.id !== switchingSessionId;
 
@@ -201,9 +203,9 @@ export default function SidebarSessionList({
         editing={isEditing}
         editValue={isEditing ? editValue : undefined}
         onClick={handleSessionClick}
-        onEdit={handleEditStart}
-        onDelete={handleDelete}
-        onPin={handlePinToggle}
+        onEdit={runtimeManaged ? undefined : handleEditStart}
+        onDelete={runtimeManaged ? undefined : handleDelete}
+        onPin={runtimeManaged ? undefined : handlePinToggle}
         onEditChange={handleEditChange}
         onEditSubmit={handleEditSubmit}
         onEditCancel={handleEditCancel}

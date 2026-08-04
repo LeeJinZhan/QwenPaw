@@ -49,6 +49,10 @@ import {
 import { ChatScalar, ChatList } from "../../plugins/registry/slotKeys";
 import { HostRequestCard, HostResponseCard } from "./HostBubbles";
 import { withGenericFallback } from "../../components/Chat/ToolCards/adapters/v1Adapter";
+import {
+  isRuntimeManagedChat,
+  runtimeConversationIdFromSessionId,
+} from "../../api/modules/runtimeConsole";
 
 interface ApprovalMessageData {
   requestId: string;
@@ -1068,6 +1072,9 @@ export default function ChatPage() {
     () => getSessionIdFromPath(location.pathname),
     [location.pathname],
   );
+  const runtimeManagedRoute = Boolean(
+    chatId && runtimeConversationIdFromSessionId(chatId),
+  );
   const [showModelPrompt, setShowModelPrompt] = useState(false);
   const [rateLimitAlternatives, setRateLimitAlternatives] = useState<
     Array<{
@@ -1461,6 +1468,9 @@ export default function ChatPage() {
   const chatIdRef = useRef(chatId);
   const navigateRef = useRef(navigate);
   const chatRef = useRef<IAgentScopeRuntimeWebUIRef>(null);
+  const chatContainerRef = useRef<HTMLDivElement>(null);
+  const [runtimeManagedSession, setRuntimeManagedSession] = useState(false);
+  const runtimeSessionReadOnly = runtimeManagedRoute || runtimeManagedSession;
   const pendingClearHistoryRef = useRef(false);
   const whisperSpeechRef = useRef<WhisperSpeechButtonRef>(null);
   const [whisperEnabled, setWhisperEnabled] = useState(false);
@@ -1493,6 +1503,37 @@ export default function ChatPage() {
   useMessageHistoryNavigation(chatRef, isChatActive, isComposingRef);
   useChatInputDraft(isChatActive, selectedAgent);
   useChatPasteFromEditor();
+
+  useEffect(() => {
+    const applyReadOnlyState = () => {
+      const senderInput = chatContainerRef.current?.querySelector(
+        "textarea.qwenpaw-sender-input",
+      ) as HTMLTextAreaElement | null;
+      if (runtimeSessionReadOnly && senderInput && !senderInput.disabled) {
+        chatRef.current?.input.setDisabled(true);
+      } else if (!runtimeSessionReadOnly) {
+        chatRef.current?.input.setDisabled(false);
+      }
+    };
+    applyReadOnlyState();
+    const frameId = window.requestAnimationFrame(applyReadOnlyState);
+    const container = chatContainerRef.current;
+    const observer = runtimeSessionReadOnly
+      ? new MutationObserver(applyReadOnlyState)
+      : null;
+    if (container && observer) {
+      observer.observe(container, {
+        attributes: true,
+        attributeFilter: ["disabled"],
+        childList: true,
+        subtree: true,
+      });
+    }
+    return () => {
+      window.cancelAnimationFrame(frameId);
+      observer?.disconnect();
+    };
+  }, [chatId, refreshKey, runtimeSessionReadOnly]);
 
   // ── Message Queue ───────────────────────────────────────────────────────
 
@@ -1886,6 +1927,20 @@ export default function ChatPage() {
       }
     };
 
+    sessionApi.onSessionContextChanged = (session) => {
+      const readOnly = isRuntimeManagedChat(session);
+      setRuntimeManagedSession(readOnly);
+      // The SDK resets its per-session input state when the selected session
+      // changes. Re-apply the Runtime policy after that session has loaded.
+      window.requestAnimationFrame(() => {
+        chatRef.current?.input.setDisabled(readOnly);
+      });
+    };
+    // The callback above runs after the async session detail request. Apply
+    // the channel hint immediately as well so a deep-linked Runtime history
+    // never has a brief writable window while its detail is still loading.
+    setRuntimeManagedSession(window.currentChannel === "bank-runtime");
+
     sessionApi.onSessionCreated = () => {
       if (!isChatActiveRef.current) return;
       // The user is starting a brand new conversation. Drop any leftover items
@@ -1906,6 +1961,7 @@ export default function ChatPage() {
       sessionApi.onSessionIdResolved = null;
       sessionApi.onSessionRemoved = null;
       sessionApi.onSessionSelected = null;
+      sessionApi.onSessionContextChanged = null;
       sessionApi.onSessionCreated = null;
     };
   }, []);
@@ -2154,6 +2210,9 @@ export default function ChatPage() {
         description: "",
       }));
     const handleBeforeSubmit = async () => {
+      if (runtimeSessionReadOnly || window.currentChannel === "bank-runtime") {
+        return false;
+      }
       if (isComposingRef.current) return false;
       // Single-tab ownership: non-owner tabs are queue-only. Re-route every
       // submit (Enter / send button / programmatic) to the shared queue and
@@ -2426,26 +2485,53 @@ export default function ChatPage() {
         ...(i18nConfig as any)?.sender,
         beforeSubmit: handleBeforeSubmit,
         allowSpeech: whisperChecked && !whisperEnabled,
-        beforeUI:
-          !isOwner || messageQueue.length > 0 ? (
-            <>
-              {null}
-              {messageQueue.length > 0 ? (
-                <MessageQueuePanel
-                  items={messageQueue}
-                  runState={runState}
-                  onRemove={handleQueueRemove}
-                  onEdit={handleQueueEdit}
-                  onReorder={handleQueueReorder}
-                  onInterruptAndSend={handleQueueInterruptAndSend}
-                  onClear={handleQueueClear}
-                  onPauseResume={handleQueuePauseResume}
-                  onRetry={handleQueueRetry}
-                  onSkip={handleQueueSkip}
-                />
-              ) : null}
-            </>
-          ) : undefined,
+        beforeUI: runtimeSessionReadOnly ? (
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              gap: 12,
+              padding: "8px 12px",
+              borderRadius: 8,
+              background: "var(--ant-color-fill-tertiary)",
+            }}
+          >
+            <span>
+              {t(
+                "chat.runtime.readOnlyNotice",
+                "This conversation is managed by Bank Runtime and is available here for review only.",
+              )}
+            </span>
+            <Button
+              size="small"
+              type="primary"
+              onClick={() =>
+                window.dispatchEvent(new Event("qwenpaw:sidebar-new-chat"))
+              }
+            >
+              {t("chat.runtime.newTestChat", "New test chat")}
+            </Button>
+          </div>
+        ) : !isOwner || messageQueue.length > 0 ? (
+          <>
+            {null}
+            {messageQueue.length > 0 ? (
+              <MessageQueuePanel
+                items={messageQueue}
+                runState={runState}
+                onRemove={handleQueueRemove}
+                onEdit={handleQueueEdit}
+                onReorder={handleQueueReorder}
+                onInterruptAndSend={handleQueueInterruptAndSend}
+                onClear={handleQueueClear}
+                onPauseResume={handleQueuePauseResume}
+                onRetry={handleQueueRetry}
+                onSkip={handleQueueSkip}
+              />
+            ) : null}
+          </>
+        ) : undefined,
         prefix:
           whisperEnabled || pluginSenderPrefix.length > 0 ? (
             <>
@@ -2485,7 +2571,12 @@ export default function ChatPage() {
           },
           customRequest: handleFileUpload,
         },
-        placeholder: extPlaceholder ?? t("chat.inputPlaceholder"),
+        placeholder: runtimeSessionReadOnly
+          ? t(
+              "chat.runtime.readOnlyPlaceholder",
+              "Runtime-managed history is read-only",
+            )
+          : extPlaceholder ?? t("chat.inputPlaceholder"),
         ...(extDisclaimer !== undefined ? { disclaimer: extDisclaimer } : {}),
         suggestions: [...baseSuggestions, ...pluginSuggestions],
       },
@@ -2677,6 +2768,7 @@ export default function ChatPage() {
     handleQueueSkip,
     runState,
     isOwner,
+    runtimeSessionReadOnly,
   ]);
 
   return (
@@ -2689,6 +2781,7 @@ export default function ChatPage() {
       }}
     >
       <div
+        ref={chatContainerRef}
         className={
           isWideMode
             ? `${styles.chatMessagesArea} ${styles.wideMode}`
