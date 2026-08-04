@@ -18,6 +18,7 @@ import { extractTurnUsageFromOutputMessages } from "../turnUsage";
 
 const DEFAULT_USER_ID = "default";
 const DEFAULT_CHANNEL = "console";
+const RUNTIME_MANAGED_CHANNEL = "bank-runtime";
 const DEFAULT_SESSION_NAME = "New Chat";
 const ROLE_TOOL = "tool";
 const ROLE_USER = "user";
@@ -290,6 +291,16 @@ const chatSpecToSession = (chat: ChatSpec): ExtendedSession =>
     updatedAt: chat.updated_at ?? null,
     pinned: chat.pinned ?? false,
   }) as ExtendedSession;
+
+/**
+ * Runtime-managed conversations have their own authoritative history and
+ * trusted request context.  Showing them in the native console lets the
+ * console accidentally reuse their channel/session identity for an unsigned
+ * test message, which Runtime must reject.  Keep ordinary QwenPaw channels
+ * visible while excluding only the externally managed Runtime channel.
+ */
+export const filterConsoleVisibleChats = (chats: ChatSpec[]): ChatSpec[] =>
+  chats.filter((chat) => chat.channel !== RUNTIME_MANAGED_CHANNEL);
 
 /** Returns true when id is a pure numeric local timestamp (not a backend UUID). */
 const isLocalTimestamp = (id: string): boolean => /^\d+$/.test(id);
@@ -745,7 +756,7 @@ class SessionApi implements IAgentScopeRuntimeWebUISessionAPI {
 
     this.sessionListRequest = (async () => {
       try {
-        const chats = await api.listChats();
+        const chats = filterConsoleVisibleChats(await api.listChats());
         return this.applyChatsToSessionList(chats);
       } finally {
         this.sessionListRequest = null;
