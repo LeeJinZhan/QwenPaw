@@ -756,9 +756,12 @@ def test_runtime_gateway_prompt_replaces_shared_agent_workspace(monkeypatch) -> 
     prompt = QwenPawAgent._build_sys_prompt(fake_agent)
 
     assert "/Users/shared/.qwenpaw/workspaces/default" not in prompt
-    assert "Working directory: /workspace/scratch" in prompt
+    assert "Working directory: current user's Runtime task scratch directory" in prompt
     assert "current user's Runtime task workspace" in prompt
     assert "use relative paths" in prompt
+    assert "do not cd to /workspace" in prompt
+    assert "output/" in prompt
+    assert "/workspace/scratch" not in prompt
     assert "Never use the shared QwenPaw Agent workspace" in prompt
     assert "not automatically materialized" in prompt
 

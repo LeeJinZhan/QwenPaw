@@ -219,6 +219,12 @@ def _build_runtime_attachments_context(
     lines = [
         "- The working directory is the current user's request-local Runtime "
         "task workspace. Use relative paths only.",
+        "- Shell commands already start in the task scratch directory; do not "
+        "cd to /workspace or use container-only absolute paths.",
+        "- Put every shell-created deliverable under the relative `output/` "
+        "directory so Runtime can publish it to the user's workspace. Files "
+        "written with `write_file` are already returned as `output/...` paths "
+        "that shell commands can use directly.",
         "- Never use the shared QwenPaw Agent workspace or host absolute "
         "paths for Runtime-managed user tasks.",
         "- Files from previous turns or the assistant workspace are not "
@@ -257,8 +263,9 @@ def _runtime_scoped_env_context(
     if not isinstance(sandbox_context, dict):
         return str(env_context or "")
     replacement = (
-        "- Working directory: /workspace/scratch "
-        "(current user's Runtime task workspace; use relative paths)"
+        "- Working directory: current user's Runtime task scratch directory "
+        "(current user's Runtime task workspace; already selected; use relative "
+        "paths and do not cd to /workspace)"
     )
     lines = str(env_context or "").splitlines()
     rendered: list[str] = []
