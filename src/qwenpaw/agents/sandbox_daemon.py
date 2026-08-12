@@ -3,17 +3,12 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import asdict
 import json
 import os
-import re
-import shutil
 from pathlib import Path
 from typing import Any
 
 from .tools.browser_control import browser_use
-from .attachments.runtime_attachment_processor import RuntimeAttachmentProcessor
-from .tools.runtime_sandbox_oss import PreparedSandboxFile
 
 
 SOCKET_PATH = Path(os.environ.get("QWENPAW_SANDBOX_SOCKET", "/tmp/qwenpaw-sandbox.sock"))
@@ -48,8 +43,6 @@ async def _handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) ->
                 if isinstance(block, dict) and block.get("text") is not None
             )
             data: dict[str, Any] = {"content": blocks, "text": text}
-        elif operation == "attachment.process":
-            data = _process_attachments(arguments)
         else:
             raise ValueError("operation_not_allowed")
         payload = {"ok": True, "data": data}
@@ -63,42 +56,6 @@ async def _handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) ->
     await writer.drain()
     writer.close()
     await writer.wait_closed()
-
-
-def _process_attachments(arguments: dict[str, Any]) -> dict[str, Any]:
-    raw_items = arguments.get("attachments", [])
-    if not isinstance(raw_items, list) or len(raw_items) > 20:
-        raise ValueError("invalid_attachments")
-    input_root = Path("/workspace/input").resolve()
-    scratch_root = Path("/workspace/scratch/attachments").resolve()
-    prepared_files: list[PreparedSandboxFile] = []
-    for item in raw_items:
-        if not isinstance(item, dict):
-            raise ValueError("invalid_attachment")
-        file_id = str(item.get("file_id", "")).strip()
-        relative_path = str(item.get("relative_path", "")).replace("\\", "/").lstrip("/")
-        original_name = Path(str(item.get("original_name", "attachment"))).name
-        if not re.fullmatch(r"[A-Za-z0-9_.:-]{1,128}", file_id):
-            raise ValueError("invalid_attachment")
-        source = (input_root / relative_path).resolve(strict=True)
-        if input_root not in source.parents or not source.is_file() or source.is_symlink():
-            raise ValueError("attachment_path_rejected")
-        destination_dir = scratch_root / file_id
-        destination_dir.mkdir(parents=True, exist_ok=True)
-        destination = destination_dir / original_name
-        shutil.copyfile(source, destination)
-        prepared_files.append(
-            PreparedSandboxFile(
-                file_id=file_id,
-                local_path=destination,
-                content_type=str(item.get("content_type", "application/octet-stream")),
-                size_bytes=int(item.get("size_bytes", source.stat().st_size)),
-                original_name=original_name,
-                expires_at=str(item.get("expires_at", "")),
-            ),
-        )
-    return asdict(RuntimeAttachmentProcessor().process(prepared_files))
-
 
 async def serve() -> None:
     SOCKET_PATH.parent.mkdir(parents=True, exist_ok=True)

@@ -250,6 +250,16 @@ current_runtime_discovered_file_ids: ContextVar[frozenset[str]] = ContextVar(
     default=frozenset(),
 )
 
+current_runtime_discovered_files: ContextVar[dict[str, dict[str, Any]]] = ContextVar(
+    "current_runtime_discovered_files",
+    default={},
+)
+
+current_runtime_selected_file_ids: ContextVar[frozenset[str]] = ContextVar(
+    "current_runtime_selected_file_ids",
+    default=frozenset(),
+)
+
 
 current_runtime_tool_execution: ContextVar[dict[str, Any] | None] = ContextVar(
     "current_runtime_tool_execution",
@@ -293,6 +303,71 @@ def reset_current_runtime_discovered_file_ids(token: Token) -> None:
     current_runtime_discovered_file_ids.reset(token)
 
 
+def get_current_runtime_discovered_files() -> dict[str, dict[str, Any]]:
+    """Return safe metadata registered by file search in this request."""
+    return {
+        file_id: dict(metadata)
+        for file_id, metadata in current_runtime_discovered_files.get().items()
+    }
+
+
+def set_current_runtime_discovered_files(
+    files: list[dict[str, Any]] | tuple[dict[str, Any], ...],
+) -> Token:
+    """Replace request-local search results and return a reset token."""
+    normalized: dict[str, dict[str, Any]] = {}
+    for item in files:
+        if not isinstance(item, dict):
+            continue
+        file_id = str(item.get("file_id") or "").strip()
+        if not file_id:
+            continue
+        normalized[file_id] = dict(item)
+    return current_runtime_discovered_files.set(normalized)
+
+
+def merge_current_runtime_discovered_files(
+    files: list[dict[str, Any]],
+) -> None:
+    """Merge safe search results into the current request registry."""
+    merged = get_current_runtime_discovered_files()
+    for item in files:
+        if not isinstance(item, dict):
+            continue
+        file_id = str(item.get("file_id") or "").strip()
+        if file_id:
+            merged[file_id] = dict(item)
+    current_runtime_discovered_files.set(merged)
+    current_runtime_discovered_file_ids.set(frozenset(merged))
+
+
+def reset_current_runtime_discovered_files(token: Token) -> None:
+    """Restore safe search metadata to its pre-request value."""
+    current_runtime_discovered_files.reset(token)
+
+
+def get_current_runtime_selected_file_ids() -> frozenset[str]:
+    """Return files already selected autonomously in this request."""
+    return current_runtime_selected_file_ids.get()
+
+
+def set_current_runtime_selected_file_ids(
+    file_ids: frozenset[str] | set[str] | list[str] | tuple[str, ...],
+) -> Token:
+    """Replace autonomously selected file IDs and return a reset token."""
+    normalized = frozenset(
+        str(file_id).strip()
+        for file_id in file_ids
+        if str(file_id).strip()
+    )
+    return current_runtime_selected_file_ids.set(normalized)
+
+
+def reset_current_runtime_selected_file_ids(token: Token) -> None:
+    """Restore selected file IDs to the pre-request value."""
+    current_runtime_selected_file_ids.reset(token)
+
+
 _REQUEST_LOCAL_CONTEXT_VARS: tuple[ContextVar[Any], ...] = (
     current_workspace_dir,
     current_file_sandbox_root,
@@ -305,6 +380,8 @@ _REQUEST_LOCAL_CONTEXT_VARS: tuple[ContextVar[Any], ...] = (
     current_runtime_attachments_manifest,
     current_runtime_sandbox_context,
     current_runtime_discovered_file_ids,
+    current_runtime_discovered_files,
+    current_runtime_selected_file_ids,
     current_runtime_tool_execution,
 )
 

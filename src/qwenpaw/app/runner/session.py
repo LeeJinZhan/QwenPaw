@@ -14,7 +14,7 @@ import logging
 import shutil
 import tempfile
 
-from typing import Union, Sequence
+from typing import Any, Protocol, Union, Sequence
 
 import aiofiles
 from agentscope.session import SessionBase
@@ -23,6 +23,81 @@ from ...exceptions import AgentStateError
 from ...utils.json_utils import safe_json_loads as _safe_json_loads
 
 logger = logging.getLogger(__name__)
+
+_DROP_RUNTIME_ATTACHMENT = object()
+
+
+def _strip_runtime_ephemeral_attachments(value: Any) -> Any:
+    """Return session state without task-local Runtime attachment blocks.
+
+    Runtime attachment content parts point at files in a task sandbox. Those
+    paths expire with the task and must never become durable QwenPaw session
+    state. The surrounding user text and assistant answer remain available as
+    normal conversational context.
+    """
+    if isinstance(value, dict):
+        if value.get("_runtime_sandbox_attachment") is True:
+            return _DROP_RUNTIME_ATTACHMENT
+        sanitized: dict[Any, Any] = {}
+        for key, item in value.items():
+            sanitized_item = _strip_runtime_ephemeral_attachments(item)
+            if sanitized_item is not _DROP_RUNTIME_ATTACHMENT:
+                sanitized[key] = sanitized_item
+        return sanitized
+    if isinstance(value, list):
+        sanitized_items = []
+        for item in value:
+            sanitized_item = _strip_runtime_ephemeral_attachments(item)
+            if sanitized_item is not _DROP_RUNTIME_ATTACHMENT:
+                sanitized_items.append(sanitized_item)
+        return sanitized_items
+    if isinstance(value, tuple):
+        return tuple(
+            sanitized_item
+            for item in value
+            if (
+                sanitized_item := _strip_runtime_ephemeral_attachments(item)
+            )
+            is not _DROP_RUNTIME_ATTACHMENT
+        )
+    return value
+
+
+class SessionRepository(Protocol):
+    """Persistence boundary used by the runner for short-lived sessions."""
+
+    def execution_lock(
+        self,
+        *,
+        session_id: str,
+        user_id: str = "",
+        channel: str = "",
+    ) -> asyncio.Lock: ...
+
+    async def session_exists(
+        self,
+        *,
+        session_id: str,
+        user_id: str = "",
+        channel: str = "",
+    ) -> bool: ...
+
+    async def save_session_state(
+        self,
+        session_id: str,
+        user_id: str = "",
+        channel: str = "",
+        **state_modules_mapping: Any,
+    ) -> None: ...
+
+    async def load_session_state(
+        self,
+        session_id: str,
+        user_id: str = "",
+        channel: str = "",
+        allow_not_exist: bool = True,
+        **state_modules_mapping: Any,
+    ) -> None: ...
 
 
 def _atomic_write_json(path: str, payload: dict) -> None:
@@ -208,6 +283,7 @@ class SafeJSONSession(SessionBase):
         """
         self.save_dir = save_dir
         self._write_locks: dict[str, asyncio.Lock] = {}
+        self._execution_locks: dict[str, asyncio.Lock] = {}
 
     def _get_write_lock(self, path: str) -> asyncio.Lock:
         """Per-path lock to serialize read-modify-write cycles."""
@@ -216,6 +292,40 @@ class SafeJSONSession(SessionBase):
             lock = asyncio.Lock()
             self._write_locks[path] = lock
         return lock
+
+    def execution_lock(
+        self,
+        *,
+        session_id: str,
+        user_id: str = "",
+        channel: str = "",
+    ) -> asyncio.Lock:
+        """Return the lock serializing execution for one isolated session."""
+        path = self._get_save_path(
+            session_id,
+            user_id=user_id,
+            channel=channel,
+        )
+        lock = self._execution_locks.get(path)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._execution_locks[path] = lock
+        return lock
+
+    async def session_exists(
+        self,
+        *,
+        session_id: str,
+        user_id: str = "",
+        channel: str = "",
+    ) -> bool:
+        """Return whether the isolated session already has persisted state."""
+        path = self._get_save_path(
+            session_id,
+            user_id=user_id,
+            channel=channel,
+        )
+        return await asyncio.to_thread(os.path.exists, path)
 
     def _get_save_path(
         self,
@@ -294,7 +404,9 @@ class SafeJSONSession(SessionBase):
     ) -> None:
         """Save state modules to a JSON file using async I/O."""
         state_dicts = {
-            name: state_module.state_dict()
+            name: _strip_runtime_ephemeral_attachments(
+                state_module.state_dict(),
+            )
             for name, state_module in state_modules_mapping.items()
         }
         session_save_path = self._get_save_path(
@@ -336,7 +448,8 @@ class SafeJSONSession(SessionBase):
                 errors="surrogatepass",
             ) as f:
                 content = await f.read()
-                states = _safe_json_loads(content, session_save_path)
+            states = _safe_json_loads(content, session_save_path)
+            states = _strip_runtime_ephemeral_attachments(states)
 
             for name, state_module in state_modules_mapping.items():
                 if name in states:

@@ -5,7 +5,6 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from qwenpaw.agents.sandbox_executor_client import (
-    RuntimeSandboxAttachmentProcessorClient,
     RuntimeSandboxExecutorClient,
     SandboxExecutorClientError,
 )
@@ -49,22 +48,29 @@ def test_runtime_executor_uses_service_token_instead_of_gateway_token(monkeypatc
     assert client.token == "runtime-service-token"
 
 
-def test_runtime_attachment_processor_uses_service_token(monkeypatch) -> None:
-    monkeypatch.setenv("RUNTIME_QWENPAW_SERVICE_TOKEN", "runtime-service-token")
-    sandbox_token = current_runtime_sandbox_context.set(
-        {"task_id": "task-a", "isolation_level": "container"},
-    )
+def test_runtime_executor_prefers_worker_reachable_runtime_url(monkeypatch) -> None:
+    monkeypatch.setenv("QWENPAW_SERVICE_TOKEN", "runtime-service-token")
+    monkeypatch.setenv("QWENPAW_RUNTIME_BASE_URL", "http://runtime-api:8765/")
+    sandbox_token = current_runtime_sandbox_context.set({"task_id": "task-a"})
     gateway_token = current_runtime_tool_gateway.set(
-        {"base_url": "http://runtime", "token": "worker-session-token"},
+        {"base_url": "http://127.0.0.1:8765", "token": "worker-session-token"},
+    )
+    execution_token = current_runtime_tool_execution.set(
+        {
+            "tool_call_id": "call-a",
+            "tool_name": "execute_shell_command",
+            "tool_input": {"command": "pwd"},
+        },
     )
     try:
-        client = RuntimeSandboxAttachmentProcessorClient.from_current_context()
+        client = RuntimeSandboxExecutorClient.from_current_context()
     finally:
+        current_runtime_tool_execution.reset(execution_token)
         current_runtime_tool_gateway.reset(gateway_token)
         current_runtime_sandbox_context.reset(sandbox_token)
 
     assert client is not None
-    assert client.token == "runtime-service-token"
+    assert client.base_url == "http://runtime-api:8765"
 
 
 def test_runtime_executor_rejects_missing_service_token(monkeypatch) -> None:

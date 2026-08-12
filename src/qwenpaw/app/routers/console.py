@@ -33,6 +33,12 @@ class MarkInboxReadRequest(BaseModel):
 
 MAX_DEBUG_LOG_LINES = 1000
 RUNTIME_CHANNEL_META_KEYS = (
+    "session_mode",
+    "qwenpaw_session_state",
+    "session_contract_version",
+    "session_bootstrap",
+    "session_operation",
+    "regenerate_from_task_id",
     "conversation_id",
     "runtime_task_id",
     "trace_id",
@@ -95,24 +101,39 @@ def _extract_session_and_payload(request_data: Union[AgentRequest, dict]):
 
     run_key must be ChatSpec.id (chat_id) so it matches list_chats/get_chat.
     """
+    def _message_role(message: Any) -> str:
+        role = (
+            getattr(message, "role", "")
+            if not isinstance(message, dict)
+            else message.get("role", "")
+        )
+        return str(getattr(role, "value", role) or "").strip().lower()
+
+    def _message_content(message: Any) -> list[Any]:
+        content = (
+            getattr(message, "content", None)
+            if not isinstance(message, dict)
+            else message.get("content")
+        )
+        return list(content or [])
+
+    def _current_user_content(input_data: Any) -> list[Any]:
+        messages = list(input_data or [])
+        for message in reversed(messages):
+            if _message_role(message) == "user":
+                return _message_content(message)
+        return _message_content(messages[-1]) if messages else []
+
     if isinstance(request_data, AgentRequest):
         channel_id = getattr(request_data, "channel", None) or "console"
         sender_id = request_data.user_id or "default"
         session_id = request_data.session_id or "default"
-        content_parts = (
-            list(request_data.input[0].content) if request_data.input else []
-        )
+        content_parts = _current_user_content(request_data.input)
     else:
         channel_id = request_data.get("channel", "console")
         sender_id = request_data.get("user_id", "default")
         session_id = request_data.get("session_id", "default")
-        input_data = request_data.get("input", [])
-        content_parts = []
-        for content_part in input_data:
-            if hasattr(content_part, "content"):
-                content_parts.extend(list(content_part.content or []))
-            elif isinstance(content_part, dict) and "content" in content_part:
-                content_parts.extend(content_part["content"] or [])
+        content_parts = _current_user_content(request_data.get("input", []))
 
     channel_meta = {
         "session_id": session_id,

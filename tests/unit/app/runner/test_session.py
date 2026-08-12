@@ -119,6 +119,117 @@ async def test_save_and_load_round_trip(session, tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_save_strips_runtime_ephemeral_attachment_blocks(
+    session,
+    tmp_path: Path,
+):
+    temporary_url = (
+        "file:///private/tmp/qwenpaw-runtime-task-files/task-1/image.png"
+    )
+    state = _StateModule(
+        {
+            "memory": {
+                "content": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": "请识别这张图片"},
+                            {
+                                "type": "image",
+                                "source": {
+                                    "type": "url",
+                                    "url": temporary_url,
+                                },
+                                "_runtime_sandbox_attachment": True,
+                                "_runtime_attachment_file_id": "file-secret",
+                            },
+                        ],
+                    },
+                    {
+                        "role": "assistant",
+                        "content": [
+                            {"type": "text", "text": "这是一张测试图片"},
+                        ],
+                    },
+                ],
+            },
+        },
+    )
+
+    await session.save_session_state(
+        session_id="runtime-session",
+        user_id="u001",
+        channel="bank-runtime",
+        agent=state,
+    )
+
+    target = tmp_path / "bank-runtime" / "u001_runtime-session.json"
+    raw = target.read_text("utf-8")
+    saved = json.loads(raw)
+    saved_content = saved["agent"]["memory"]["content"]
+
+    assert temporary_url not in raw
+    assert "_runtime_attachment_file_id" not in raw
+    assert saved_content[0]["content"] == [
+        {"type": "text", "text": "请识别这张图片"},
+    ]
+    assert saved_content[1]["content"][0]["text"] == "这是一张测试图片"
+
+    # Persisting a session must not mutate the in-memory message that is
+    # still being used to complete the current response.
+    live_content = state.state_dict()["memory"]["content"]
+    assert live_content[0]["content"][1]["source"]["url"] == temporary_url
+
+
+@pytest.mark.asyncio
+async def test_load_strips_legacy_runtime_ephemeral_attachment_blocks(
+    session,
+    tmp_path: Path,
+):
+    target_dir = tmp_path / "bank-runtime"
+    target_dir.mkdir()
+    target = target_dir / "u001_legacy-runtime-session.json"
+    target.write_text(
+        json.dumps(
+            {
+                "agent": {
+                    "memory": {
+                        "content": [
+                            {
+                                "role": "user",
+                                "content": [
+                                    {"type": "text", "text": "继续刚才的问题"},
+                                    {
+                                        "type": "file",
+                                        "source": "/private/tmp/expired.xlsx",
+                                        "_runtime_sandbox_attachment": True,
+                                        "_runtime_attachment_file_id": "file-old",
+                                    },
+                                ],
+                            },
+                        ],
+                    },
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    restored = _StateModule({})
+
+    await session.load_session_state(
+        session_id="legacy-runtime-session",
+        user_id="u001",
+        channel="bank-runtime",
+        agent=restored,
+    )
+
+    assert restored.state_dict()["memory"]["content"][0]["content"] == [
+        {"type": "text", "text": "继续刚才的问题"},
+    ]
+
+
+@pytest.mark.asyncio
 async def test_load_missing_session_allow_not_exist(session):
     state = _StateModule({"untouched": True})
 
@@ -141,6 +252,59 @@ async def test_load_missing_session_raises_when_not_allowed(session):
             allow_not_exist=False,
             agent=_StateModule({}),
         )
+
+
+@pytest.mark.asyncio
+async def test_session_exists_is_scoped_by_user_and_channel(session):
+    assert not await session.session_exists(
+        session_id="shared-session",
+        user_id="u001",
+        channel="bank-runtime",
+    )
+
+    await session.save_session_state(
+        session_id="shared-session",
+        user_id="u001",
+        channel="bank-runtime",
+        agent=_StateModule({"value": 1}),
+    )
+
+    assert await session.session_exists(
+        session_id="shared-session",
+        user_id="u001",
+        channel="bank-runtime",
+    )
+    assert not await session.session_exists(
+        session_id="shared-session",
+        user_id="u002",
+        channel="bank-runtime",
+    )
+    assert not await session.session_exists(
+        session_id="shared-session",
+        user_id="u001",
+        channel="console",
+    )
+
+
+def test_execution_lock_is_shared_only_within_same_session_scope(session):
+    first = session.execution_lock(
+        session_id="session-001",
+        user_id="u001",
+        channel="bank-runtime",
+    )
+    same = session.execution_lock(
+        session_id="session-001",
+        user_id="u001",
+        channel="bank-runtime",
+    )
+    other_user = session.execution_lock(
+        session_id="session-001",
+        user_id="u002",
+        channel="bank-runtime",
+    )
+
+    assert first is same
+    assert first is not other_user
 
 
 # ---------------------------------------------------------------------------

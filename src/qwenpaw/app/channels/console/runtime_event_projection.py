@@ -19,6 +19,9 @@ _SAFE_FAILURE_MESSAGES = {
     "回答生成失败",
     "任务已取消",
 }
+_SAFE_FAILURE_CODES = {
+    "RUNTIME_SESSION_NOT_FOUND",
+}
 DEFAULT_MIN_CHUNK_CHARS = 256
 DEFAULT_MAX_CHUNK_CHARS = 512
 DEFAULT_MAX_CHUNK_DELAY_SECONDS = 0.05
@@ -416,6 +419,7 @@ class RuntimeEventProjector:  # pylint: disable=too-many-instance-attributes
         now: float | None = None,
         cancelled: bool = False,
         message: str | None = None,
+        error_code: str | None = None,
     ) -> list[dict[str, str]]:
         """Flush buffered text and emit one successful or failed terminal."""
         if self.terminal_sent:
@@ -437,13 +441,14 @@ class RuntimeEventProjector:  # pylint: disable=too-many-instance-attributes
         failure_message = "任务已取消" if cancelled else "回答生成失败"
         if message in _SAFE_FAILURE_MESSAGES:
             failure_message = message
-        emitted.append(
-            {
-                "event": "answer.failed",
-                "status": STATUS_ANSWER_FAILED,
-                "message": failure_message,
-            },
-        )
+        failure_event = {
+            "event": "answer.failed",
+            "status": STATUS_ANSWER_FAILED,
+            "message": failure_message,
+        }
+        if error_code in _SAFE_FAILURE_CODES:
+            failure_event["error_code"] = error_code
+        emitted.append(failure_event)
         return emitted
 
     def flush_due(self, *, now: float | None = None) -> list[dict[str, str]]:

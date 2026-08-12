@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Runtime-managed conversations must remain external to QwenPaw storage."""
+"""Runtime-managed conversations use isolated QwenPaw session state."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from agentscope.message import Msg
+from agentscope.memory import InMemoryMemory
 
 from qwenpaw.app.routers import console as console_router
 from qwenpaw.app.runner import runner as runner_module
@@ -83,14 +84,17 @@ async def test_runtime_console_does_not_register_chat_or_generate_title(
 class _FakeAgent:
     def __init__(self, **_kwargs) -> None:
         self.toolkit = SimpleNamespace(skills={})
-        self.memory = None
+        self.memory = SimpleNamespace(add=AsyncMock())
         self.model = None
         self.persist_calls = 0
+        self.reply_error: Exception | None = None
 
     async def register_mcp_clients(self) -> None:
         return None
 
     async def __call__(self, _msgs):
+        if self.reply_error is not None:
+            raise self.reply_error
         return Msg(name="assistant", role="assistant", content="ok")
 
     def set_console_output_enabled(self, *, enabled: bool) -> None:
@@ -107,10 +111,16 @@ class _FakeAgent:
 
 
 @pytest.mark.asyncio
-async def test_runtime_runner_uses_context_manifest_without_local_session_state(
+@pytest.mark.parametrize("reply_fails", [False, True])
+@pytest.mark.parametrize("session_exists", [False, True])
+async def test_runtime_runner_commits_managed_session_only_on_success(
     monkeypatch,
+    reply_fails: bool,
+    session_exists: bool,
 ) -> None:
     fake_agent = _FakeAgent()
+    if reply_fails:
+        fake_agent.reply_error = RuntimeError("model failed")
     monkeypatch.setattr(
         runner_module,
         "QwenPawAgent",
@@ -162,7 +172,14 @@ async def test_runtime_runner_uses_context_manifest_without_local_session_state(
     monkeypatch.setattr(langfuse_module, "agent_trace_scope", trace_scope)
 
     runner = AgentRunner(agent_id="bank-assistant")
+    execution_lock = SimpleNamespace(
+        acquire=AsyncMock(),
+        release=MagicMock(),
+        locked=MagicMock(return_value=True),
+    )
     runner.session = SimpleNamespace(
+        session_exists=AsyncMock(return_value=session_exists),
+        execution_lock=MagicMock(return_value=execution_lock),
         get_session_state_dict=AsyncMock(),
         load_session_state=AsyncMock(),
         save_session_state=AsyncMock(),
@@ -181,6 +198,22 @@ async def test_runtime_runner_uses_context_manifest_without_local_session_state(
             "attachments_manifest": [{"file_id": "file_001"}],
             "sandbox_context": {"task_id": "task_001"},
             "runtime_tool_gateway": {"endpoint": "http://runtime.invalid"},
+            "qwenpaw_session_state": (
+                "active" if session_exists else "uninitialized"
+            ),
+            "session_bootstrap": {
+                "version": "2.0",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [{"type": "text", "text": "first question"}],
+                    },
+                    {
+                        "role": "assistant",
+                        "content": [{"type": "text", "text": "first answer"}],
+                    },
+                ],
+            },
         },
         request_context={},
         root_session_id="",
@@ -188,19 +221,50 @@ async def test_runtime_runner_uses_context_manifest_without_local_session_state(
     )
     messages = [Msg(name="user", role="user", content="private message")]
 
-    events = [
-        event
-        async for event in runner.query_handler(messages, request=request)
-    ]
-
-    assert len(events) == 1
+    if reply_fails:
+        with pytest.raises(Exception, match="model failed"):
+            _ = [
+                event
+                async for event in runner.query_handler(
+                    messages,
+                    request=request,
+                )
+            ]
+    else:
+        events = [
+            event
+            async for event in runner.query_handler(messages, request=request)
+        ]
+        assert len(events) == 1
     runner._chat_manager.get_or_create_chat.assert_not_awaited()
     runner._chat_manager.touch_chat.assert_not_awaited()
     runner.session.get_session_state_dict.assert_not_awaited()
-    runner.session.load_session_state.assert_not_awaited()
-    runner.session.save_session_state.assert_not_awaited()
+    runner.session.session_exists.assert_awaited_once_with(
+        session_id="qpaw_scoped_session",
+        user_id="opaque-subject",
+        channel="bank-runtime",
+    )
+    if session_exists:
+        runner.session.load_session_state.assert_awaited_once()
+        fake_agent.memory.add.assert_not_awaited()
+    else:
+        runner.session.load_session_state.assert_not_awaited()
+        fake_agent.memory.add.assert_awaited_once()
+        restored = fake_agent.memory.add.await_args.args[0]
+        assert [message.role for message in restored] == ["user", "assistant"]
+    if reply_fails:
+        runner.session.save_session_state.assert_not_awaited()
+    else:
+        runner.session.save_session_state.assert_awaited_once()
     runner.session.update_session_state.assert_not_awaited()
-    assert fake_agent.persist_calls == 0
+    runner.session.execution_lock.assert_called_once_with(
+        session_id="qpaw_scoped_session",
+        user_id="opaque-subject",
+        channel="bank-runtime",
+    )
+    execution_lock.acquire.assert_awaited_once()
+    execution_lock.release.assert_called_once()
+    assert fake_agent.persist_calls == (0 if reply_fails else 1)
 
 
 def test_runtime_request_context_is_empty_after_reply_scope() -> None:
@@ -233,3 +297,22 @@ def test_agent_context_token_reuse_remains_an_error() -> None:
 
     with pytest.raises(RuntimeError, match="already been used once"):
         restore_context_token(token)
+
+
+@pytest.mark.asyncio
+async def test_regenerate_rolls_back_only_the_last_session_turn() -> None:
+    memory = InMemoryMemory()
+    first_user = Msg(name="user", role="user", content="first question")
+    first_answer = Msg(name="assistant", role="assistant", content="first answer")
+    last_user = Msg(name="user", role="user", content="last question")
+    tool = Msg(name="tool", role="system", content="tool result")
+    last_answer = Msg(name="assistant", role="assistant", content="last answer")
+    await memory.add([first_user, first_answer, last_user, tool, last_answer])
+
+    removed = await runner_module._rollback_last_session_turn(memory)
+
+    assert removed == 3
+    assert [message.content for message in await memory.get_memory()] == [
+        "first question",
+        "first answer",
+    ]

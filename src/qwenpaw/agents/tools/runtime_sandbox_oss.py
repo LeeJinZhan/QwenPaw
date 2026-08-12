@@ -17,7 +17,9 @@ import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
-from urllib.parse import urljoin, urlparse, urlunparse
+from urllib.parse import urljoin
+
+from ...config.runtime_endpoint import resolve_runtime_base_url
 
 if os.environ.get("QWENPAW_SANDBOX_DAEMON_MODE") == "1":
     def get_current_runtime_tool_gateway() -> None:
@@ -257,6 +259,7 @@ class TaskAttachmentCache:
         sandbox_context: dict[str, Any],
         *,
         client: "SandboxedOssClient | None" = None,
+        selection_records: list[dict[str, str]] | None = None,
     ) -> list[PreparedSandboxFile]:
         """Batch-authorize cache misses and prepare files in manifest order."""
         fallback_file_id = ""
@@ -309,6 +312,7 @@ class TaskAttachmentCache:
                     task_id=task_id,
                     context_id=context_id,
                     client=client,
+                    selection_records=selection_records,
                 )
             finally:
                 batch_lock.release()
@@ -354,6 +358,7 @@ class TaskAttachmentCache:
         task_id: str,
         context_id: str,
         client: "SandboxedOssClient | None",
+        selection_records: list[dict[str, str]] | None,
     ) -> list[PreparedSandboxFile]:
         with self._lock:
             if task_id in self._cleaning_tasks:
@@ -378,7 +383,22 @@ class TaskAttachmentCache:
 
         reader = client or SandboxedOssClient()
         try:
-            authorization = reader.authorize_files(misses, sandbox_context)
+            selected_misses = [
+                item
+                for item in (selection_records or [])
+                if str(item.get("file_id") or "").strip() in misses
+            ]
+            if selected_misses:
+                authorization = reader.authorize_files(
+                    misses,
+                    sandbox_context,
+                    selection_records=selected_misses,
+                )
+            else:
+                authorization = reader.authorize_files(
+                    misses,
+                    sandbox_context,
+                )
         except RuntimeAttachmentPreparationError:
             raise
         except Exception as exc:
@@ -572,6 +592,7 @@ class TaskAttachmentCache:
                         next_size,
                     ),
                 )
+                self._apply_file_permissions(resolved_target)
                 self._commit_task_quota(cache_key, size_bytes)
                 quota_reserved = False
                 prepared = PreparedSandboxFile(
@@ -801,12 +822,7 @@ class TaskAttachmentCache:
             self._cleanup_task_if_idle(task_id)
 
     def _task_root(self, task_id: str) -> Path:
-        shard = self._task_shard(task_id)
-        return self.root / "shard" / shard / "task" / task_id
-
-    @staticmethod
-    def _task_shard(task_id: str) -> str:
-        return hashlib.sha256(task_id.encode("utf-8")).hexdigest()[:2]
+        return self.root / task_id
 
     def _task_marker_path(self, task_id: str) -> Path:
         return self._task_root(task_id) / _TASK_MARKER_FILENAME
@@ -824,12 +840,13 @@ class TaskAttachmentCache:
             marker_path,
             json.dumps(payload, sort_keys=True).encode("utf-8"),
         )
+        self._apply_file_permissions(marker_path)
 
     def _read_task_markers_from_disk(self) -> list[TaskMarker]:
         if not self.root.is_dir():
             return []
         markers: list[TaskMarker] = []
-        for marker_path in self.root.glob(f"shard/*/task/*/{_TASK_MARKER_FILENAME}"):
+        for marker_path in self.root.glob(f"*/{_TASK_MARKER_FILENAME}"):
             marker = self._read_task_marker(marker_path)
             if marker is not None:
                 markers.append(marker)
@@ -886,13 +903,9 @@ class TaskAttachmentCache:
         return marker
 
     def _ensure_private_task_root(self, task_id: str) -> None:
-        shard = self._task_shard(task_id)
         task_root = self._task_root(task_id)
         for directory in (
             self.root,
-            self.root / "shard",
-            self.root / "shard" / shard,
-            self.root / "shard" / shard / "task",
             task_root,
         ):
             self._ensure_private_dir(directory)
@@ -912,6 +925,9 @@ class TaskAttachmentCache:
         self._assert_cache_path(path)
         _mkdir_private(path)
         os.chmod(path, 0o700)
+
+    def _apply_file_permissions(self, path: Path) -> None:
+        os.chmod(path, 0o600)
 
     def _assert_cache_path(self, path: Path) -> None:
         root = self.root.resolve(strict=False)
@@ -1049,6 +1065,8 @@ class SandboxedOssClient:
         self,
         file_ids: list[str],
         sandbox_context: dict[str, Any],
+        *,
+        selection_records: list[dict[str, str]] | None = None,
     ) -> dict[str, Any]:
         """Authorize multiple sandbox files in one Runtime request."""
         ordered = list(
@@ -1057,12 +1075,15 @@ class SandboxedOssClient:
                 for file_id in file_ids
             ),
         )
+        payload: dict[str, Any] = {
+            "sandbox_context": sandbox_context,
+            "file_ids": ordered,
+        }
+        if selection_records:
+            payload["selection_records"] = list(selection_records)
         parsed = self._post_json(
             "/runtime/internal/sandbox/attachments/batch-authorize",
-            {
-                "sandbox_context": sandbox_context,
-                "file_ids": ordered,
-            },
+            payload,
         )
         data = parsed.get("data", parsed)
         if not isinstance(data, dict):
@@ -1082,6 +1103,8 @@ class SandboxedOssClient:
         sources: list[str],
         limit: int,
         sandbox_context: dict[str, Any],
+        *,
+        extensions: list[str] | None = None,
     ) -> dict[str, Any]:
         """Search supplemental files inside the signed Runtime sandbox."""
         parsed = self._post_json(
@@ -1090,6 +1113,7 @@ class SandboxedOssClient:
                 "sandbox_context": sandbox_context,
                 "query": query,
                 "content_types": content_types,
+                "extensions": list(extensions or []),
                 "sources": sources,
                 "limit": limit,
             },
@@ -1215,27 +1239,8 @@ def content_part_for_prepared_file(prepared: PreparedSandboxFile) -> dict[str, A
 
 
 def _runtime_base_url_from_context_or_env() -> str:
-    for key in (
-        "QWENPAW_RUNTIME_BASE_URL",
-        "BANK_RUNTIME_BASE_URL",
-        "RUNTIME_BASE_URL",
-    ):
-        value = os.environ.get(key, "").strip()
-        if value:
-            return value
     gateway = get_current_runtime_tool_gateway()
-    if not isinstance(gateway, dict):
-        return ""
-    base_url = str(
-        gateway.get("base_url") or gateway.get("runtime_base_url") or "",
-    ).strip()
-    if base_url:
-        return base_url
-    endpoint = str(gateway.get("endpoint", "")).strip()
-    parsed = urlparse(endpoint)
-    if parsed.scheme in {"http", "https"} and parsed.netloc:
-        return urlunparse((parsed.scheme, parsed.netloc, "", "", "", ""))
-    return ""
+    return resolve_runtime_base_url(gateway)
 
 
 def _runtime_timeout_seconds() -> float:

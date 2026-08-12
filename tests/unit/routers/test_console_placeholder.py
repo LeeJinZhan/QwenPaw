@@ -237,6 +237,40 @@ def test_extract_session_payload_preserves_runtime_bank_context_in_meta() -> Non
     ]
 
 
+def test_extract_runtime_payload_uses_only_current_user_message() -> None:
+    payload = {
+        "channel": "bank-runtime",
+        "user_id": "u001",
+        "session_id": "session-runtime-001",
+        "runtime_task_id": "task-runtime-001",
+        "input": [
+            {
+                "role": "user",
+                "content": [{"type": "text", "text": "列出助手文件"}],
+            },
+            {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "第一份是截图"}],
+            },
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "识别这次上传的 Excel"},
+                    {
+                        "type": "file",
+                        "file_id": "file_current_001",
+                        "name": "current.xlsx",
+                    },
+                ],
+            },
+        ],
+    }
+
+    native_payload = _extract_session_and_payload(payload)
+
+    assert native_payload["content_parts"] == payload["input"][-1]["content"]
+
+
 def test_extract_agent_request_payload_preserves_runtime_bank_context_in_meta() -> None:
     request = AgentRequest(
         channel="bank-runtime",

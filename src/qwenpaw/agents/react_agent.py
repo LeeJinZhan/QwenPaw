@@ -12,6 +12,7 @@ import inspect
 import json
 import logging
 import os
+import re
 from contextlib import contextmanager
 from copy import deepcopy
 from pathlib import Path
@@ -69,7 +70,7 @@ from .tools import (
     list_agents,
     materialize_skill,
     read_file,
-    runtime_attachment_read,
+    runtime_sandbox_files_select,
     runtime_sandbox_files_search,
     run_tool_batch,
     send_file_to_user,
@@ -80,6 +81,7 @@ from .tools import (
     write_file,
 )
 from .tools import runtime_sandbox_oss
+from .tools import runtime_sandbox_files as runtime_sandbox_files_module
 from .utils import process_file_and_media_blocks_in_message
 from .attachments import (
     RuntimeAttachmentProcessingConfig,
@@ -103,6 +105,59 @@ logger = logging.getLogger(__name__)
 # Valid namesake strategies for tool registration
 NamesakeStrategy = Literal["override", "skip", "raise", "rename"]
 
+_EXPLICIT_ASCII_FILENAME = re.compile(
+    r"(?<![A-Za-z0-9_.-])([A-Za-z0-9][A-Za-z0-9_.()\[\]-]{0,180}\.[A-Za-z0-9]{1,10})",
+    re.IGNORECASE,
+)
+_QUOTED_FILENAME = re.compile(
+    r"[`'\"“‘]([^`'\"”’/\\\x00]{1,200}\.[A-Za-z0-9]{1,10})[`'\"”’]",
+    re.IGNORECASE,
+)
+_MAX_RUNTIME_AUTOMATIC_SELECTION_FILES = 3
+_RUNTIME_SUPPLEMENTAL_FILE_REFERENCE = re.compile(
+    r"(?:"
+    r"(?:之前|此前|上次|刚才|历史|会话|助手(?:文件)?区|工作区).{0,12}"
+    r"(?:上传|文件|附件|材料|文档|图片|图像|表格|报告|录音)"
+    r"|(?:这|那)(?:个|份|张)?(?:文件|附件|材料|文档|图片|图像|表格|报告|录音)"
+    r"|(?:上传(?:的)?|已上传(?:的)?)(?:文件|附件|材料|文档|图片|图像|表格|报告|录音)"
+    r"|(?:文件|附件|材料|文档|图片|图像|表格|报告|录音).{0,18}"
+    r"(?:总结|分析|查看|读取|识别|处理|引用|基于|解释|提取)"
+    r"|\\b(?:uploaded?|attachment|file|document|image|picture|pdf|word|excel|"
+    r"markdown|csv|spreadsheet)\\b.{0,36}"
+    r"(?:summari[sz]e|analy[sz]e|read|review|inspect|recognize|process|use)"
+    r")",
+    re.IGNORECASE,
+)
+_RUNTIME_FILE_INTENT = re.compile(
+    r"(?:"
+    r"(?:查看|看下|看看|读取|读一下|识别|总结|分析|处理|列出|查询|搜索|找|有哪些).{0,28}"
+    r"(?:第[一二三四五六七八九十百\d]+(?:个|份|张)?|最后(?:一个|一份|一张)?|上一个|下一个)?[^\n]{0,12}"
+    r"(?:文件区|文件|附件|材料|文档|截图|图片|图像|表格|报告|录音)"
+    r"|(?:第[一二三四五六七八九十百\d]+(?:个|份|张)?|最后(?:一个|一份|一张)?|上一个|下一个)"
+    r".{0,12}(?:文件|附件|材料|文档|截图|图片|图像|表格|报告|录音)"
+    r")",
+    re.IGNORECASE,
+)
+_RUNTIME_EXTENSION_REFERENCE = re.compile(
+    r"(?<![A-Za-z0-9])\.?(pdf|docx?|xlsx?|pptx?|csv|txt|md|markdown|png|jpe?g|webp|gif|mp3|wav|m4a)"
+    r"(?:\s*格式)?(?![A-Za-z0-9])",
+    re.IGNORECASE,
+)
+_RUNTIME_EXPLICIT_SUPPLEMENTAL_SCOPE = re.compile(
+    r"(?:之前|此前|上次|上一轮|历史|助手(?:文件)?区|工作区).{0,24}"
+    r"(?:上传|文件|附件|材料|文档|图片|图像|表格|报告|录音)?",
+    re.IGNORECASE,
+)
+_RUNTIME_ASSISTANT_WORKSPACE_REFERENCE = re.compile(
+    r"(?:助手(?:文件)?区|助手工作区|助手的(?:文件|资料)|assistant\s+workspace)",
+    re.IGNORECASE,
+)
+_RUNTIME_CONVERSATION_FILE_REFERENCE = re.compile(
+    r"(?:当前对话|本次对话|本会话|会话(?:文件)?区|conversation)",
+    re.IGNORECASE,
+)
+_MAX_RUNTIME_DISCOVERY_CANDIDATES = 10
+
 
 def _build_runtime_tool_gateway_context(request_context: dict[str, Any]) -> str:
     """Render preflight and audit instructions for Runtime-managed calls."""
@@ -114,6 +169,9 @@ def _build_runtime_tool_gateway_context(request_context: dict[str, Any]) -> str:
         "- Each configured QwenPaw built-in, plugin, or MCP tool call is "
         "checked by Runtime before local execution and audited after it.",
         "- Use only tools that are visible in this Agent's configuration.",
+        "- For supplemental file discovery, use `runtime_sandbox_files_search`, "
+        "then select only returned candidates with "
+        "`runtime_sandbox_files_select`.",
     ]
     attachment_lines = _build_runtime_attachments_context(request_context)
     if attachment_lines:
@@ -217,28 +275,32 @@ def _build_runtime_attachments_context(
     if not isinstance(sandbox_context, dict):
         return []
     lines = [
-        "- The working directory is the current user's request-local Runtime "
-        "task workspace. Use relative paths only.",
-        "- Shell commands already start in the task scratch directory; do not "
-        "cd to /workspace or use container-only absolute paths.",
-        "- Put every shell-created deliverable under the relative `output/` "
-        "directory so Runtime can publish it to the user's workspace. Files "
-        "written with `write_file` are already returned as `output/...` paths "
-        "that shell commands can use directly.",
-        "- Never use the shared QwenPaw Agent workspace or host absolute "
-        "paths for Runtime-managed user tasks.",
-        "- Files from previous turns or the assistant workspace are not "
-        "automatically materialized here; discover them with "
-        "`runtime_sandbox_files_search` when needed.",
-        "- 优先使用本次任务已附带的文件。只在当前文件不足以完成请求时，",
-        "  才查找当前会话或当前用户+助手工作区的补充文件。",
-        "- 只能读取搜索结果返回的 file_id，不得构造路径或对象键。",
-        "- Use `runtime_sandbox_files_search` only for supplemental files, "
-        "then use `runtime_attachment_read(file_id=...)` with a returned "
-        "file_id.",
-        "- Do not request, reveal, copy, or summarize Runtime attachment "
-        "URLs, headers, tokens, object keys, storage locations, credentials, or "
-        "local paths.",
+        "- File handling is an internal capability. In user-facing answers, use only "
+        "the product terms ‘本次上传文件’, ‘当前对话文件’, and ‘助手文件区’. Never "
+        "mention Runtime, sandbox, task workspace, local paths, tool names, file IDs, "
+        "authorizations, storage, URLs, headers, tokens, object keys, or credentials.",
+        "- Treat ‘助手文件区’ and ‘助手工作区’ as an explicit request for that file "
+        "area, not as a reference to a file uploaded in an earlier conversation turn.",
+        "- Prefer files attached to this request. Search earlier conversation files or "
+        "the assistant file area only when the user explicitly asks for them or clearly "
+        "identifies an earlier file.",
+        "- For an ambiguous earlier-file request, discover metadata before selecting any "
+        "file content. Select no more than three needed files, and only from the current "
+        "request's discovered candidates.",
+        "- When the user asks what files are available, answer from safe file metadata; "
+        "do not load file content merely to list file names.",
+        "- When a file selection cannot be matched after refreshing visible metadata, "
+        "ask which displayed file the user means. Do not fall back to local file, media, "
+        "shell, or glob tools, and never describe the failure as a policy restriction.",
+        "- Shell-created deliverables must be written under the relative `output/` "
+        "directory. Use relative paths for task operations.",
+        "- Never use the shared QwenPaw Agent workspace for Runtime-managed user "
+        "tasks. Supplemental files are loaded only when this request clearly needs "
+        "them.",
+        "- 优先使用本次任务已附带的文件；只在当前文件不足以完成请求时，"
+        "才搜索当前对话文件或助手文件区。",
+        "- 不要加载助手文件区全部内容，只选择完成当前请求所需的文件。",
+        "- 只能使用本次搜索结果返回的候选项，不得构造 file_id、路径或对象键。",
     ]
     current_task_count = sum(
         1
@@ -247,9 +309,15 @@ def _build_runtime_attachments_context(
     )
     if current_task_count:
         lines.append(
-            f"- {current_task_count} current-task attachment(s) were already "
-            "materialized and added as untrusted content parts by the Worker; "
-            "do not call an attachment read tool for them.",
+            f"- {current_task_count} file(s) uploaded in this request are already "
+            "available as untrusted content parts for this turn.",
+        )
+        lines.append(
+            "- When the user says 'this file', 'this attachment', or asks to "
+            "recognize/summarize a file without naming an earlier source, treat "
+            "the file uploaded in this request as the target. Do not look for older "
+            "files unless the user explicitly names one or asks for the current "
+            "conversation files or assistant file area.",
         )
     return lines
 
@@ -309,6 +377,12 @@ def _runtime_current_task_attachment_ids(request_context: dict[str, Any]) -> lis
     return file_ids
 
 
+def _runtime_request_text(msg: Msg | list[Msg] | None) -> str:
+    """Capture the original user request before attachment parts are appended."""
+    target = msg[-1] if isinstance(msg, list) and msg else msg
+    return target.get_text_content() if isinstance(target, Msg) else ""
+
+
 async def _append_runtime_attachment_content_parts(
     msg: Msg | list[Msg] | None,
     request_context: dict[str, Any],
@@ -318,6 +392,27 @@ async def _append_runtime_attachment_content_parts(
         return msg
     file_ids = _runtime_current_task_attachment_ids(request_context)
     if not file_ids:
+        return msg
+    return await _append_selected_runtime_attachment_content_parts(
+        msg,
+        request_context,
+        file_ids,
+        selection_mode="current_task",
+        selection_sources={file_id: "current_task" for file_id in file_ids},
+        processing_config=processing_config,
+    )
+
+
+async def _append_selected_runtime_attachment_content_parts(
+    msg: Msg | list[Msg] | None,
+    request_context: dict[str, Any],
+    file_ids: list[str],
+    *,
+    selection_mode: str,
+    selection_sources: dict[str, str],
+    processing_config: RuntimeAttachmentProcessingConfig | None = None,
+) -> Msg | list[Msg] | None:
+    if msg is None or not file_ids:
         return msg
     sandbox_context = request_context.get("sandbox_context")
     if not isinstance(sandbox_context, dict):
@@ -334,6 +429,18 @@ async def _append_runtime_attachment_content_parts(
     target = msg[-1] if isinstance(msg, list) and msg else msg
     if not isinstance(target, Msg):
         return msg
+    selection_records = (
+        []
+        if selection_mode == "current_task"
+        else [
+            {
+                "file_id": file_id,
+                "source": selection_sources.get(file_id, ""),
+                "selection_mode": selection_mode,
+            }
+            for file_id in file_ids
+        ]
+    )
     try:
         cache = runtime_sandbox_oss._DEFAULT_TASK_ATTACHMENT_CACHE
         prepared_files = await runtime_sandbox_oss.run_task_io_in_thread(
@@ -343,6 +450,11 @@ async def _append_runtime_attachment_content_parts(
             file_ids,
             sandbox_context,
             file_id=file_ids[0],
+            **(
+                {"selection_records": selection_records}
+                if selection_records
+                else {}
+            ),
         )
     except runtime_sandbox_oss.RuntimeAttachmentPreparationError:
         raise
@@ -377,12 +489,263 @@ async def _append_runtime_attachment_content_parts(
         content_parts = [{"type": "text", "text": target.get_text_content()}]
         target.content = content_parts
     content_parts.extend(processing_result.content_parts)
-    request_context["runtime_attachment_processing"] = {
-        "safe_attachment_refs": processing_result.safe_attachment_refs,
-        "warnings": processing_result.warnings,
-        "metrics": processing_result.metrics,
-    }
+    _record_runtime_attachment_processing(
+        request_context,
+        processing_result,
+        selection_mode=selection_mode,
+        selection_sources=selection_sources,
+    )
     return msg
+
+
+def _record_runtime_attachment_processing(
+    request_context: dict[str, Any],
+    result: Any,
+    *,
+    selection_mode: str,
+    selection_sources: dict[str, str],
+) -> None:
+    existing = request_context.get("runtime_attachment_processing")
+    if not isinstance(existing, dict):
+        existing = {}
+    safe_refs = list(existing.get("safe_attachment_refs") or [])
+    safe_refs.extend(result.safe_attachment_refs)
+    warnings = list(existing.get("warnings") or [])
+    warnings.extend(result.warnings)
+    metrics = dict(existing.get("metrics") or {})
+    for key, value in result.metrics.items():
+        metrics[key] = int(metrics.get(key, 0) or 0) + int(value or 0)
+    selections = list(existing.get("selections") or [])
+    selections.extend(
+        {
+            "file_id": str(item.get("file_id") or ""),
+            "source": selection_sources.get(str(item.get("file_id") or ""), ""),
+            "mode": selection_mode,
+        }
+        for item in result.safe_attachment_refs
+    )
+    request_context["runtime_attachment_processing"] = {
+        "safe_attachment_refs": safe_refs,
+        "warnings": warnings,
+        "metrics": metrics,
+        "selections": selections,
+    }
+
+
+async def _append_runtime_auto_selected_content_parts(
+    msg: Msg | list[Msg] | None,
+    request_context: dict[str, Any],
+    processing_config: RuntimeAttachmentProcessingConfig | None = None,
+    *,
+    user_text: str | None = None,
+) -> Msg | list[Msg] | None:
+    """Resolve safely discoverable supplemental files before the model call.
+
+    A uniquely named file is materialized immediately.  Ambiguous historical
+    file references are instead discovered as metadata only; the model must
+    explicitly choose from that request-local candidate set through the
+    Runtime selection tool before it can receive file content.
+    """
+    if msg is None:
+        return msg
+    sandbox_context = request_context.get("sandbox_context")
+    if not isinstance(sandbox_context, dict):
+        return msg
+    target = msg[-1] if isinstance(msg, list) and msg else msg
+    if not isinstance(target, Msg):
+        return msg
+    query_text = user_text if user_text is not None else target.get_text_content()
+    filenames = _explicit_runtime_filenames(query_text)
+    current_task_file_ids = _runtime_current_task_attachment_ids(request_context)
+    if (
+        current_task_file_ids
+        and not filenames
+        and not _runtime_explicit_supplemental_scope_requested(query_text)
+    ):
+        logger.info(
+            "Runtime Worker skipped supplemental discovery because current-task "
+            "attachments satisfy an unqualified file reference count=%s",
+            len(current_task_file_ids),
+        )
+        return msg
+    selected: list[dict[str, Any]] = []
+    discovered: list[dict[str, Any]] = []
+    client = runtime_sandbox_oss.SandboxedOssClient()
+    for filename in filenames:
+        if len(selected) >= _MAX_RUNTIME_AUTOMATIC_SELECTION_FILES:
+            break
+        try:
+            result = await asyncio.to_thread(
+                client.search_files,
+                filename,
+                [],
+                _runtime_supplemental_sources(query_text),
+                10,
+                sandbox_context,
+            )
+            candidates = runtime_sandbox_files_module._without_current_task_files(
+                runtime_sandbox_files_module._public_files(result),
+            )
+        except (RuntimeError, TypeError, ValueError, OSError):
+            continue
+        discovered.extend(candidates)
+        exact = {
+            str(item["file_id"]): item
+            for item in candidates
+            if item.get("readable") is True
+            and str(item.get("display_name") or "").casefold() == filename.casefold()
+        }
+        if len(exact) == 1:
+            candidate = next(iter(exact.values()))
+            if all(item["file_id"] != candidate["file_id"] for item in selected):
+                selected.append(candidate)
+    from ..config.context import merge_current_runtime_discovered_files
+
+    if selected:
+        merge_current_runtime_discovered_files(selected)
+
+        file_ids = [str(item["file_id"]) for item in selected]
+        logger.info(
+            "Runtime Worker auto-selected supplemental files count=%s",
+            len(file_ids),
+        )
+        return await _append_selected_runtime_attachment_content_parts(
+            msg,
+            request_context,
+            file_ids,
+            selection_mode="worker_exact_filename",
+            selection_sources={
+                str(item["file_id"]): str(item.get("source") or "")
+                for item in selected
+            },
+            processing_config=processing_config,
+        )
+
+    if not filenames and _runtime_supplemental_file_reference_requested(query_text):
+        try:
+            search_args = (
+                "",
+                [],
+                _runtime_supplemental_sources(query_text),
+                _MAX_RUNTIME_DISCOVERY_CANDIDATES,
+                sandbox_context,
+            )
+            extensions = _runtime_supplemental_extensions(query_text)
+            if extensions:
+                result = await asyncio.to_thread(
+                    client.search_files,
+                    *search_args,
+                    extensions=extensions,
+                )
+            else:
+                result = await asyncio.to_thread(client.search_files, *search_args)
+            discovered = runtime_sandbox_files_module._without_current_task_files(
+                runtime_sandbox_files_module._public_files(result),
+            )
+        except (RuntimeError, TypeError, ValueError, OSError):
+            discovered = []
+
+    unique_discovered = {
+        str(item.get("file_id") or ""): item
+        for item in discovered
+        if str(item.get("file_id") or "")
+    }
+    if not unique_discovered:
+        return msg
+    candidates = list(unique_discovered.values())[:_MAX_RUNTIME_DISCOVERY_CANDIDATES]
+    merge_current_runtime_discovered_files(candidates)
+    _append_runtime_file_candidate_context(target, candidates)
+    logger.info(
+        "Runtime Worker discovered supplemental file candidates count=%s",
+        len(candidates),
+    )
+    return msg
+
+
+def _runtime_supplemental_file_reference_requested(text: Any) -> bool:
+    """Avoid discovery for ordinary conversation while recognizing file requests."""
+    normalized = str(text or "")
+    return bool(
+        _RUNTIME_SUPPLEMENTAL_FILE_REFERENCE.search(normalized)
+        or _RUNTIME_FILE_INTENT.search(normalized)
+        or _RUNTIME_ASSISTANT_WORKSPACE_REFERENCE.search(normalized)
+        or _RUNTIME_CONVERSATION_FILE_REFERENCE.search(normalized)
+    )
+
+
+def _runtime_explicit_supplemental_scope_requested(text: Any) -> bool:
+    """Return whether the user explicitly asks beyond this task's attachments."""
+    return bool(_RUNTIME_EXPLICIT_SUPPLEMENTAL_SCOPE.search(str(text or "")))
+
+
+def _runtime_supplemental_sources(text: Any) -> list[str]:
+    """Limit discovery to the product area named by the user when possible."""
+    normalized = str(text or "")
+    if _RUNTIME_ASSISTANT_WORKSPACE_REFERENCE.search(normalized):
+        return ["assistant_workspace"]
+    if _RUNTIME_CONVERSATION_FILE_REFERENCE.search(normalized):
+        return ["conversation"]
+    return ["conversation", "assistant_workspace"]
+
+
+def _runtime_supplemental_extensions(text: Any) -> list[str]:
+    """Extract bounded, structured extension filters from a file request."""
+    aliases = {"markdown": "md", "jpeg": "jpg"}
+    extensions: list[str] = []
+    for match in _RUNTIME_EXTENSION_REFERENCE.finditer(str(text or "")):
+        extension = aliases.get(match.group(1).lower(), match.group(1).lower())
+        normalized = f".{extension}"
+        if normalized not in extensions:
+            extensions.append(normalized)
+    return extensions[:3]
+
+
+def _append_runtime_file_candidate_context(
+    target: Msg,
+    candidates: list[dict[str, Any]],
+) -> None:
+    """Expose only safe metadata and require a tool-mediated selection.
+
+    This is request-local model context, not a grant.  Filenames are untrusted
+    user-provided metadata and never become instructions or local paths.
+    """
+    safe_candidates = [
+        {
+            "file_id": str(item.get("file_id") or ""),
+            "display_name": str(item.get("display_name") or "")[:255],
+            "content_type": str(item.get("content_type") or "")[:128],
+            "size_bytes": max(int(item.get("size_bytes") or 0), 0),
+            "source": str(item.get("source") or "")[:64],
+        }
+        for item in candidates
+    ]
+    selection_context = (
+        "[Internal file-candidate metadata — never quote or expose this block, its "
+        "identifiers, source labels, or implementation details to the user.]\n"
+        "The user referenced a file area or an earlier file. For a request to list "
+        "available files, answer only with the display names and ordinary file details. "
+        "For a request that needs file content, select only the needed candidate IDs "
+        "from this list (at most 3); never invent an identifier and do not select a file "
+        "just because it is available.\n"
+        + json.dumps(safe_candidates, ensure_ascii=False, sort_keys=True)
+    )
+    if isinstance(target.content, list):
+        target.content.append({"type": "text", "text": selection_context})
+        return
+    target.content = [
+        {"type": "text", "text": target.get_text_content()},
+        {"type": "text", "text": selection_context},
+    ]
+
+
+def _explicit_runtime_filenames(text: Any) -> list[str]:
+    """Extract explicit filenames only; greetings and vague references miss."""
+    query = str(text or "")
+    candidates = [match.group(1).strip() for match in _QUOTED_FILENAME.finditer(query)]
+    candidates.extend(match.group(1).strip() for match in _EXPLICIT_ASCII_FILENAME.finditer(query))
+    return list(dict.fromkeys(candidate for candidate in candidates if candidate))[
+        :_MAX_RUNTIME_AUTOMATIC_SELECTION_FILES
+    ]
 
 
 def _runtime_simple_text_fast_enabled_from_context(
@@ -787,7 +1150,7 @@ class QwenPawAgent(CodingModeMixin, ToolGuardMixin, ReActAgent):
             "upload_file_to_oss": upload_file_to_oss,
             "get_current_time": get_current_time,
             **(
-                {"runtime_attachment_read": runtime_attachment_read}
+                {"runtime_sandbox_files_select": runtime_sandbox_files_select}
                 if runtime_gateway_enabled and runtime_attachment_available
                 else {}
             ),
@@ -2114,7 +2477,9 @@ class QwenPawAgent(CodingModeMixin, ToolGuardMixin, ReActAgent):
             reset_current_workspace_dir,
             restore_request_local_context,
             set_current_file_sandbox_root,
+            set_current_runtime_discovered_files,
             set_current_runtime_discovered_file_ids,
+            set_current_runtime_selected_file_ids,
             set_current_workspace_dir,
             snapshot_request_local_context,
         )
@@ -2124,6 +2489,8 @@ class QwenPawAgent(CodingModeMixin, ToolGuardMixin, ReActAgent):
         discovered_token = set_current_runtime_discovered_file_ids(
             frozenset(),
         )
+        set_current_runtime_discovered_files([])
+        set_current_runtime_selected_file_ids(frozenset())
         try:
             request_context = getattr(self, "_request_context", {})
             if not isinstance(request_context, dict):
@@ -2247,21 +2614,29 @@ class QwenPawAgent(CodingModeMixin, ToolGuardMixin, ReActAgent):
 
         # Process file and media blocks in messages
         if msg is not None:
+            attachment_processing_config = RuntimeAttachmentProcessingConfig(
+                inline_file_max_chars=getattr(
+                    self._agent_config.running,
+                    "runtime_attachment_inline_file_max_chars",
+                    128_000,
+                ),
+                inline_task_max_chars=getattr(
+                    self._agent_config.running,
+                    "runtime_attachment_inline_task_max_chars",
+                    384_000,
+                ),
+            )
+            original_user_text = _runtime_request_text(msg)
             msg = await _append_runtime_attachment_content_parts(
                 msg,
                 self._request_context,
-                RuntimeAttachmentProcessingConfig(
-                    inline_file_max_chars=getattr(
-                        self._agent_config.running,
-                        "runtime_attachment_inline_file_max_chars",
-                        128_000,
-                    ),
-                    inline_task_max_chars=getattr(
-                        self._agent_config.running,
-                        "runtime_attachment_inline_task_max_chars",
-                        384_000,
-                    ),
-                ),
+                attachment_processing_config,
+            )
+            msg = await _append_runtime_auto_selected_content_parts(
+                msg,
+                self._request_context,
+                attachment_processing_config,
+                user_text=original_user_text,
             )
             await process_file_and_media_blocks_in_message(msg)
 

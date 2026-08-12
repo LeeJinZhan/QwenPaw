@@ -788,7 +788,15 @@ class ConsoleChannel(BaseChannel):
             err_msg = str(e).strip() or "An error occurred while processing."
             self._print_error(err_msg)
             if runtime_projector is not None:
-                for projected in runtime_projector.finish(success=False):
+                error_code = (
+                    "RUNTIME_SESSION_NOT_FOUND"
+                    if "RUNTIME_SESSION_NOT_FOUND" in err_msg
+                    else None
+                )
+                for projected in runtime_projector.finish(
+                    success=False,
+                    error_code=error_code,
+                ):
                     data = json.dumps(projected, ensure_ascii=False)
                     yield f"data: {data}\n\n"
         finally:

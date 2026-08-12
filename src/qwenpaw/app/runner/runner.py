@@ -52,6 +52,12 @@ logger = logging.getLogger(__name__)
 _PRINT_END_SIGNAL = "[END]"
 
 RUNTIME_REQUEST_CONTEXT_KEYS = (
+    "session_mode",
+    "qwenpaw_session_state",
+    "session_contract_version",
+    "session_bootstrap",
+    "session_operation",
+    "regenerate_from_task_id",
     "conversation_id",
     "runtime_task_id",
     "trace_id",
@@ -81,8 +87,56 @@ _PERSONAL_SKILLS_CONTEXT_KEYS = {
 
 
 def _is_runtime_external_request(request: AgentRequest | Any) -> bool:
-    """Return whether Runtime, rather than QwenPaw, owns conversation state."""
+    """Return whether this is a Runtime-governed QwenPaw request."""
     return str(getattr(request, "channel", "") or "").strip() == "bank-runtime"
+
+
+def _runtime_session_bootstrap_messages(value: Any) -> list[Msg]:
+    """Convert the trusted recovery package without flattening role turns."""
+    if not isinstance(value, dict):
+        return []
+    source_messages = value.get("messages")
+    if not isinstance(source_messages, list):
+        return []
+    restored: list[Msg] = []
+    for item in source_messages[:512]:
+        if not isinstance(item, dict):
+            continue
+        role = str(item.get("role") or "").strip().lower()
+        if role not in {"user", "assistant"}:
+            continue
+        content = item.get("content")
+        text_blocks: list[dict[str, str]] = []
+        if isinstance(content, str) and content.strip():
+            text_blocks.append({"type": "text", "text": content.strip()})
+        elif isinstance(content, list):
+            for block in content:
+                if not isinstance(block, dict) or block.get("type") != "text":
+                    continue
+                text = str(block.get("text") or "").strip()
+                if text:
+                    text_blocks.append({"type": "text", "text": text})
+        if text_blocks:
+            restored.append(Msg(name=role, role=role, content=text_blocks))
+    return restored
+
+
+async def _rollback_last_session_turn(memory: Any) -> int:
+    """Remove the last user turn and everything after it for regeneration."""
+    if memory is None:
+        return 0
+    messages = await memory.get_memory(prepend_summary=False)
+    last_user_index = -1
+    for index in range(len(messages) - 1, -1, -1):
+        role = str(getattr(messages[index], "role", "") or "").lower()
+        if role == "user":
+            last_user_index = index
+            break
+    if last_user_index < 0:
+        return 0
+    return await memory.delete(
+        [message.id for message in messages[last_user_index:]]
+    )
 
 
 def _build_base_request_context(
@@ -514,12 +568,21 @@ class AgentRunner(Runner):
         agent = None
         chat = None
         session_state_loaded = False
+        runtime_session_commit_ready = False
+        session_execution_lock: asyncio.Lock | None = None
         _cron_memory_snapshot = None
         base_request_context: dict[str, Any] = {}
         try:
             session_id = request.session_id
             user_id = request.user_id
             channel = getattr(request, "channel", DEFAULT_CHANNEL)
+            if runtime_external:
+                session_execution_lock = self.session.execution_lock(
+                    session_id=session_id,
+                    user_id=user_id,
+                    channel=channel,
+                )
+                await session_execution_lock.acquire()
             agent_context_tokens.append(
                 set_current_user_id(user_id),
             )
@@ -938,19 +1001,48 @@ class AgentRunner(Runner):
                         exc_info=True,
                     )
 
-            if not runtime_external:
+            if session_id and user_id:
                 if plan_notebook is not None:
                     setattr(
                         plan_notebook,
                         "_loading_from_state", True,
                     )
                 try:
-                    await self.session.load_session_state(
-                        session_id=session_id,
-                        user_id=user_id,
-                        channel=channel,
-                        agent=agent,
-                    )
+                    runtime_session_exists = True
+                    if runtime_external:
+                        runtime_session_exists = await self.session.session_exists(
+                            session_id=session_id,
+                            user_id=user_id,
+                            channel=channel,
+                        )
+                    if runtime_session_exists:
+                        await self.session.load_session_state(
+                            session_id=session_id,
+                            user_id=user_id,
+                            channel=channel,
+                            agent=agent,
+                        )
+                        if (
+                            runtime_external
+                            and channel_meta.get("session_operation")
+                            == "regenerate"
+                        ):
+                            await _rollback_last_session_turn(agent.memory)
+                    elif runtime_external:
+                        restored_messages = _runtime_session_bootstrap_messages(
+                            channel_meta.get("session_bootstrap")
+                        )
+                        declared_state = str(
+                            channel_meta.get("qwenpaw_session_state") or ""
+                        ).strip().lower()
+                        if declared_state == "active" and not restored_messages:
+                            raise RuntimeError("RUNTIME_SESSION_NOT_FOUND")
+                        if restored_messages:
+                            if agent.memory is None:
+                                raise RuntimeError(
+                                    "RUNTIME_SESSION_BOOTSTRAP_UNAVAILABLE"
+                                )
+                            await agent.memory.add(restored_messages)
                 except KeyError as e:
                     logger.warning(
                         "load_session_state skipped (state schema mismatch): %s; "
@@ -1038,6 +1130,8 @@ class AgentRunner(Runner):
                             max_iterations=max_iters,
                             agent_id=self.agent_id,
                         ):
+                            if runtime_external and last:
+                                runtime_session_commit_ready = True
                             yield msg, last
                     else:
                         async for msg, last in run_mission_phase2(
@@ -1047,6 +1141,8 @@ class AgentRunner(Runner):
                             max_iterations=max_iters,
                             agent_id=self.agent_id,
                         ):
+                            if runtime_external and last:
+                                runtime_session_commit_ready = True
                             yield msg, last
                 else:
                     async for (
@@ -1056,6 +1152,8 @@ class AgentRunner(Runner):
                         agents=[agent],
                         coroutine_task=agent(msgs),
                     ):
+                        if runtime_external and last:
+                            runtime_session_commit_ready = True
                         yield msg, last
 
         except asyncio.CancelledError as exc:
@@ -1128,41 +1226,50 @@ class AgentRunner(Runner):
                     ) + converted.args[1:]
             raise converted from e
         finally:
-            if agent is not None and session_state_loaded:
-                # For isolated cron: restore the full history (snapshot) plus
-                # the new messages produced by this execution
-                if (
-                    _cron_memory_snapshot is not None
-                    and agent.memory is not None
-                ):
-                    new_messages = await agent.memory.get_memory()
-                    agent.memory.load_state_dict(_cron_memory_snapshot)
-                    if new_messages:
-                        await agent.memory.add(new_messages)
-                    logger.debug(
-                        "Isolated cron: restored %d historical + %d new "
-                        "messages for session_id=%s",
-                        len(_cron_memory_snapshot.get("memory", [])),
-                        len(new_messages) if new_messages else 0,
-                        session_id,
-                    )
-
-                await agent.prepare_personal_skills_for_persistence()
-
-                await self.session.save_session_state(
-                    session_id=session_id,
-                    user_id=user_id,
-                    channel=channel,
-                    agent=agent,
+            try:
+                should_save_session = session_state_loaded and (
+                    not runtime_external or runtime_session_commit_ready
                 )
-            elif agent is not None and not runtime_external:
-                await agent.prepare_personal_skills_for_persistence()
+                if agent is not None and should_save_session:
+                    # For isolated cron: restore the full history (snapshot)
+                    # plus the new messages produced by this execution.
+                    if (
+                        _cron_memory_snapshot is not None
+                        and agent.memory is not None
+                    ):
+                        new_messages = await agent.memory.get_memory()
+                        agent.memory.load_state_dict(_cron_memory_snapshot)
+                        if new_messages:
+                            await agent.memory.add(new_messages)
+                        logger.debug(
+                            "Isolated cron: restored %d historical + %d new "
+                            "messages for session_id=%s",
+                            len(_cron_memory_snapshot.get("memory", [])),
+                            len(new_messages) if new_messages else 0,
+                            session_id,
+                        )
 
-            if self._chat_manager is not None and chat is not None:
-                await self._chat_manager.touch_chat(chat.id)
+                    await agent.prepare_personal_skills_for_persistence()
 
-            for token in reversed(agent_context_tokens):
-                restore_context_token(token)
+                    await self.session.save_session_state(
+                        session_id=session_id,
+                        user_id=user_id,
+                        channel=channel,
+                        agent=agent,
+                    )
+                elif agent is not None and not runtime_external:
+                    await agent.prepare_personal_skills_for_persistence()
+
+                if self._chat_manager is not None and chat is not None:
+                    await self._chat_manager.touch_chat(chat.id)
+            finally:
+                if (
+                    session_execution_lock is not None
+                    and session_execution_lock.locked()
+                ):
+                    session_execution_lock.release()
+                for token in reversed(agent_context_tokens):
+                    restore_context_token(token)
 
     async def init_handler(self, *args, **kwargs):
         """

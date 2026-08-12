@@ -40,6 +40,12 @@ def test_task_attachment_cache_prepares_private_request_workspace(tmp_path) -> N
     assert stat.S_IMODE(workspace.stat().st_mode) == 0o700
 
 
+def test_task_attachment_cache_uses_runtime_direct_task_root(tmp_path) -> None:
+    cache = runtime_sandbox_oss_module.TaskAttachmentCache(root=tmp_path / "cache")
+
+    assert cache._task_root("task_user_b") == tmp_path / "cache" / "task_user_b"
+
+
 def test_qwenpaw_runtime_dependencies_include_oss_reader() -> None:
     try:
         import tomllib
@@ -1723,7 +1729,7 @@ def test_task_attachment_cache_background_sweeper_skips_active_task(
 
 
 def test_task_attachment_cache_sweep_ignores_invalid_binary_marker(tmp_path) -> None:
-    marker_path = tmp_path / "shard" / "31" / "task" / "task_001" / ".task-marker.json"
+    marker_path = tmp_path / "unrelated" / "nested" / ".task-marker.json"
     marker_path.parent.mkdir(parents=True)
     marker_path.write_bytes(b"\xff" * 32)
 
@@ -1857,13 +1863,11 @@ def test_task_attachment_cache_cleanup_rejects_symlink_escape(tmp_path) -> None:
     cache_root = tmp_path / "cache"
     outside_root = tmp_path / "outside"
     task_id = "task_001"
-    shard = hashlib.sha256(task_id.encode("utf-8")).hexdigest()[:2]
     escaped_task_root = outside_root / "task" / task_id
     escaped_task_root.mkdir(parents=True)
     (escaped_task_root / "secret.txt").write_text("secret", encoding="utf-8")
-    shard_parent = cache_root / "shard"
-    shard_parent.mkdir(parents=True)
-    (shard_parent / shard).symlink_to(outside_root, target_is_directory=True)
+    cache_root.mkdir(parents=True)
+    (cache_root / task_id).symlink_to(escaped_task_root, target_is_directory=True)
 
     cache = runtime_sandbox_oss_module.TaskAttachmentCache(
         root=cache_root,
@@ -1925,12 +1929,8 @@ def test_safe_filename_sanitizes_path_traversal_to_task_local_path(tmp_path) -> 
         {"task_id": "task_001", "context_id": "ctx_001"},
         client=FakeSandboxedOssClient(),
     )
-    shard = hashlib.sha256(b"task_001").hexdigest()[:2]
     expected_path = (
         tmp_path
-        / "shard"
-        / shard
-        / "task"
         / "task_001"
         / "files"
         / "file_001"
@@ -2050,7 +2050,7 @@ def test_prepared_media_becomes_matching_media_content(
     assert content_part["source"]["url"] == local_path.resolve().as_uri()
 
 
-def test_runtime_attachment_prompt_does_not_show_local_paths() -> None:
+def test_runtime_attachment_prompt_keeps_file_handling_internal() -> None:
     react_agent = importlib.import_module("qwenpaw.agents.react_agent")
     context = {
         "sandbox_context": {"task_id": "task_001"},
@@ -2067,12 +2067,17 @@ def test_runtime_attachment_prompt_does_not_show_local_paths() -> None:
 
     prompt = "\n".join(react_agent._build_runtime_attachments_context(context))
 
-    assert "runtime_attachment_read" in prompt
+    assert "runtime_attachment_read" not in prompt
+    assert "runtime_sandbox_files_select" not in prompt
+    assert "runtime_sandbox_files_search" not in prompt
     assert "file_001" not in prompt
     assert "expires_at" not in prompt
     assert "file://" not in prompt
     assert "object_key" not in prompt
     assert "bucket" not in prompt
+    assert "/workspace" not in prompt
+    assert "Do not fall back to local file, media, shell, or glob tools" in prompt
+    assert "never describe the failure as a policy restriction" in prompt
 
 
 @pytest.mark.asyncio

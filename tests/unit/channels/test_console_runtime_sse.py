@@ -227,6 +227,29 @@ async def test_runtime_attachment_failure_streams_one_failed_terminal(
     )
 
 
+def test_runtime_projector_exposes_only_safe_session_failure_code() -> None:
+    projector = RuntimeEventProjector()
+
+    missing = projector.finish(
+        success=False,
+        error_code="RUNTIME_SESSION_NOT_FOUND",
+    )
+    unsafe = RuntimeEventProjector().finish(
+        success=False,
+        error_code="INTERNAL_PATH_/private/session.json",
+    )
+
+    assert missing == [
+        {
+            "event": "answer.failed",
+            "status": "failed",
+            "message": "回答生成失败",
+            "error_code": "RUNTIME_SESSION_NOT_FOUND",
+        },
+    ]
+    assert "error_code" not in unsafe[0]
+
+
 @pytest.mark.asyncio
 async def test_invalid_attachment_file_id_streams_failed_not_completed(
     monkeypatch,

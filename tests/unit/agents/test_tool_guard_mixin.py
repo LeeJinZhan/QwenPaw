@@ -489,7 +489,7 @@ class TestRuntimeToolGatewayExecution:
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
         "tool_name",
-        ["runtime_attachment_read", "runtime_sandbox_files_search"],
+        ["runtime_sandbox_files_search", "runtime_sandbox_files_select"],
     )
     async def test_runtime_sandbox_broker_tools_use_dedicated_runtime_authorization(
         self,

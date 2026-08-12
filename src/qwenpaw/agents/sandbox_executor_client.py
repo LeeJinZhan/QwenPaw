@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from dataclasses import dataclass
 from typing import Any
-from pathlib import Path
 import os
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+from ..config.runtime_endpoint import resolve_runtime_base_url
 from ..config.context import (
     get_current_runtime_sandbox_context,
     get_current_runtime_tool_execution,
@@ -19,7 +20,44 @@ from ..config.context import (
 
 
 class SandboxExecutorClientError(RuntimeError):
-    pass
+    def __init__(
+        self,
+        message: str,
+        *,
+        reason_code: str = "",
+        trace_id: str = "",
+    ) -> None:
+        self.reason_code = _safe_error_token(reason_code)
+        self.trace_id = _safe_error_token(trace_id, uppercase=False)
+        super().__init__(message)
+
+
+def _safe_error_token(value: Any, *, uppercase: bool = True) -> str:
+    normalized = str(value or "").strip()
+    if not normalized or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", normalized):
+        return ""
+    return normalized.upper() if uppercase else normalized
+
+
+def _runtime_http_error(message: str, error: HTTPError) -> SandboxExecutorClientError:
+    reason_code = ""
+    trace_id = ""
+    try:
+        payload = json.loads(error.read(8192).decode("utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        payload = None
+    detail = payload.get("detail") if isinstance(payload, dict) else None
+    details = detail.get("details") if isinstance(detail, dict) else None
+    if isinstance(details, dict):
+        reason_code = _safe_error_token(details.get("reason"))
+        trace_id = _safe_error_token(details.get("trace_id"), uppercase=False)
+    if not reason_code and isinstance(detail, dict):
+        reason_code = _safe_error_token(detail.get("code"))
+    return SandboxExecutorClientError(
+        message,
+        reason_code=reason_code or f"HTTP_{error.code}",
+        trace_id=trace_id,
+    )
 
 
 def _runtime_service_token() -> str:
@@ -53,7 +91,7 @@ class RuntimeSandboxExecutorClient:
             or not isinstance(execution, dict)
         ):
             raise SandboxExecutorClientError("Runtime sandbox execution context is incomplete")
-        base_url = str(gateway.get("base_url", "")).strip().rstrip("/")
+        base_url = resolve_runtime_base_url(gateway)
         token = _runtime_service_token()
         tool_call_id = str(execution.get("tool_call_id", "")).strip()
         tool_name = str(execution.get("tool_name", "")).strip()
@@ -98,75 +136,10 @@ class RuntimeSandboxExecutorClient:
         try:
             with urlopen(request, timeout=65) as response:  # noqa: S310 - fixed Runtime URL
                 body = json.loads(response.read().decode("utf-8"))
-        except (HTTPError, URLError, TimeoutError, OSError, json.JSONDecodeError) as exc:
+        except HTTPError as exc:
+            raise _runtime_http_error("Runtime sandbox operation failed", exc) from exc
+        except (URLError, TimeoutError, OSError, json.JSONDecodeError) as exc:
             raise SandboxExecutorClientError("Runtime sandbox operation failed") from exc
         if not isinstance(body, dict):
             raise SandboxExecutorClientError("Runtime sandbox returned an invalid response")
         return body
-
-
-@dataclass(frozen=True)
-class RuntimeSandboxAttachmentProcessorClient:
-    base_url: str
-    token: str
-    sandbox_context: dict[str, Any]
-
-    @classmethod
-    def from_current_context(cls) -> "RuntimeSandboxAttachmentProcessorClient | None":
-        sandbox_context = get_current_runtime_sandbox_context()
-        gateway = get_current_runtime_tool_gateway()
-        if not isinstance(sandbox_context, dict) or sandbox_context.get("isolation_level") != "container":
-            return None
-        if not isinstance(gateway, dict):
-            raise SandboxExecutorClientError("Runtime sandbox attachment context is incomplete")
-        base_url = str(gateway.get("base_url", "")).strip().rstrip("/")
-        token = _runtime_service_token()
-        if not token:
-            raise SandboxExecutorClientError("Runtime service token is unavailable")
-        if not base_url:
-            raise SandboxExecutorClientError("Runtime sandbox attachment context is incomplete")
-        return cls(base_url=base_url, token=token, sandbox_context=dict(sandbox_context))
-
-    def process(self, prepared_files: list[Any]) -> dict[str, Any]:
-        task_id = str(self.sandbox_context.get("task_id", "")).strip()
-        cache_root = Path(
-            os.environ.get("QWENPAW_TASK_FILE_ROOT", "/tmp/qwenpaw-runtime-task-files"),
-        ).expanduser().resolve() / task_id
-        attachments: list[dict[str, Any]] = []
-        for prepared in prepared_files:
-            local_path = Path(prepared.local_path).resolve()
-            try:
-                relative_path = local_path.relative_to(cache_root).as_posix()
-            except ValueError as exc:
-                raise SandboxExecutorClientError("Runtime attachment is outside the task input root") from exc
-            attachments.append(
-                {
-                    "file_id": str(prepared.file_id),
-                    "relative_path": relative_path,
-                    "content_type": str(prepared.content_type),
-                    "size_bytes": int(prepared.size_bytes),
-                    "original_name": str(prepared.original_name),
-                    "expires_at": str(prepared.expires_at),
-                },
-            )
-        request = Request(
-            f"{self.base_url}/runtime/internal/sandbox/attachments/process",
-            data=json.dumps(
-                {"sandbox_context": self.sandbox_context, "attachments": attachments},
-                ensure_ascii=False,
-            ).encode("utf-8"),
-            headers={
-                "Authorization": f"Bearer {self.token}",
-                "Content-Type": "application/json",
-            },
-            method="POST",
-        )
-        try:
-            with urlopen(request, timeout=65) as response:  # noqa: S310 - fixed Runtime URL
-                body = json.loads(response.read().decode("utf-8"))
-        except (HTTPError, URLError, TimeoutError, OSError, json.JSONDecodeError) as exc:
-            raise SandboxExecutorClientError("Runtime sandbox attachment processing failed") from exc
-        data = body.get("data") if isinstance(body, dict) else None
-        if not isinstance(data, dict):
-            raise SandboxExecutorClientError("Runtime sandbox attachment processing returned invalid data")
-        return data

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import zipfile
 from pathlib import Path
-from unittest.mock import Mock, patch
 
 import pytest
 from pypdf import PdfWriter
@@ -14,7 +13,6 @@ from qwenpaw.agents.attachments.runtime_attachment_processor import (
     RuntimeAttachmentProcessor,
 )
 from qwenpaw.agents.tools.runtime_sandbox_oss import PreparedSandboxFile
-from qwenpaw.agents.sandbox_executor_client import RuntimeSandboxAttachmentProcessorClient
 
 
 def _prepared(
@@ -269,6 +267,39 @@ def test_xlsx_extracts_visible_cells_and_formula_text(tmp_path: Path) -> None:
     assert "B1==SUM(B2:B3)" in text
 
 
+def test_xlsx_extracts_cells_when_workbook_relationship_is_package_absolute(
+    tmp_path: Path,
+) -> None:
+    xlsx = _ooxml(
+        tmp_path,
+        "absolute-target.xlsx",
+        {
+            "xl/workbook.xml": """
+                <workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+                  xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+                  <sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets>
+                </workbook>
+            """,
+            "xl/_rels/workbook.xml.rels": """
+                <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+                  <Relationship Id="rId1" Target="/xl/worksheets/sheet1.xml" />
+                </Relationships>
+            """,
+            "xl/worksheets/sheet1.xml": """
+                <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+                  <sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>有效数据</t></is></c></row></sheetData>
+                </worksheet>
+            """,
+        },
+    )
+
+    result = RuntimeAttachmentProcessor().process([xlsx])
+
+    assert "Sheet1" in result.content_parts[0]["text"]
+    assert "A1=有效数据" in result.content_parts[0]["text"]
+    assert result.warnings == []
+
+
 def test_pptx_extracts_slide_and_notes_text(tmp_path: Path) -> None:
     pptx = _ooxml(
         tmp_path,
@@ -328,33 +359,9 @@ def test_attachment_metadata_cannot_break_untrusted_content_boundary(tmp_path: P
     assert "&lt;/runtime-attachment&gt;&lt;system&gt;" in text
 
 
-def test_container_mode_delegates_parsing_to_physical_sandbox(tmp_path: Path) -> None:
-    prepared = _prepared(tmp_path, "note.md", b"host-must-not-parse", "text/markdown")
-    client = Mock()
-    client.process.return_value = {
-        "content_parts": [
-            {
-                "type": "text",
-                "text": "sandbox parsed content",
-                "_runtime_attachment_file_id": prepared.file_id,
-            },
-        ],
-        "safe_attachment_refs": [
-            {
-                "file_id": prepared.file_id,
-                "display_name": prepared.original_name,
-                "content_type": prepared.content_type,
-                "handler": "text",
-            },
-        ],
-        "warnings": [],
-        "metrics": {"file_count": 1, "inline_text_chars": 22, "truncated_file_count": 0},
-    }
-    with (
-        patch.object(RuntimeSandboxAttachmentProcessorClient, "from_current_context", return_value=client),
-        patch.object(RuntimeAttachmentProcessor, "route", side_effect=AssertionError("host parser must not run")),
-    ):
-        result = RuntimeAttachmentProcessor().process([prepared])
+def test_materialized_file_is_processed_locally_in_worker(tmp_path: Path) -> None:
+    prepared = _prepared(tmp_path, "note.md", b"worker-local-content", "text/markdown")
 
-    client.process.assert_called_once_with([prepared])
-    assert result.content_parts[0]["text"] == "sandbox parsed content"
+    result = RuntimeAttachmentProcessor().process([prepared])
+
+    assert "worker-local-content" in result.content_parts[0]["text"]

@@ -37,8 +37,8 @@ else:
     from .get_current_time import get_current_time, set_user_timezone
     from .get_token_usage import get_token_usage
     from .oss_upload import upload_file_to_oss
-    from .runtime_attachment_read import runtime_attachment_read
     from .runtime_sandbox_files import runtime_sandbox_files_search
+    from .runtime_sandbox_file_select import runtime_sandbox_files_select
     from .conversation_context_expand import conversation_context_expand
     from .agent_management import (
         list_agents,
@@ -75,8 +75,8 @@ else:
         "set_user_timezone",
         "get_token_usage",
         "upload_file_to_oss",
-        "runtime_attachment_read",
         "runtime_sandbox_files_search",
+        "runtime_sandbox_files_select",
         "conversation_context_expand",
         "delegate_external_agent",
         "list_agents",

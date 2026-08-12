@@ -44,7 +44,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _RUNTIME_SANDBOX_BROKER_TOOLS = frozenset(
-    {"runtime_attachment_read", "runtime_sandbox_files_search"},
+    {"runtime_sandbox_files_search", "runtime_sandbox_files_select"},
 )
 
 
