@@ -123,15 +123,20 @@ const ChatSessionDrawer: React.FC<ChatSessionDrawerProps> = (props) => {
   const [runtimeConnected, setRuntimeConnected] = useState(() =>
     runtimeConsoleApi.isConnected(),
   );
-  const [runtimeLoginOpen, setRuntimeLoginOpen] = useState(false);
-  const [runtimeUsername, setRuntimeUsername] = useState("");
-  const [runtimePassword, setRuntimePassword] = useState("");
-  const [runtimeLoginLoading, setRuntimeLoginLoading] = useState(false);
-  const [runtimeLoginError, setRuntimeLoginError] = useState("");
+  const [runtimeIdentity, setRuntimeIdentity] = useState(() =>
+    runtimeConsoleApi.currentIdentity(),
+  );
+  const [runtimeConnectOpen, setRuntimeConnectOpen] = useState(false);
+  const [runtimeUserId, setRuntimeUserId] = useState("");
+  const [runtimeOrgId, setRuntimeOrgId] = useState("");
+  const [runtimeConnectLoading, setRuntimeConnectLoading] = useState(false);
+  const [runtimeConnectError, setRuntimeConnectError] = useState("");
 
   useEffect(() => {
-    const syncConnection = () =>
+    const syncConnection = () => {
       setRuntimeConnected(runtimeConsoleApi.isConnected());
+      setRuntimeIdentity(runtimeConsoleApi.currentIdentity());
+    };
     window.addEventListener(RUNTIME_CONNECTION_CHANGED_EVENT, syncConnection);
     return () =>
       window.removeEventListener(
@@ -230,26 +235,28 @@ const ChatSessionDrawer: React.FC<ChatSessionDrawerProps> = (props) => {
     onSessionClick,
   });
 
-  const handleRuntimeLogin = useCallback(async () => {
-    if (!runtimeUsername.trim() || !runtimePassword) return;
-    setRuntimeLoginLoading(true);
-    setRuntimeLoginError("");
+  const handleRuntimeConnect = useCallback(async () => {
+    if (!runtimeUserId.trim() || !runtimeOrgId.trim()) return;
+    setRuntimeConnectLoading(true);
+    setRuntimeConnectError("");
     try {
-      await runtimeConsoleApi.login(runtimeUsername.trim(), runtimePassword);
-      setRuntimePassword("");
-      setRuntimeLoginOpen(false);
+      await runtimeConsoleApi.connect(
+        runtimeUserId.trim(),
+        runtimeOrgId.trim(),
+      );
+      setRuntimeConnectOpen(false);
       await refreshSessions();
     } catch {
-      setRuntimeLoginError(
+      setRuntimeConnectError(
         t(
           "chat.runtime.loginFailed",
-          "Connection failed. Check your Runtime account and try again.",
+          "Connection failed. Check the user ID and organization ID, then try again.",
         ),
       );
     } finally {
-      setRuntimeLoginLoading(false);
+      setRuntimeConnectLoading(false);
     }
-  }, [refreshSessions, runtimePassword, runtimeUsername, t]);
+  }, [refreshSessions, runtimeOrgId, runtimeUserId, t]);
 
   const handleRuntimeDisconnect = useCallback(async () => {
     const currentWasRuntimeManaged =
@@ -326,16 +333,26 @@ const ChatSessionDrawer: React.FC<ChatSessionDrawerProps> = (props) => {
         </div>
         <div className={styles.headerRight}>
           {runtimeConnected ? (
-            <Button type="text" size="small" onClick={handleRuntimeDisconnect}>
-              {t("chat.runtime.disconnect", "Disconnect Runtime")}
-            </Button>
+            <Tooltip
+              title={t("chat.runtime.disconnect", "Disconnect Runtime")}
+            >
+              <Button
+                type="text"
+                size="small"
+                onClick={handleRuntimeDisconnect}
+              >
+                {runtimeIdentity
+                  ? `${runtimeIdentity.orgId}/${runtimeIdentity.userId}`
+                  : t("chat.runtime.disconnect", "Disconnect Runtime")}
+              </Button>
+            </Tooltip>
           ) : (
             <Button
               type="text"
               size="small"
               onClick={() => {
-                setRuntimeLoginError("");
-                setRuntimeLoginOpen(true);
+                setRuntimeConnectError("");
+                setRuntimeConnectOpen(true);
               }}
             >
               {t("chat.runtime.connect", "Connect Runtime")}
@@ -416,45 +433,44 @@ const ChatSessionDrawer: React.FC<ChatSessionDrawerProps> = (props) => {
       />
 
       <Modal
-        open={runtimeLoginOpen}
+        open={runtimeConnectOpen}
         title={t("chat.runtime.connectTitle", "Connect Bank Runtime")}
         okText={t("chat.runtime.connect", "Connect Runtime")}
         cancelText={t("common.cancel", "Cancel")}
-        confirmLoading={runtimeLoginLoading}
+        confirmLoading={runtimeConnectLoading}
         okButtonProps={{
-          disabled: !runtimeUsername.trim() || !runtimePassword,
+          disabled: !runtimeUserId.trim() || !runtimeOrgId.trim(),
         }}
-        onOk={() => void handleRuntimeLogin()}
+        onOk={() => void handleRuntimeConnect()}
         onCancel={() => {
-          if (runtimeLoginLoading) return;
-          setRuntimePassword("");
-          setRuntimeLoginError("");
-          setRuntimeLoginOpen(false);
+          if (runtimeConnectLoading) return;
+          setRuntimeConnectError("");
+          setRuntimeConnectOpen(false);
         }}
       >
         <p>
           {t(
             "chat.runtime.connectDescription",
-            "Sign in with your Runtime user account to view only your own managed conversation history.",
+            "Enter the external user ID and organization ID whose Runtime-managed conversation history you need to inspect.",
           )}
         </p>
         <Space direction="vertical" size={12} style={{ width: "100%" }}>
           <Input
-            autoComplete="username"
-            value={runtimeUsername}
-            placeholder={t("auth.username", "Username")}
-            onChange={(event) => setRuntimeUsername(event.target.value)}
+            autoComplete="off"
+            value={runtimeUserId}
+            placeholder={t("chat.runtime.userId", "User ID")}
+            onChange={(event) => setRuntimeUserId(event.target.value)}
           />
-          <Input.Password
-            autoComplete="current-password"
-            value={runtimePassword}
-            placeholder={t("auth.password", "Password")}
-            onChange={(event) => setRuntimePassword(event.target.value)}
-            onPressEnter={() => void handleRuntimeLogin()}
+          <Input
+            autoComplete="off"
+            value={runtimeOrgId}
+            placeholder={t("chat.runtime.orgId", "Organization ID")}
+            onChange={(event) => setRuntimeOrgId(event.target.value)}
+            onPressEnter={() => void handleRuntimeConnect()}
           />
-          {runtimeLoginError ? (
+          {runtimeConnectError ? (
             <div role="alert" style={{ color: "var(--ant-color-error)" }}>
-              {runtimeLoginError}
+              {runtimeConnectError}
             </div>
           ) : null}
         </Space>

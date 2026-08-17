@@ -5,8 +5,10 @@ import type { ChatHistory, ChatSpec, ChatStatus, Message } from "../types";
 export const RUNTIME_MANAGED_CHANNEL = "bank-runtime";
 export const RUNTIME_SESSION_ID_PREFIX = "runtime:";
 
-const RUNTIME_USER_TOKEN_KEY = "qwenpaw-runtime-user-token";
-const RUNTIME_USER_TOKEN_HEADER = "X-Runtime-User-Token";
+const RUNTIME_EXTERNAL_IDENTITY_KEY =
+  "qwenpaw-runtime-external-identity-v1";
+const RUNTIME_EXTERNAL_USER_ID_HEADER = "X-Runtime-External-User-Id";
+const RUNTIME_EXTERNAL_ORG_ID_HEADER = "X-Runtime-External-Org-Id";
 export const RUNTIME_CONNECTION_CHANGED_EVENT =
   "qwenpaw:runtime-connection-changed";
 
@@ -46,9 +48,17 @@ export interface RuntimeConversationPage {
   page_size?: number;
 }
 
-interface RuntimeLoginResponse {
-  access_token: string;
-  token_type?: string;
+export interface RuntimeExternalIdentity {
+  userId: string;
+  orgId: string;
+}
+
+interface RuntimeConnectResponse {
+  connected: boolean;
+  identity: {
+    user_id: string;
+    org_id: string;
+  };
 }
 
 export class RuntimeConsoleRequestError extends Error {
@@ -61,28 +71,40 @@ export class RuntimeConsoleRequestError extends Error {
   }
 }
 
-function getRuntimeUserToken(): string {
-  return sessionStorage.getItem(RUNTIME_USER_TOKEN_KEY)?.trim() || "";
+function getRuntimeIdentity(): RuntimeExternalIdentity | null {
+  const serialized = sessionStorage.getItem(RUNTIME_EXTERNAL_IDENTITY_KEY);
+  if (!serialized) return null;
+  try {
+    const parsed = JSON.parse(serialized) as Partial<RuntimeExternalIdentity>;
+    const userId = String(parsed.userId || "").trim();
+    const orgId = String(parsed.orgId || "").trim();
+    return userId && orgId ? { userId, orgId } : null;
+  } catch {
+    return null;
+  }
 }
 
-function setRuntimeUserToken(token: string): void {
-  sessionStorage.setItem(RUNTIME_USER_TOKEN_KEY, token);
+function setRuntimeIdentity(identity: RuntimeExternalIdentity): void {
+  sessionStorage.setItem(
+    RUNTIME_EXTERNAL_IDENTITY_KEY,
+    JSON.stringify(identity),
+  );
   window.dispatchEvent(new Event(RUNTIME_CONNECTION_CHANGED_EVENT));
 }
 
-function clearRuntimeUserToken(): void {
-  sessionStorage.removeItem(RUNTIME_USER_TOKEN_KEY);
+function clearRuntimeIdentity(): void {
+  sessionStorage.removeItem(RUNTIME_EXTERNAL_IDENTITY_KEY);
   window.dispatchEvent(new Event(RUNTIME_CONNECTION_CHANGED_EVENT));
 }
 
 async function runtimeRequest<T>(
   path: string,
   init: RequestInit = {},
-  requireRuntimeLogin = true,
+  requireRuntimeIdentity = true,
 ): Promise<T> {
-  const runtimeToken = getRuntimeUserToken();
-  if (requireRuntimeLogin && !runtimeToken) {
-    throw new RuntimeConsoleRequestError(401, "Runtime login required");
+  const runtimeIdentity = getRuntimeIdentity();
+  if (requireRuntimeIdentity && !runtimeIdentity) {
+    throw new RuntimeConsoleRequestError(401, "Runtime identity required");
   }
 
   const headers: Record<string, string> = {
@@ -90,14 +112,17 @@ async function runtimeRequest<T>(
     ...buildAuthHeaders(),
     ...(init.headers as Record<string, string> | undefined),
   };
-  if (runtimeToken) headers[RUNTIME_USER_TOKEN_HEADER] = runtimeToken;
+  if (runtimeIdentity) {
+    headers[RUNTIME_EXTERNAL_USER_ID_HEADER] = runtimeIdentity.userId;
+    headers[RUNTIME_EXTERNAL_ORG_ID_HEADER] = runtimeIdentity.orgId;
+  }
   if (init.body) headers["Content-Type"] = "application/json";
 
   const response = await fetch(getApiUrl(path), { ...init, headers });
   const payload = await response.json().catch(() => null);
   if (!response.ok) {
-    if (response.status === 401 && requireRuntimeLogin) {
-      clearRuntimeUserToken();
+    if (response.status === 401 && requireRuntimeIdentity) {
+      clearRuntimeIdentity();
     }
     const detail = payload?.detail;
     const message =
@@ -184,28 +209,31 @@ export function runtimeConversationToChatHistory(
 }
 
 export const runtimeConsoleApi = {
-  isConnected: (): boolean => Boolean(getRuntimeUserToken()),
+  isConnected: (): boolean => Boolean(getRuntimeIdentity()),
 
-  login: async (username: string, password: string): Promise<void> => {
-    const response = await runtimeRequest<RuntimeLoginResponse>(
-      "/runtime-console/login",
+  currentIdentity: (): RuntimeExternalIdentity | null => getRuntimeIdentity(),
+
+  connect: async (userId: string, orgId: string): Promise<void> => {
+    const response = await runtimeRequest<RuntimeConnectResponse>(
+      "/runtime-console/connect",
       {
         method: "POST",
-        body: JSON.stringify({ username, password }),
+        body: JSON.stringify({ user_id: userId, org_id: orgId }),
       },
       false,
     );
-    const token = response.access_token?.trim();
-    if (!token) {
+    const connectedUserId = response.identity?.user_id?.trim();
+    const connectedOrgId = response.identity?.org_id?.trim();
+    if (!response.connected || !connectedUserId || !connectedOrgId) {
       throw new RuntimeConsoleRequestError(
         502,
-        "Runtime returned an invalid login response",
+        "Runtime returned an invalid connection response",
       );
     }
-    setRuntimeUserToken(token);
+    setRuntimeIdentity({ userId: connectedUserId, orgId: connectedOrgId });
   },
 
-  disconnect: (): void => clearRuntimeUserToken(),
+  disconnect: (): void => clearRuntimeIdentity(),
 
   listConversations: (page = 1, pageSize = 100) =>
     runtimeRequest<RuntimeConversationPage>(

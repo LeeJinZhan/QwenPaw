@@ -13,13 +13,16 @@ describe("runtimeConsoleApi", () => {
     vi.restoreAllMocks();
   });
 
-  it("keeps the Runtime user token in this browser tab only", async () => {
+  it("keeps only the external identity in this browser tab", async () => {
     vi.stubGlobal(
       "fetch",
       vi.fn().mockResolvedValue(
         new Response(
           JSON.stringify({
-            data: { access_token: "runtime-user-token" },
+            data: {
+              connected: true,
+              identity: { user_id: "u001", org_id: "org001" },
+            },
             trace_id: "trace-test",
           }),
           {
@@ -30,14 +33,21 @@ describe("runtimeConsoleApi", () => {
       ),
     );
 
-    await runtimeConsoleApi.login("u001", "Password123!");
+    await runtimeConsoleApi.connect("u001", "org001");
 
     expect(runtimeConsoleApi.isConnected()).toBe(true);
-    expect(localStorage.getItem("qwenpaw-runtime-user-token")).toBeNull();
+    expect(runtimeConsoleApi.currentIdentity()).toEqual({
+      userId: "u001",
+      orgId: "org001",
+    });
+    expect(localStorage.getItem("qwenpaw-runtime-external-identity-v1")).toBeNull();
   });
 
-  it("sends the Runtime token only to the fixed QwenPaw proxy", async () => {
-    sessionStorage.setItem("qwenpaw-runtime-user-token", "runtime-user-token");
+  it("sends external identity only to the fixed QwenPaw proxy", async () => {
+    sessionStorage.setItem(
+      "qwenpaw-runtime-external-identity-v1",
+      JSON.stringify({ userId: "u001", orgId: "org001" }),
+    );
     const fetchMock = vi.fn().mockResolvedValue(
       new Response(JSON.stringify({ items: [], total: 0 }), {
         status: 200,
@@ -53,19 +63,20 @@ describe("runtimeConsoleApi", () => {
       "/api/runtime-console/conversations?page=1&page_size=100",
     );
     expect(fetchMock.mock.calls[0][1].headers).toMatchObject({
-      "X-Runtime-User-Token": "runtime-user-token",
+      "X-Runtime-External-User-Id": "u001",
+      "X-Runtime-External-Org-Id": "org001",
     });
   });
 
-  it("clears only the Runtime token when its login expires", async () => {
+  it("clears only the Runtime identity when the proxy rejects it", async () => {
     sessionStorage.setItem(
-      "qwenpaw-runtime-user-token",
-      "expired-runtime-user-token",
+      "qwenpaw-runtime-external-identity-v1",
+      JSON.stringify({ userId: "u001", orgId: "org001" }),
     );
     vi.stubGlobal(
       "fetch",
       vi.fn().mockResolvedValue(
-        new Response(JSON.stringify({ detail: "Runtime login required" }), {
+        new Response(JSON.stringify({ detail: "Runtime identity required" }), {
           status: 401,
           headers: { "Content-Type": "application/json" },
         }),
@@ -73,7 +84,7 @@ describe("runtimeConsoleApi", () => {
     );
 
     await expect(runtimeConsoleApi.listConversations()).rejects.toThrow(
-      "Runtime login required",
+      "Runtime identity required",
     );
     expect(runtimeConsoleApi.isConnected()).toBe(false);
   });

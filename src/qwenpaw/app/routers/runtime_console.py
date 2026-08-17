@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import ipaddress
 import os
+import re
+import secrets
 from typing import Any
 from urllib.parse import quote, urlparse
 
@@ -21,12 +23,17 @@ RUNTIME_BASE_URL_ENV_KEYS = (
     "RUNTIME_BASE_URL",
 )
 DEFAULT_LOCAL_RUNTIME_BASE_URL = "http://127.0.0.1:8765"
-RUNTIME_USER_TOKEN_HEADER = "X-Runtime-User-Token"
+DEFAULT_RUNTIME_APP_ID = "bank_user_console"
+DEFAULT_LOCAL_RUNTIME_APP_TOKEN = "local-user-console-token"
+DEFAULT_RUNTIME_APP_SCOPES = "assistant:read"
+EXTERNAL_USER_ID_HEADER = "X-Runtime-External-User-Id"
+EXTERNAL_ORG_ID_HEADER = "X-Runtime-External-Org-Id"
+EXTERNAL_ID_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,127}$"
 
 
-class RuntimeLoginRequest(BaseModel):
-    username: str = Field(min_length=1, max_length=128)
-    password: str = Field(min_length=1, max_length=512)
+class RuntimeConnectRequest(BaseModel):
+    user_id: str = Field(min_length=1, max_length=128, pattern=EXTERNAL_ID_PATTERN)
+    org_id: str = Field(min_length=1, max_length=128, pattern=EXTERNAL_ID_PATTERN)
 
 
 def _is_loopback_host(hostname: str) -> bool:
@@ -63,23 +70,52 @@ def _runtime_base_url() -> str:
     return configured
 
 
-def _require_runtime_user_token(token: str | None) -> str:
-    normalized = str(token or "").strip()
-    if not normalized or len(normalized) > 4096:
-        raise HTTPException(status_code=401, detail="Runtime login required")
-    return normalized
+def _runtime_app_headers() -> dict[str, str]:
+    base_url = _runtime_base_url()
+    app_id = os.environ.get("QWENPAW_RUNTIME_APP_ID", DEFAULT_RUNTIME_APP_ID).strip()
+    scopes = os.environ.get(
+        "QWENPAW_RUNTIME_APP_SCOPES",
+        DEFAULT_RUNTIME_APP_SCOPES,
+    ).strip()
+    app_token = os.environ.get("QWENPAW_RUNTIME_APP_TOKEN", "").strip()
+    if not app_token and _is_loopback_host(urlparse(base_url).hostname or ""):
+        app_token = DEFAULT_LOCAL_RUNTIME_APP_TOKEN
+    if not app_id or not scopes or not app_token:
+        raise HTTPException(status_code=503, detail="Runtime is unavailable")
+    return {
+        "Authorization": f"Bearer {app_token}",
+        "X-App-Id": app_id,
+        "X-App-Scopes": scopes,
+    }
+
+
+def _external_identity(user_id: str | None, org_id: str | None) -> dict[str, str]:
+    normalized_user_id = str(user_id or "").strip()
+    normalized_org_id = str(org_id or "").strip()
+    if not normalized_user_id or not normalized_org_id:
+        raise HTTPException(status_code=401, detail="Runtime identity required")
+    if not re.fullmatch(EXTERNAL_ID_PATTERN, normalized_user_id) or not re.fullmatch(
+        EXTERNAL_ID_PATTERN,
+        normalized_org_id,
+    ):
+        raise HTTPException(status_code=400, detail="Runtime identity is invalid")
+    return {"user_id": normalized_user_id, "org_id": normalized_org_id}
 
 
 async def _runtime_request(
     method: str,
     path: str,
     *,
-    runtime_user_token: str = "",
+    external_identity: dict[str, str],
     json_body: dict[str, Any] | None = None,
 ) -> Any:
-    headers = {"Accept": "application/json"}
-    if runtime_user_token:
-        headers["Authorization"] = f"Bearer {runtime_user_token}"
+    headers = {
+        "Accept": "application/json",
+        "X-Request-Id": f"req_qwenpaw_{secrets.token_urlsafe(12)}",
+        "X-External-User-Id": external_identity["user_id"],
+        "X-External-Org-Id": external_identity["org_id"],
+        **_runtime_app_headers(),
+    }
     try:
         async with httpx.AsyncClient(
             base_url=_runtime_base_url(),
@@ -120,44 +156,54 @@ async def _runtime_request(
     return payload
 
 
-@router.post("/login")
-async def login_runtime_console(body: RuntimeLoginRequest) -> Any:
-    return await _runtime_request(
-        "POST",
-        "/runtime/auth/login",
-        json_body={"username": body.username, "password": body.password},
+@router.post("/connect")
+async def connect_runtime_console(body: RuntimeConnectRequest) -> dict[str, Any]:
+    identity = _external_identity(body.user_id, body.org_id)
+    await _runtime_request(
+        "GET",
+        "/api/v1/conversations?page=1&page_size=1",
+        external_identity=identity,
     )
+    return {"connected": True, "identity": identity}
 
 
 @router.get("/conversations")
 async def list_runtime_conversations(
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=100, ge=1, le=100),
-    runtime_user_token: str | None = Header(
+    external_user_id: str | None = Header(
         default=None,
-        alias=RUNTIME_USER_TOKEN_HEADER,
+        alias=EXTERNAL_USER_ID_HEADER,
+    ),
+    external_org_id: str | None = Header(
+        default=None,
+        alias=EXTERNAL_ORG_ID_HEADER,
     ),
 ) -> Any:
-    token = _require_runtime_user_token(runtime_user_token)
+    identity = _external_identity(external_user_id, external_org_id)
     return await _runtime_request(
         "GET",
-        f"/runtime/user/conversations?page={page}&page_size={page_size}",
-        runtime_user_token=token,
+        f"/api/v1/conversations?page={page}&page_size={page_size}",
+        external_identity=identity,
     )
 
 
 @router.get("/conversations/{conversation_id}")
 async def get_runtime_conversation(
     conversation_id: str,
-    runtime_user_token: str | None = Header(
+    external_user_id: str | None = Header(
         default=None,
-        alias=RUNTIME_USER_TOKEN_HEADER,
+        alias=EXTERNAL_USER_ID_HEADER,
+    ),
+    external_org_id: str | None = Header(
+        default=None,
+        alias=EXTERNAL_ORG_ID_HEADER,
     ),
 ) -> Any:
-    token = _require_runtime_user_token(runtime_user_token)
+    identity = _external_identity(external_user_id, external_org_id)
     encoded_id = quote(conversation_id, safe="")
     return await _runtime_request(
         "GET",
-        f"/runtime/user/conversations/{encoded_id}",
-        runtime_user_token=token,
+        f"/api/v1/conversations/{encoded_id}",
+        external_identity=identity,
     )
