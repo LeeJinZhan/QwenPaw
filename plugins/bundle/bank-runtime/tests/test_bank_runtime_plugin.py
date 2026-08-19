@@ -78,6 +78,12 @@ def test_delivery_manifest_pins_source_and_blocks_unknown_image_digest() -> None
         "dev": ["bank-runtime-console@0.1.0"],
         "production": [],
     }
+    assert delivery["production_profile"]["dependency_lock_input"] == (
+        "production-python311-linux-amd64.in"
+    )
+    assert delivery["production_profile"]["dependency_lock"] == (
+        "production-python311-linux-amd64.lock"
+    )
     assert delivery["bank_runtime_protocol_versions"][-2:] == [
         "sandbox-files/2.0",
         "physical-sandbox/1.0",

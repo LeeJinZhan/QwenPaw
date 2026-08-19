@@ -26,7 +26,9 @@
     "root_config_example": "production-config.example.json",
     "agent_config_example": "production-agent.example.json",
     "registry_policy": "production-policy.json",
-    "requirements": "production-requirements.txt"
+    "requirements": "production-requirements.txt",
+    "dependency_lock_input": "production-python311-linux-amd64.in",
+    "dependency_lock": "production-python311-linux-amd64.lock"
   },
   "stable_rollback": {
     "git_ref": "refs/heads/rollback/bank-runtime-1.1.12-92785ad6",

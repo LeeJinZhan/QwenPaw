@@ -1,4 +1,4 @@
-ARG PYTHON_IMAGE=python:3.11-slim-bookworm
+ARG PYTHON_IMAGE=python:3.11-slim-bookworm@sha256:2e32f7d302adc1c37428355c1e646897c0c53f4fd60b6a551245fb90ee129f91
 
 FROM ${PYTHON_IMAGE}
 
@@ -16,21 +16,37 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /opt/qwenpaw
+COPY plugins/bundle/bank-runtime/production-python311-linux-amd64.lock /tmp/production-python311-linux-amd64.lock
+RUN python -m pip install --no-cache-dir --require-hashes \
+        -r /tmp/production-python311-linux-amd64.lock \
+    && rm -f /tmp/production-python311-linux-amd64.lock
+
 COPY pyproject.toml setup.py README.md ./
 COPY src ./src
 COPY website/public/docs ./src/qwenpaw/docs
-RUN pip install --no-cache-dir . \
+RUN python -m pip install --no-cache-dir --no-deps --no-build-isolation . \
     && rm -rf build \
     && apt-get purge -y --auto-remove build-essential
 
-COPY plugins/bundle/bank-runtime/production-requirements.txt /tmp/production-requirements.txt
-RUN pip install --no-cache-dir -r /tmp/production-requirements.txt \
-    && rm -f /tmp/production-requirements.txt
+RUN python -m pip uninstall -y pip wheel \
+    && python -c 'import importlib.util; assert importlib.util.find_spec("pip") is None; assert importlib.util.find_spec("pkg_resources") is not None'
 
 COPY plugins/bundle/bank-runtime /opt/bank-runtime-plugin
 RUN useradd --create-home --uid 10001 --shell /usr/sbin/nologin qwenpaw \
     && mkdir -p /app/working /app/working.secret /app/working.backups /app/task-files \
     && chown -R 10001:10001 /app
+
+ARG PYTHON_IMAGE
+ARG BANK_RUNTIME_SOURCE_COMMIT
+RUN python -c "import os,re,sys; value=os.environ.get('BANK_RUNTIME_SOURCE_COMMIT', ''); sys.exit(0 if re.fullmatch(r'[0-9a-f]{40}', value) else 1)" \
+    || (echo "source_commit_invalid" >&2; exit 1)
+
+LABEL org.opencontainers.image.title="Bank Runtime QwenPaw" \
+    org.opencontainers.image.version="2.1.0-bank-runtime.0.7.0" \
+    org.opencontainers.image.source="https://github.com/LeeJinZhan/QwenPaw" \
+    org.opencontainers.image.revision="${BANK_RUNTIME_SOURCE_COMMIT}" \
+    org.opencontainers.image.base.name="${PYTHON_IMAGE}" \
+    io.bank-runtime.qwenpaw.upstream-revision="e4995dcf516d27400fbc33891aa3dcbcf79acc7a"
 
 USER 10001:10001
 EXPOSE 8088

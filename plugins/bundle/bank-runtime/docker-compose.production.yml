@@ -3,6 +3,8 @@ services:
     build:
       context: ../../..
       dockerfile: plugins/bundle/bank-runtime/Dockerfile.production
+      args:
+        BANK_RUNTIME_SOURCE_COMMIT: ${QWENPAW_CANDIDATE_SOURCE_COMMIT:?QWENPAW_CANDIDATE_SOURCE_COMMIT is required}
     image: ${QWENPAW_CANDIDATE_IMAGE:?QWENPAW_CANDIDATE_IMAGE is required}
     environment:
       BANK_RUNTIME_PRODUCTION_GUARD: "1"
