@@ -129,14 +129,22 @@ async def test_plugin_is_discovered_and_loaded_by_qwenpaw_loader(
 
 def test_capability_endpoint_is_safe_and_declares_skeleton_state(
     fresh_registry: PluginRegistry,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setenv("QWENPAW_SERVICE_TOKEN", "candidate-service-secret")
     manifest = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
     app = FastAPI()
     fresh_registry.set_plugin_http_app(app)
     module = _load_entry_module()
     module.BankRuntimePlugin().register(_plugin_api(fresh_registry, manifest))
 
-    response = TestClient(app).get("/api/bank-runtime/capabilities")
+    response = TestClient(app).get(
+        "/api/bank-runtime/capabilities",
+        headers={
+            "Authorization": "Bearer candidate-service-secret",
+            "X-Agent-Id": "bank-assistant",
+        },
+    )
 
     assert response.status_code == 200
     assert response.json() == {
@@ -165,6 +173,62 @@ def test_capability_endpoint_is_safe_and_declares_skeleton_state(
     serialized = response.text.lower()
     for forbidden in ("token", "credential", "path", "model", "user"):
         assert forbidden not in serialized
+
+
+@pytest.mark.parametrize(
+    ("headers", "expected_status"),
+    [
+        ({"X-Agent-Id": "bank-assistant"}, 401),
+        (
+            {
+                "Authorization": "Bearer wrong-secret",
+                "X-Agent-Id": "bank-assistant",
+            },
+            401,
+        ),
+        ({"Authorization": "Bearer candidate-service-secret"}, 401),
+    ],
+)
+def test_capability_endpoint_fails_closed_without_trusted_service_identity(
+    fresh_registry: PluginRegistry,
+    monkeypatch: pytest.MonkeyPatch,
+    headers: dict[str, str],
+    expected_status: int,
+) -> None:
+    monkeypatch.setenv("QWENPAW_SERVICE_TOKEN", "candidate-service-secret")
+    manifest = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
+    app = FastAPI()
+    fresh_registry.set_plugin_http_app(app)
+    module = _load_entry_module()
+    module.BankRuntimePlugin().register(_plugin_api(fresh_registry, manifest))
+
+    response = TestClient(app).get(
+        "/api/bank-runtime/capabilities",
+        headers=headers,
+    )
+
+    assert response.status_code == expected_status
+    assert "candidate-service-secret" not in response.text
+    assert "wrong-secret" not in response.text
+
+
+def test_capability_endpoint_fails_closed_when_service_token_is_not_configured(
+    fresh_registry: PluginRegistry,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("QWENPAW_SERVICE_TOKEN", raising=False)
+    manifest = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
+    app = FastAPI()
+    fresh_registry.set_plugin_http_app(app)
+    module = _load_entry_module()
+    module.BankRuntimePlugin().register(_plugin_api(fresh_registry, manifest))
+
+    response = TestClient(app).get(
+        "/api/bank-runtime/capabilities",
+        headers={"Authorization": "Bearer any", "X-Agent-Id": "bank-assistant"},
+    )
+
+    assert response.status_code == 503
 
 
 def test_duplicate_registration_fails_before_adding_partial_state(
