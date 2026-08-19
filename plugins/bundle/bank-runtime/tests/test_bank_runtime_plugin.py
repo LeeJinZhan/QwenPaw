@@ -71,7 +71,12 @@ def test_delivery_manifest_pins_source_and_blocks_unknown_image_digest() -> None
         "e4995dcf516d27400fbc33891aa3dcbcf79acc7a"
     )
     assert delivery["bank_runtime_plugin_version"] == "0.6.0"
-    assert delivery["runtime_release_id"] == "candidate-2.1-sandbox"
+    assert delivery["runtime_release_id"] == "candidate-2.1-console"
+    assert delivery["optional_pawapps"] == {
+        "local": ["bank-runtime-console@0.1.0"],
+        "dev": ["bank-runtime-console@0.1.0"],
+        "production": [],
+    }
     assert delivery["bank_runtime_protocol_versions"][-2:] == [
         "sandbox-files/2.0",
         "physical-sandbox/1.0",

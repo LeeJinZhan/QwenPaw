@@ -13,7 +13,12 @@
     "sandbox-files/2.0",
     "physical-sandbox/1.0"
   ],
-  "runtime_release_id": "candidate-2.1-sandbox",
+  "runtime_release_id": "candidate-2.1-console",
+  "optional_pawapps": {
+    "local": ["bank-runtime-console@0.1.0"],
+    "dev": ["bank-runtime-console@0.1.0"],
+    "production": []
+  },
   "stable_rollback": {
     "git_ref": "refs/heads/rollback/bank-runtime-1.1.12-92785ad6",
     "git_commit": "92785ad6a64ec0e11e2a59ba8aeac5bee60cb450",
