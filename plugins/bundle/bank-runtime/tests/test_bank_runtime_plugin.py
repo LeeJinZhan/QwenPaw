@@ -70,8 +70,8 @@ def test_delivery_manifest_pins_source_and_blocks_unknown_image_digest() -> None
     assert delivery["qwenpaw_upstream_commit"] == (
         "e4995dcf516d27400fbc33891aa3dcbcf79acc7a"
     )
-    assert delivery["bank_runtime_plugin_version"] == "0.1.0"
-    assert delivery["runtime_release_id"] == "candidate-2.1-skeleton"
+    assert delivery["bank_runtime_plugin_version"] == "0.2.0"
+    assert delivery["runtime_release_id"] == "candidate-2.1-text-ingress"
     assert delivery["stable_rollback"] == {
         "git_ref": "refs/heads/rollback/bank-runtime-1.1.12-92785ad6",
         "git_commit": "92785ad6a64ec0e11e2a59ba8aeac5bee60cb450",
@@ -81,7 +81,8 @@ def test_delivery_manifest_pins_source_and_blocks_unknown_image_digest() -> None
     assert delivery["promotion_blockers"] == [
         "stable_image_digest_missing",
         "candidate_image_digest_missing",
-        "bank_protocols_not_installed",
+        "managed_session_not_installed",
+        "gateway_middleware_not_installed",
     ]
 
 
@@ -127,7 +128,7 @@ async def test_plugin_is_discovered_and_loaded_by_qwenpaw_loader(
     assert fresh_registry.get_plugin_manifest("bank-runtime") is not None
 
 
-def test_capability_endpoint_is_safe_and_declares_skeleton_state(
+def test_capability_endpoint_is_safe_and_declares_text_ingress_state(
     fresh_registry: PluginRegistry,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -149,10 +150,10 @@ def test_capability_endpoint_is_safe_and_declares_skeleton_state(
     assert response.status_code == 200
     assert response.json() == {
         "qwenpaw_version": "2.1.0",
-        "bank_runtime_plugin_version": "0.1.0",
-        "protocols": [],
+        "bank_runtime_plugin_version": "0.2.0",
+        "protocols": ["bank-runtime-text-sse/v1"],
         "capabilities": {
-            "agent_scoped_chat": False,
+            "agent_scoped_chat": True,
             "managed_session": False,
             "gateway_middleware": False,
             "attachment_batch_authorize": False,

@@ -1,18 +1,34 @@
-"""Fail-closed placeholder for the future Runtime ingress channel."""
+"""Dedicated channel for trusted Bank Runtime ingress."""
 
 from __future__ import annotations
 
-from qwenpaw.app.channels.base import BaseChannel
+from qwenpaw.app.channels.console.channel import ConsoleChannel
+from qwenpaw.app.channels.renderer import ChannelDisplayConfig
 
 
-class BankRuntimeChannel(BaseChannel):
-    """Registration marker; Task 5 supplies the real ingress behavior."""
+class BankRuntimeChannel(ConsoleChannel):
+    """Console-compatible executor isolated under a distinct channel key."""
 
     channel = "bank-runtime"
     uses_manager_queue = False
 
     @classmethod
-    def from_config(cls, *args, **kwargs):
-        raise RuntimeError(
-            "Bank Runtime ingress is disabled until its protocol is installed",
+    def from_config(
+        cls,
+        process,
+        config,
+        on_reply_sent=None,
+        display_config=None,
+        no_text_debounce=True,
+        workspace_dir=None,
+    ):
+        del no_text_debounce
+        return cls(
+            process=process,
+            enabled=bool(getattr(config, "enabled", False)),
+            bot_prefix=str(getattr(config, "bot_prefix", "") or ""),
+            on_reply_sent=on_reply_sent,
+            display_config=display_config or ChannelDisplayConfig.from_config(config),
+            workspace_dir=workspace_dir,
+            media_dir=str(getattr(config, "media_dir", "") or ""),
         )

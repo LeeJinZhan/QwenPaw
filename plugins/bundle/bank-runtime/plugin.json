@@ -1,9 +1,9 @@
 {
   "id": "bank-runtime",
   "name": "Bank Runtime",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "general",
-  "description": "Fail-closed integration boundary for Bank Agent Runtime",
+  "description": "Authenticated text and SSE ingress for Bank Agent Runtime",
   "author": "Bank Agent Runtime Team",
   "entry": {
     "backend": "plugin.py"
@@ -15,6 +15,6 @@
   },
   "meta": {
     "runtime_integration": true,
-    "default_state": "skeleton"
+    "default_state": "text-ingress"
   }
 }

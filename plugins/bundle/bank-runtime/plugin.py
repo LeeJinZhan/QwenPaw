@@ -2,12 +2,22 @@
 
 from __future__ import annotations
 
+from fastapi import APIRouter
+
 from qwenpaw.plugins.api import PluginApi
 
 from bank_runtime.capabilities import build_capability_router
 from bank_runtime.channel import BankRuntimeChannel
 from bank_runtime.hooks import bank_runtime_startup_guard
 from bank_runtime.middleware import bank_runtime_middleware_factory
+from bank_runtime.router import build_ingress_router
+
+
+def _build_http_router() -> APIRouter:
+    router = APIRouter()
+    router.include_router(build_capability_router())
+    router.include_router(build_ingress_router())
+    return router
 
 
 class BankRuntimePlugin:
@@ -24,7 +34,7 @@ class BankRuntimePlugin:
         # hot-reload creates another plugin instance, the HTTP prefix or
         # channel collision aborts before hooks and middleware are appended.
         api.register_http_router(
-            build_capability_router(),
+            _build_http_router(),
             prefix="/bank-runtime",
             tags=["bank-runtime"],
         )

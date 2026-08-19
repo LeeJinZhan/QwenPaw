@@ -2,17 +2,15 @@
 
 from __future__ import annotations
 
-import hmac
-import os
-
-from fastapi import APIRouter, Header, HTTPException, status
+from fastapi import APIRouter, Header
 
 from qwenpaw.__version__ import __version__ as qwenpaw_version
 
 from .release import BANK_RUNTIME_PLUGIN_VERSION
+from .auth import require_service_identity
 
 _CAPABILITIES = {
-    "agent_scoped_chat": False,
+    "agent_scoped_chat": True,
     "managed_session": False,
     "gateway_middleware": False,
     "attachment_batch_authorize": False,
@@ -36,7 +34,7 @@ def capability_manifest() -> dict:
     return {
         "qwenpaw_version": qwenpaw_version,
         "bank_runtime_plugin_version": BANK_RUNTIME_PLUGIN_VERSION,
-        "protocols": [],
+        "protocols": ["bank-runtime-text-sse/v1"],
         "capabilities": dict(_CAPABILITIES),
         "disabled_features": list(_DISABLED_FEATURES),
     }
@@ -50,32 +48,11 @@ def build_capability_router() -> APIRouter:
         authorization: str | None = Header(default=None),
         agent_id: str | None = Header(default=None, alias="X-Agent-Id"),
     ) -> dict:
-        _require_service_identity(authorization, agent_id)
+        require_service_identity(
+            authorization,
+            agent_id,
+            unavailable_detail="Capability preflight is unavailable",
+        )
         return capability_manifest()
 
     return router
-
-
-def _require_service_identity(
-    authorization: str | None,
-    agent_id: str | None,
-) -> None:
-    configured = os.environ.get("QWENPAW_SERVICE_TOKEN", "").strip()
-    if not configured:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Capability preflight is unavailable",
-        )
-    supplied = ""
-    if authorization and authorization.startswith("Bearer "):
-        supplied = authorization.removeprefix("Bearer ").strip()
-    if (
-        not supplied
-        or not hmac.compare_digest(supplied, configured)
-        or not str(agent_id or "").strip()
-    ):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Service identity is required",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
