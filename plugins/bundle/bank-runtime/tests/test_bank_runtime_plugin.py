@@ -1,0 +1,195 @@
+from __future__ import annotations
+
+import importlib.util
+import json
+import sys
+from pathlib import Path
+
+import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+
+from qwenpaw.plugins.api import PluginApi
+from qwenpaw.plugins.architecture import PluginManifest
+from qwenpaw.plugins.loader import PluginLoader
+from qwenpaw.plugins.registry import PluginRegistry
+
+PLUGIN_ROOT = Path(__file__).resolve().parents[1]
+MANIFEST_PATH = PLUGIN_ROOT / "plugin.json"
+ENTRY_PATH = PLUGIN_ROOT / "plugin.py"
+DELIVERY_PATH = PLUGIN_ROOT / "delivery-manifest.json"
+
+
+@pytest.fixture
+def fresh_registry():
+    previous = PluginRegistry._instance
+    PluginRegistry._instance = None
+    registry = PluginRegistry()
+    try:
+        yield registry
+    finally:
+        PluginRegistry._instance = previous
+
+
+def _load_entry_module():
+    root = str(PLUGIN_ROOT)
+    if root not in sys.path:
+        sys.path.insert(0, root)
+    spec = importlib.util.spec_from_file_location(
+        "bank_runtime_plugin_entry_for_test",
+        ENTRY_PATH,
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _plugin_api(registry: PluginRegistry, manifest: dict) -> PluginApi:
+    api = PluginApi("bank-runtime", config={}, manifest=manifest)
+    api.set_registry(registry)
+    return api
+
+
+def test_manifest_is_strictly_scoped_to_qwenpaw_2_1() -> None:
+    manifest_data = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
+    manifest = PluginManifest.from_dict(manifest_data)
+
+    assert manifest.id == "bank-runtime"
+    assert manifest.entry.backend == "plugin.py"
+    assert manifest_data["qwenpaw_version"] == {
+        "min": "2.1.0",
+        "max": "2.2.0",
+    }
+
+
+def test_delivery_manifest_pins_source_and_blocks_unknown_image_digest() -> None:
+    delivery = json.loads(DELIVERY_PATH.read_text(encoding="utf-8"))
+
+    assert delivery["schema_version"] == "bank-runtime-delivery/v1"
+    assert delivery["qwenpaw_upstream_commit"] == (
+        "e4995dcf516d27400fbc33891aa3dcbcf79acc7a"
+    )
+    assert delivery["bank_runtime_plugin_version"] == "0.1.0"
+    assert delivery["runtime_release_id"] == "candidate-2.1-skeleton"
+    assert delivery["stable_rollback"] == {
+        "git_ref": "refs/heads/rollback/bank-runtime-1.1.12-92785ad6",
+        "git_commit": "92785ad6a64ec0e11e2a59ba8aeac5bee60cb450",
+        "image_digest": None,
+    }
+    assert delivery["candidate_image_digest"] is None
+    assert delivery["promotion_blockers"] == [
+        "stable_image_digest_missing",
+        "candidate_image_digest_missing",
+        "bank_protocols_not_installed",
+    ]
+
+
+def test_plugin_registers_router_channel_hook_and_middleware(
+    fresh_registry: PluginRegistry,
+) -> None:
+    manifest = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
+    app = FastAPI()
+    fresh_registry.set_plugin_http_app(app)
+    module = _load_entry_module()
+
+    module.BankRuntimePlugin().register(_plugin_api(fresh_registry, manifest))
+
+    assert [item.prefix for item in fresh_registry.get_http_router_registrations()] == [
+        "/bank-runtime",
+    ]
+    assert set(fresh_registry.get_registered_channels()) == {"bank-runtime"}
+    assert [item.hook_name for item in fresh_registry.get_startup_hooks()] == [
+        "bank_runtime_startup_guard",
+    ]
+    middleware = fresh_registry.get_middleware_factories()
+    assert len(middleware) == 1
+    assert middleware[0].plugin_id == "bank-runtime"
+
+
+@pytest.mark.asyncio
+async def test_plugin_is_discovered_and_loaded_by_qwenpaw_loader(
+    fresh_registry: PluginRegistry,
+) -> None:
+    app = FastAPI()
+    fresh_registry.set_plugin_http_app(app)
+    loader = PluginLoader(plugin_dirs=[PLUGIN_ROOT.parent])
+    discovered = {
+        manifest.id: (manifest, source_path)
+        for manifest, source_path in loader.discover_plugins()
+    }
+
+    manifest, source_path = discovered["bank-runtime"]
+    record = await loader.load_plugin(manifest, source_path)
+
+    assert record.enabled is True
+    assert record.manifest.id == "bank-runtime"
+    assert fresh_registry.get_plugin_manifest("bank-runtime") is not None
+
+
+def test_capability_endpoint_is_safe_and_declares_skeleton_state(
+    fresh_registry: PluginRegistry,
+) -> None:
+    manifest = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
+    app = FastAPI()
+    fresh_registry.set_plugin_http_app(app)
+    module = _load_entry_module()
+    module.BankRuntimePlugin().register(_plugin_api(fresh_registry, manifest))
+
+    response = TestClient(app).get("/api/bank-runtime/capabilities")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "qwenpaw_version": "2.1.0",
+        "bank_runtime_plugin_version": "0.1.0",
+        "protocols": [],
+        "capabilities": {
+            "agent_scoped_chat": False,
+            "managed_session": False,
+            "gateway_middleware": False,
+            "attachment_batch_authorize": False,
+            "sandbox_file_search_select": False,
+            "personal_skills": False,
+            "runtime_console_readonly": False,
+        },
+        "disabled_features": [
+            "os_shell",
+            "creator",
+            "browser_use",
+            "computer_use",
+            "external_harnesses",
+            "market_plugins",
+            "long_term_memory",
+        ],
+    }
+    serialized = response.text.lower()
+    for forbidden in ("token", "credential", "path", "model", "user"):
+        assert forbidden not in serialized
+
+
+def test_duplicate_registration_fails_before_adding_partial_state(
+    fresh_registry: PluginRegistry,
+) -> None:
+    manifest = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
+    app = FastAPI()
+    fresh_registry.set_plugin_http_app(app)
+    module = _load_entry_module()
+    plugin = module.BankRuntimePlugin()
+    api = _plugin_api(fresh_registry, manifest)
+    plugin.register(api)
+    expected_routes = list(app.routes)
+
+    with pytest.raises(RuntimeError, match="already registered"):
+        plugin.register(api)
+
+    assert app.routes == expected_routes
+    assert len(fresh_registry.get_http_router_registrations()) == 1
+    assert len(fresh_registry.get_startup_hooks()) == 1
+    assert len(fresh_registry.get_middleware_factories()) == 1
+
+    with pytest.raises(ValueError, match="already registered"):
+        module.BankRuntimePlugin().register(api)
+
+    assert len(fresh_registry.get_http_router_registrations()) == 1
+    assert len(fresh_registry.get_startup_hooks()) == 1
+    assert len(fresh_registry.get_middleware_factories()) == 1

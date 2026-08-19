@@ -1,0 +1,20 @@
+{
+  "id": "bank-runtime",
+  "name": "Bank Runtime",
+  "version": "0.1.0",
+  "type": "general",
+  "description": "Fail-closed integration boundary for Bank Agent Runtime",
+  "author": "Bank Agent Runtime Team",
+  "entry": {
+    "backend": "plugin.py"
+  },
+  "dependencies": [],
+  "qwenpaw_version": {
+    "min": "2.1.0",
+    "max": "2.2.0"
+  },
+  "meta": {
+    "runtime_integration": true,
+    "default_state": "skeleton"
+  }
+}

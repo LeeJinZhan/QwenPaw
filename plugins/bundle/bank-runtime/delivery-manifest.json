@@ -1,0 +1,19 @@
+{
+  "schema_version": "bank-runtime-delivery/v1",
+  "qwenpaw_version": "2.1.0",
+  "qwenpaw_upstream_commit": "e4995dcf516d27400fbc33891aa3dcbcf79acc7a",
+  "bank_runtime_plugin_version": "0.1.0",
+  "bank_runtime_protocol_versions": [],
+  "runtime_release_id": "candidate-2.1-skeleton",
+  "stable_rollback": {
+    "git_ref": "refs/heads/rollback/bank-runtime-1.1.12-92785ad6",
+    "git_commit": "92785ad6a64ec0e11e2a59ba8aeac5bee60cb450",
+    "image_digest": null
+  },
+  "candidate_image_digest": null,
+  "promotion_blockers": [
+    "stable_image_digest_missing",
+    "candidate_image_digest_missing",
+    "bank_protocols_not_installed"
+  ]
+}
