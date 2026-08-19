@@ -1,9 +1,9 @@
 {
   "id": "bank-runtime",
   "name": "Bank Runtime",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "type": "general",
-  "description": "Managed Runtime ingress with Profile, Personal Skills and Tool Gateway",
+  "description": "Managed Runtime ingress with governed sessions, tools, files and sandbox execution",
   "author": "Bank Agent Runtime Team",
   "entry": {
     "backend": "plugin.py"
@@ -15,6 +15,6 @@
   },
   "meta": {
     "runtime_integration": true,
-    "default_state": "gateway"
+    "default_state": "sandbox"
   }
 }

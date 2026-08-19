@@ -510,6 +510,7 @@ def _sanitize_value(value: Any) -> Any:
 def _is_unsafe_file_block(value: dict[str, Any]) -> bool:
     if str(value.get("type") or "").lower() not in {
         "audio",
+        "data",
         "file",
         "image",
         "video",

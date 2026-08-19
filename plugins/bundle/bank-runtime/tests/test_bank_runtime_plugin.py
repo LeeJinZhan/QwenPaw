@@ -70,8 +70,12 @@ def test_delivery_manifest_pins_source_and_blocks_unknown_image_digest() -> None
     assert delivery["qwenpaw_upstream_commit"] == (
         "e4995dcf516d27400fbc33891aa3dcbcf79acc7a"
     )
-    assert delivery["bank_runtime_plugin_version"] == "0.5.0"
-    assert delivery["runtime_release_id"] == "candidate-2.1-gateway"
+    assert delivery["bank_runtime_plugin_version"] == "0.6.0"
+    assert delivery["runtime_release_id"] == "candidate-2.1-sandbox"
+    assert delivery["bank_runtime_protocol_versions"][-2:] == [
+        "sandbox-files/2.0",
+        "physical-sandbox/1.0",
+    ]
     assert delivery["stable_rollback"] == {
         "git_ref": "refs/heads/rollback/bank-runtime-1.1.12-92785ad6",
         "git_commit": "92785ad6a64ec0e11e2a59ba8aeac5bee60cb450",
@@ -106,10 +110,13 @@ def test_plugin_registers_router_channel_hook_and_middleware(
         "rt_hook_bank-runtime_bank_runtime_disable_long_term_memory",
         "rt_hook_bank-runtime_bank_runtime_personalization",
         "rt_hook_bank-runtime_bank_runtime_gateway_install",
+        "rt_hook_bank-runtime_bank_runtime_sandbox_install",
+        "rt_hook_bank-runtime_bank_runtime_attachment_prepare",
         "rt_hook_bank-runtime_bank_runtime_personalization_redaction",
         "rt_hook_bank-runtime_bank_runtime_session_commit",
         "rt_hook_bank-runtime_bank_runtime_session_error",
         "rt_hook_bank-runtime_bank_runtime_personalization_cleanup",
+        "rt_hook_bank-runtime_bank_runtime_sandbox_cleanup",
         "rt_hook_bank-runtime_bank_runtime_session_cleanup",
         "install_skills_bank-runtime",
     ]
@@ -160,7 +167,7 @@ def test_capability_endpoint_is_safe_and_declares_managed_session_state(
     assert response.status_code == 200
     assert response.json() == {
         "qwenpaw_version": "2.1.0",
-        "bank_runtime_plugin_version": "0.5.0",
+        "bank_runtime_plugin_version": "0.6.0",
         "protocols": [
             "bank-runtime-text-sse/v1",
             "session/2.0",
@@ -168,13 +175,15 @@ def test_capability_endpoint_is_safe_and_declares_managed_session_state(
             "personal-skills/1.0",
             "bank-assistant/1.0",
             "tool-gateway/2.0",
+            "sandbox-files/2.0",
+            "physical-sandbox/1.0",
         ],
         "capabilities": {
             "agent_scoped_chat": True,
             "managed_session": True,
             "gateway_middleware": True,
-            "attachment_batch_authorize": False,
-            "sandbox_file_search_select": False,
+            "attachment_batch_authorize": True,
+            "sandbox_file_search_select": True,
             "personal_skills": True,
             "runtime_console_readonly": False,
         },
@@ -266,12 +275,12 @@ def test_duplicate_registration_fails_before_adding_partial_state(
 
     assert app.routes == expected_routes
     assert len(fresh_registry.get_http_router_registrations()) == 1
-    assert len(fresh_registry.get_startup_hooks()) == 13
+    assert len(fresh_registry.get_startup_hooks()) == 16
     assert len(fresh_registry.get_middleware_factories()) == 1
 
     with pytest.raises(ValueError, match="already registered"):
         module.BankRuntimePlugin().register(api)
 
     assert len(fresh_registry.get_http_router_registrations()) == 1
-    assert len(fresh_registry.get_startup_hooks()) == 13
+    assert len(fresh_registry.get_startup_hooks()) == 16
     assert len(fresh_registry.get_middleware_factories()) == 1

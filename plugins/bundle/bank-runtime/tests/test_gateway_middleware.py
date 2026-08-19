@@ -61,6 +61,18 @@ class _DelegateEngine:
         )
 
 
+class _SandboxExecutor:
+    def __init__(self, events, result=None) -> None:
+        self.events = events
+        self.result = result or {"exit_code": 0, "stdout": "sandbox-ok", "stderr": ""}
+
+    async def execute(self, *, tool_call_id, tool_name, tool_input):
+        self.events.append(
+            ("sandbox_execute", tool_call_id, tool_name, dict(tool_input))
+        )
+        return dict(self.result)
+
+
 @pytest.mark.asyncio
 async def test_gateway_order_is_preflight_guard_execute_result() -> None:
     client = _Client()
@@ -150,6 +162,167 @@ async def test_terminal_chunk_and_response_report_result_once() -> None:
     ]
 
     assert [event[0] for event in client.events].count("result") == 1
+
+
+@pytest.mark.asyncio
+async def test_physical_tool_executes_only_through_runtime_sandbox() -> None:
+    client = _Client()
+    middleware = BankRuntimeGatewayMiddleware(
+        client,
+        sandbox_executor=_SandboxExecutor(client.events),
+    )
+    engine = GatewayPermissionEngine(
+        _DelegateEngine(PermissionBehavior.ALLOW, client.events),
+        middleware,
+    )
+    tool = SimpleNamespace(name="execute_shell_command", is_external_tool=False)
+    decision = await engine.check_permission(tool, {"command": "pwd"})
+    assert decision.behavior == PermissionBehavior.ALLOW
+
+    async def forbidden_local_execute(**_kwargs):
+        raise AssertionError("local QwenPaw execution must not run")
+        yield
+
+    call = ToolCallBlock(
+        id="model_call_shell",
+        name="execute_shell_command",
+        input=json.dumps({"command": "pwd"}),
+    )
+    output = [
+        item
+        async for item in middleware.on_acting(
+            SimpleNamespace(),
+            {"tool_call": call},
+            forbidden_local_execute,
+        )
+    ]
+
+    assert len(output) == 1
+    assert isinstance(output[0], ToolResponse)
+    assert output[0].state == ToolResultState.SUCCESS
+    assert "sandbox-ok" in output[0].content[0].text
+    assert [event[0] for event in client.events] == [
+        "preflight",
+        "tool_guard",
+        "guard",
+        "sandbox_execute",
+        "result",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_nonzero_physical_shell_result_is_reported_as_failed() -> None:
+    client = _Client()
+    middleware = BankRuntimeGatewayMiddleware(
+        client,
+        sandbox_executor=_SandboxExecutor(
+            client.events,
+            {"exit_code": 2, "stdout": "", "stderr": "denied"},
+        ),
+    )
+    engine = GatewayPermissionEngine(
+        _DelegateEngine(PermissionBehavior.ALLOW, client.events),
+        middleware,
+    )
+    decision = await engine.check_permission(
+        SimpleNamespace(name="execute_shell_command", is_external_tool=False),
+        {"command": "false"},
+    )
+    assert decision.behavior == PermissionBehavior.ALLOW
+
+    async def forbidden_local_execute(**_kwargs):
+        raise AssertionError("local QwenPaw execution must not run")
+        yield
+
+    call = ToolCallBlock(
+        id="model_call_shell_failed",
+        name="execute_shell_command",
+        input=json.dumps({"command": "false"}),
+    )
+    output = [
+        item
+        async for item in middleware.on_acting(
+            SimpleNamespace(),
+            {"tool_call": call},
+            forbidden_local_execute,
+        )
+    ]
+
+    assert output[0].state == ToolResultState.ERROR
+    assert client.events[-1][0:3] == ("result", "runtime_call_001", "failed")
+
+
+@pytest.mark.asyncio
+async def test_only_registered_sandbox_broker_tool_can_bypass_generic_gateway() -> None:
+    client = _Client()
+    middleware = BankRuntimeGatewayMiddleware(client)
+    engine = GatewayPermissionEngine(
+        _DelegateEngine(PermissionBehavior.ALLOW, client.events),
+        middleware,
+    )
+    trusted = SimpleNamespace(
+        name="runtime_sandbox_files_search",
+        is_external_tool=False,
+    )
+    engine.trust_sandbox_broker_tools([trusted])
+
+    decision = await engine.check_permission(trusted, {"query": "制度"})
+    assert decision.behavior == PermissionBehavior.ALLOW
+
+    async def execute(**_kwargs):
+        client.events.append(("execute",))
+        yield ToolResponse(
+            id="model_sandbox_search",
+            content=[],
+            state=ToolResultState.SUCCESS,
+        )
+
+    call = ToolCallBlock(
+        id="model_sandbox_search",
+        name="runtime_sandbox_files_search",
+        input=json.dumps({"query": "制度"}, ensure_ascii=False),
+    )
+    _ = [
+        item
+        async for item in middleware.on_acting(
+            SimpleNamespace(),
+            {"tool_call": call},
+            execute,
+        )
+    ]
+    assert [event[0] for event in client.events] == ["tool_guard", "execute"]
+
+    spoofed = SimpleNamespace(
+        name="runtime_sandbox_files_search",
+        is_external_tool=False,
+    )
+    decision = await engine.check_permission(spoofed, {"query": "伪装"})
+    assert decision.behavior == PermissionBehavior.ALLOW
+    assert [event[0] for event in client.events][-2:] == ["preflight", "tool_guard"]
+
+
+@pytest.mark.asyncio
+async def test_sandbox_broker_execution_requires_exact_permission_claim() -> None:
+    middleware = BankRuntimeGatewayMiddleware(_Client())
+
+    async def forbidden(**_kwargs):
+        raise AssertionError("unclaimed broker tool must not execute")
+        yield
+
+    call = ToolCallBlock(
+        id="model_sandbox_search",
+        name="runtime_sandbox_files_search",
+        input=json.dumps({"query": "制度"}, ensure_ascii=False),
+    )
+    with pytest.raises(GatewayError):
+        _ = [
+            item
+            async for item in middleware.on_acting(
+                SimpleNamespace(),
+                {"tool_call": call},
+                forbidden,
+            )
+        ]
 
 
 @pytest.mark.asyncio

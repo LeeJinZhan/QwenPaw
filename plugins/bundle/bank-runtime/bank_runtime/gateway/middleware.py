@@ -11,7 +11,7 @@ import time
 from typing import Any, Mapping
 import uuid
 
-from agentscope.message import ToolResultState
+from agentscope.message import TextBlock, ToolResultState
 from agentscope.middleware import MiddlewareBase
 from agentscope.permission import PermissionBehavior, PermissionDecision
 from agentscope.tool import ToolChunk, ToolResponse
@@ -22,8 +22,12 @@ from qwenpaw.runtime.phases import Phase
 
 from .client import GatewayClient, GatewayConfig, GatewayError
 from .protocol import canonical_payload_hash
+from ..sandbox.executor import RuntimeSandboxExecutor, is_physical_tool
 
 _BLOCKED_NESTED_TOOLS = frozenset({"run_tool_batch"})
+_SANDBOX_BROKER_TOOLS = frozenset(
+    {"runtime_sandbox_files_search", "runtime_sandbox_files_select"}
+)
 
 
 @dataclass
@@ -41,13 +45,16 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
         self,
         client: Any | None,
         *,
+        sandbox_executor: Any | None = None,
         configuration_error: str = "",
     ) -> None:
         self.client = client
+        self.sandbox_executor = sandbox_executor
         self.configuration_error = str(configuration_error or "")
         self._prepared: dict[tuple[str, str], deque[_PreparedExecution]] = defaultdict(
             deque
         )
+        self._prepared_broker: dict[tuple[str, str], int] = defaultdict(int)
 
     def prepare(
         self,
@@ -75,6 +82,30 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
         prepared.claimed = True
         return prepared
 
+    def prepare_broker(
+        self,
+        tool_name: str,
+        tool_input: Mapping[str, Any],
+    ) -> None:
+        key = (str(tool_name), canonical_payload_hash(tool_input))
+        self._prepared_broker[key] += 1
+
+    def claim_broker(
+        self,
+        tool_name: str,
+        tool_input: Mapping[str, Any],
+    ) -> None:
+        key = (str(tool_name), canonical_payload_hash(tool_input))
+        remaining = self._prepared_broker.get(key, 0)
+        if remaining < 1:
+            raise GatewayError(
+                "Sandbox broker execution has no trusted permission claim"
+            )
+        if remaining == 1:
+            self._prepared_broker.pop(key, None)
+        else:
+            self._prepared_broker[key] = remaining - 1
+
     async def on_acting(
         self,
         agent: Any,
@@ -94,6 +125,11 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
             raise GatewayError("Tool input is not valid JSON") from exc
         if not isinstance(tool_input, dict):
             raise GatewayError("Tool input must be an object")
+        if tool_name in _SANDBOX_BROKER_TOOLS:
+            self.claim_broker(tool_name, tool_input)
+            async for item in next_handler():
+                yield item
+            return
         prepared = self.claim(tool_name, tool_input)
         try:
             await self.client.report_guard(prepared.preflight, "allow")
@@ -103,6 +139,29 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
         started_at = time.monotonic()
         result_reported = False
         try:
+            if is_physical_tool(tool_name):
+                if self.sandbox_executor is None:
+                    raise GatewayError("Runtime physical sandbox is unavailable")
+                result = await self.sandbox_executor.execute(
+                    tool_call_id=tool_call_id,
+                    tool_name=tool_name,
+                    tool_input=tool_input,
+                )
+                response = _sandbox_tool_response(
+                    str(getattr(tool_call, "id", "") or tool_call_id),
+                    tool_name,
+                    result,
+                )
+                status, error_code = _result_status(response)
+                await self.client.report_result(
+                    tool_call_id,
+                    status,
+                    _duration_ms(started_at),
+                    error_code,
+                )
+                result_reported = True
+                yield response
+                return
             async for item in next_handler():
                 if isinstance(item, ToolResponse) and not result_reported:
                     status, error_code = _result_status(item)
@@ -167,9 +226,19 @@ class GatewayPermissionEngine:
         self.delegate = delegate
         self.middleware = middleware
         self.context = getattr(delegate, "context", None)
+        self._trusted_sandbox_broker_tools: dict[int, tuple[Any, Any]] = {}
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self.delegate, name)
+
+    def trust_sandbox_broker_tools(self, tools: list[Any]) -> None:
+        for tool in tools:
+            if str(getattr(tool, "name", "") or "") not in _SANDBOX_BROKER_TOOLS:
+                raise GatewayError("Unexpected sandbox broker tool registration")
+            self._trusted_sandbox_broker_tools[id(tool)] = (
+                tool,
+                getattr(tool, "_func", None),
+            )
 
     async def check_permission(
         self,
@@ -179,6 +248,21 @@ class GatewayPermissionEngine:
         if self.middleware.configuration_error or self.middleware.client is None:
             return _deny("Runtime Tool Gateway is unavailable")
         tool_name = str(getattr(tool, "name", "") or "")
+        trusted = self._trusted_sandbox_broker_tools.get(id(tool))
+        is_trusted_broker = bool(
+            tool_name in _SANDBOX_BROKER_TOOLS
+            and trusted is not None
+            and trusted[0] is tool
+            and trusted[1] is getattr(tool, "_func", None)
+        )
+        if is_trusted_broker:
+            decision = await self.delegate.check_permission(tool, tool_input)
+            if decision.behavior == PermissionBehavior.ALLOW:
+                self.middleware.prepare_broker(tool_name, tool_input)
+                return decision
+            if decision.behavior == PermissionBehavior.DENY:
+                return decision
+            return _deny("Interactive tool approval is unavailable on bank-runtime")
         call_id = f"call_{uuid.uuid4().hex}"
         try:
             preflight = await self.middleware.client.preflight(
@@ -276,7 +360,14 @@ def bank_runtime_middleware_factory(
         trusted_agent_id = str(getattr(context, "agent_id", "") or "")
         if trusted_agent_id and config.agent_id != trusted_agent_id:
             raise GatewayError("Runtime Tool Gateway agent scope is invalid")
-        return BankRuntimeGatewayMiddleware(GatewayClient(config))
+        sandbox_executor = RuntimeSandboxExecutor.from_request(
+            base_url=config.base_url,
+            sandbox_context=getattr(request, "sandbox_context", None),
+        )
+        return BankRuntimeGatewayMiddleware(
+            GatewayClient(config),
+            sandbox_executor=sandbox_executor,
+        )
     except GatewayError as exc:
         return BankRuntimeGatewayMiddleware(None, configuration_error=str(exc))
 
@@ -307,6 +398,46 @@ def _result_status(response: ToolResponse | ToolChunk) -> tuple[str, str]:
     if state == ToolResultState.INTERRUPTED:
         return "execution_interrupted", "TOOL_EXECUTION_INTERRUPTED"
     return "failed", "TOOL_EXECUTION_FAILED"
+
+
+def _sandbox_tool_response(
+    response_id: str,
+    tool_name: str,
+    result: Mapping[str, Any],
+) -> ToolResponse:
+    state = ToolResultState.SUCCESS
+    if tool_name in {"execute_shell_command", "shell.exec"}:
+        exit_code = int(result.get("exit_code", 1) or 0)
+        if exit_code != 0:
+            state = ToolResultState.ERROR
+        stdout = str(result.get("stdout") or "")[:262_144]
+        stderr = str(result.get("stderr") or "")[:262_144]
+        text = stdout or ("Command completed." if exit_code == 0 else "Command failed.")
+        if stderr:
+            text += f"\n[stderr]\n{stderr}"
+    elif "content" in result and isinstance(result.get("content"), str):
+        text = str(result["content"])[:262_144]
+    else:
+        safe = {
+            key: value
+            for key, value in result.items()
+            if key
+            not in {
+                "token",
+                "authorization",
+                "headers",
+                "bucket",
+                "object_key",
+                "read_url",
+                "workspace_path",
+            }
+        }
+        text = json.dumps(safe, ensure_ascii=False, sort_keys=True)[:262_144]
+    return ToolResponse(
+        id=response_id,
+        content=[TextBlock(type="text", text=text)],
+        state=state,
+    )
 
 
 __all__ = [
