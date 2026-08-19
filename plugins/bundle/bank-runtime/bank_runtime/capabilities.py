@@ -11,7 +11,7 @@ from .auth import require_service_identity
 
 _CAPABILITIES = {
     "agent_scoped_chat": True,
-    "managed_session": False,
+    "managed_session": True,
     "gateway_middleware": False,
     "attachment_batch_authorize": False,
     "sandbox_file_search_select": False,
@@ -34,7 +34,7 @@ def capability_manifest() -> dict:
     return {
         "qwenpaw_version": qwenpaw_version,
         "bank_runtime_plugin_version": BANK_RUNTIME_PLUGIN_VERSION,
-        "protocols": ["bank-runtime-text-sse/v1"],
+        "protocols": ["bank-runtime-text-sse/v1", "session/2.0"],
         "capabilities": dict(_CAPABILITIES),
         "disabled_features": list(_DISABLED_FEATURES),
     }

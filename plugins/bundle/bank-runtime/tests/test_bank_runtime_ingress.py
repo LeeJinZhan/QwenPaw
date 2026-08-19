@@ -182,7 +182,7 @@ def test_plugin_health_is_authenticated_and_agent_scoped(monkeypatch):
     assert accepted.json() == {
         "status": "ok",
         "channel": "bank-runtime",
-        "plugin_version": "0.2.0",
+        "plugin_version": "0.3.0",
     }
     assert rejected.status_code == 401
 
@@ -419,6 +419,45 @@ async def test_projector_emits_one_sanitized_failure_on_stream_error():
     events += projector.finish()
 
     assert events == [
+        {
+            "event": "answer.failed",
+            "status": "failed",
+            "message": "回答生成失败",
+        }
+    ]
+
+
+def test_projector_preserves_only_the_stable_session_missing_code():
+    missing = CompactEventProjector("task-001").project(
+        {
+            "object": "response",
+            "status": "failed",
+            "error": {
+                "code": "RUNTIME_SESSION_NOT_FOUND",
+                "message": "/private/session/path must not leak",
+            },
+        }
+    )
+    internal = CompactEventProjector("task-001").project(
+        {
+            "object": "response",
+            "status": "failed",
+            "error": {
+                "code": "INTERNAL_SECRET_CODE",
+                "message": "sensitive detail",
+            },
+        }
+    )
+
+    assert missing == [
+        {
+            "event": "answer.failed",
+            "status": "failed",
+            "message": "回答生成失败",
+            "error_code": "RUNTIME_SESSION_NOT_FOUND",
+        }
+    ]
+    assert internal == [
         {
             "event": "answer.failed",
             "status": "failed",

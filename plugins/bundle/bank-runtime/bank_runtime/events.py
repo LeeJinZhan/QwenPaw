@@ -78,7 +78,15 @@ class CompactEventProjector:
             content = _text(raw_event.get("delta") or raw_event.get("text"))
             return [{"event": "answer.chunk", "text": content}] if content else []
         if event_name in {"error", "rate_limited"} or "error" in raw_event:
-            return [self._terminal_event("answer.failed")]
+            error = raw_event.get("error")
+            error = error if isinstance(error, dict) else {}
+            error_code = str(error.get("code") or "")
+            return [
+                self._terminal_event(
+                    "answer.failed",
+                    error_code=error_code,
+                )
+            ]
 
         if obj == "response":
             if status in {"completed", "done", "success"}:
@@ -120,6 +128,7 @@ class CompactEventProjector:
         self,
         event: str,
         raw_status: str = "",
+        error_code: str = "",
     ) -> dict[str, Any]:
         self._terminal = True
         if event == "answer.completed":
@@ -129,11 +138,14 @@ class CompactEventProjector:
                 "message": "回答完成",
             }
         message = "已停止生成" if raw_status == "cancelled" else "回答生成失败"
-        return {
+        failed = {
             "event": "answer.failed",
             "status": "failed",
             "message": message,
         }
+        if error_code == "RUNTIME_SESSION_NOT_FOUND":
+            failed["error_code"] = error_code
+        return failed
 
 
 def _decode_sse_block(block: str) -> list[dict[str, Any]]:

@@ -11,6 +11,13 @@ from bank_runtime.channel import BankRuntimeChannel
 from bank_runtime.hooks import bank_runtime_startup_guard
 from bank_runtime.middleware import bank_runtime_middleware_factory
 from bank_runtime.router import build_ingress_router
+from bank_runtime.session import (
+    ManagedSessionCleanupHook,
+    ManagedSessionCommitHook,
+    ManagedSessionDisableLongTermMemoryHook,
+    ManagedSessionErrorHook,
+    ManagedSessionPrepareHook,
+)
 
 
 def _build_http_router() -> APIRouter:
@@ -43,6 +50,11 @@ class BankRuntimePlugin:
             label="Bank Runtime",
             description="Runtime-managed requests only",
         )
+        api.register_runtime_hook(ManagedSessionPrepareHook())
+        api.register_runtime_hook(ManagedSessionDisableLongTermMemoryHook())
+        api.register_runtime_hook(ManagedSessionCommitHook())
+        api.register_runtime_hook(ManagedSessionErrorHook())
+        api.register_runtime_hook(ManagedSessionCleanupHook())
         api.register_startup_hook(
             hook_name="bank_runtime_startup_guard",
             callback=bank_runtime_startup_guard,
