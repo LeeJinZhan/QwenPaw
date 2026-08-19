@@ -28,8 +28,8 @@ RUN python -m pip install --no-cache-dir --no-deps --no-build-isolation . \
     && rm -rf build \
     && apt-get purge -y --auto-remove build-essential
 
-RUN python -m pip uninstall -y pip wheel \
-    && python -c 'import importlib.util; assert importlib.util.find_spec("pip") is None; assert importlib.util.find_spec("pkg_resources") is not None'
+RUN python -m pip uninstall -y pip wheel setuptools \
+    && python -c 'import importlib.util; assert importlib.util.find_spec("pip") is None; assert importlib.util.find_spec("setuptools") is None; assert importlib.util.find_spec("pkg_resources") is None; from qwenpaw.app.channels.registry import get_channel_registry; assert "console" in get_channel_registry()'
 
 COPY plugins/bundle/bank-runtime /opt/bank-runtime-plugin
 RUN useradd --create-home --uid 10001 --shell /usr/sbin/nologin qwenpaw \

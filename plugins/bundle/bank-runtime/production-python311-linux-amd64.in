@@ -1,9 +1,9 @@
 # Bank Runtime production dependency roots for CPython 3.11 on Linux amd64.
 #
 # QwenPaw runtime dependencies come from the repository pyproject.toml. This
-# input adds the bank plugin dependencies and pins the build tooling required
-# by QwenPaw 2.1.0. setuptools 83+ removes pkg_resources, which upstream 2.1.0
-# and lark-oapi still import during channel initialization.
+# input adds the bank plugin dependencies and pins build-only tooling required
+# by QwenPaw 2.1.0. The production Dockerfile removes pip, wheel, setuptools,
+# and pkg_resources after installation, then probes the channel registry.
 -r production-requirements.txt
 pip==26.2.1
 setuptools==79.0.1

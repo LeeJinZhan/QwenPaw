@@ -385,9 +385,12 @@ def test_production_image_pins_base_and_embeds_source_identity() -> None:
     assert "COPY plugins/bundle/bank-runtime/production-python311-linux-amd64.lock" in dockerfile
     assert "--require-hashes" in dockerfile
     assert "--no-deps --no-build-isolation ." in dockerfile
-    assert "python -m pip uninstall -y pip wheel" in dockerfile
+    assert "python -m pip uninstall -y pip wheel setuptools" in dockerfile
     assert 'find_spec("pip") is None' in dockerfile
-    assert 'find_spec("pkg_resources") is not None' in dockerfile
+    assert 'find_spec("setuptools") is None' in dockerfile
+    assert 'find_spec("pkg_resources") is None' in dockerfile
+    assert "from qwenpaw.app.channels.registry import get_channel_registry" in dockerfile
+    assert '"console" in get_channel_registry()' in dockerfile
     assert "ARG BANK_RUNTIME_SOURCE_COMMIT" in dockerfile
     assert "source_commit_invalid" in dockerfile
     assert (
