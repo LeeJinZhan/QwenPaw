@@ -15,7 +15,7 @@ _CAPABILITIES = {
     "gateway_middleware": False,
     "attachment_batch_authorize": False,
     "sandbox_file_search_select": False,
-    "personal_skills": False,
+    "personal_skills": True,
     "runtime_console_readonly": False,
 }
 _DISABLED_FEATURES = (
@@ -34,7 +34,13 @@ def capability_manifest() -> dict:
     return {
         "qwenpaw_version": qwenpaw_version,
         "bank_runtime_plugin_version": BANK_RUNTIME_PLUGIN_VERSION,
-        "protocols": ["bank-runtime-text-sse/v1", "session/2.0"],
+        "protocols": [
+            "bank-runtime-text-sse/v1",
+            "session/2.0",
+            "profile/1.0",
+            "personal-skills/1.0",
+            "bank-assistant/1.0",
+        ],
         "capabilities": dict(_CAPABILITIES),
         "disabled_features": list(_DISABLED_FEATURES),
     }

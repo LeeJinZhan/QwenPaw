@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from fastapi import APIRouter
 
 from qwenpaw.plugins.api import PluginApi
@@ -10,6 +12,13 @@ from bank_runtime.capabilities import build_capability_router
 from bank_runtime.channel import BankRuntimeChannel
 from bank_runtime.hooks import bank_runtime_startup_guard
 from bank_runtime.middleware import bank_runtime_middleware_factory
+from bank_runtime.bank_assistant import bank_assistant
+from bank_runtime.personal_skills import activate_personal_skill
+from bank_runtime.personalization import (
+    BankRuntimePersonalizationCleanupHook,
+    BankRuntimePersonalizationHook,
+    BankRuntimePersonalizationRedactionHook,
+)
 from bank_runtime.router import build_ingress_router
 from bank_runtime.session import (
     ManagedSessionCleanupHook,
@@ -28,7 +37,7 @@ def _build_http_router() -> APIRouter:
 
 
 class BankRuntimePlugin:
-    """Register only the fail-closed Task 2 integration skeleton."""
+    """Register the fail-closed Bank Runtime candidate integration."""
 
     def __init__(self) -> None:
         self._registered = False
@@ -52,8 +61,11 @@ class BankRuntimePlugin:
         )
         api.register_runtime_hook(ManagedSessionPrepareHook())
         api.register_runtime_hook(ManagedSessionDisableLongTermMemoryHook())
+        api.register_runtime_hook(BankRuntimePersonalizationHook())
+        api.register_runtime_hook(BankRuntimePersonalizationRedactionHook())
         api.register_runtime_hook(ManagedSessionCommitHook())
         api.register_runtime_hook(ManagedSessionErrorHook())
+        api.register_runtime_hook(BankRuntimePersonalizationCleanupHook())
         api.register_runtime_hook(ManagedSessionCleanupHook())
         api.register_startup_hook(
             hook_name="bank_runtime_startup_guard",
@@ -63,6 +75,28 @@ class BankRuntimePlugin:
         api.register_middleware(
             bank_runtime_middleware_factory,
             priority=10,
+        )
+        api.register_tool(
+            tool_name="bank_assistant",
+            tool_func=bank_assistant,
+            description="Controlled internal bank assistant",
+            icon="🏦",
+            enabled=False,
+            tool_type="internal",
+        )
+        api.register_tool(
+            tool_name="activate_personal_skill",
+            tool_func=activate_personal_skill,
+            description="Load one request-scoped Personal Skill",
+            icon="🧩",
+            enabled=False,
+            tool_type="network",
+            target_param="skill_ref",
+        )
+        api.register_skill_provider(
+            skills_dir=Path(__file__).parent / "skills",
+            enabled_by_default=True,
+            channels=["bank-runtime"],
         )
         self._registered = True
 

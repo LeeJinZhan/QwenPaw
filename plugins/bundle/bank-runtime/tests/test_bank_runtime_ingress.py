@@ -182,7 +182,7 @@ def test_plugin_health_is_authenticated_and_agent_scoped(monkeypatch):
     assert accepted.json() == {
         "status": "ok",
         "channel": "bank-runtime",
-        "plugin_version": "0.3.0",
+        "plugin_version": "0.4.0",
     }
     assert rejected.status_code == 401
 

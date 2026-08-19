@@ -1,9 +1,9 @@
 {
   "id": "bank-runtime",
   "name": "Bank Runtime",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "type": "general",
-  "description": "Authenticated Runtime ingress with managed Session 2.0",
+  "description": "Managed Runtime ingress with Profile, Personal Skills and bank tools",
   "author": "Bank Agent Runtime Team",
   "entry": {
     "backend": "plugin.py"
@@ -15,6 +15,6 @@
   },
   "meta": {
     "runtime_integration": true,
-    "default_state": "managed-session"
+    "default_state": "personalization"
   }
 }
