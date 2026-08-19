@@ -12,7 +12,7 @@ from .auth import require_service_identity
 _CAPABILITIES = {
     "agent_scoped_chat": True,
     "managed_session": True,
-    "gateway_middleware": False,
+    "gateway_middleware": True,
     "attachment_batch_authorize": False,
     "sandbox_file_search_select": False,
     "personal_skills": True,
@@ -40,6 +40,7 @@ def capability_manifest() -> dict:
             "profile/1.0",
             "personal-skills/1.0",
             "bank-assistant/1.0",
+            "tool-gateway/2.0",
         ],
         "capabilities": dict(_CAPABILITIES),
         "disabled_features": list(_DISABLED_FEATURES),

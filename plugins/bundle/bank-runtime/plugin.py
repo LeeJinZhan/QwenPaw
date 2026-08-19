@@ -12,6 +12,7 @@ from bank_runtime.capabilities import build_capability_router
 from bank_runtime.channel import BankRuntimeChannel
 from bank_runtime.hooks import bank_runtime_startup_guard
 from bank_runtime.middleware import bank_runtime_middleware_factory
+from bank_runtime.gateway.middleware import BankRuntimeGatewayInstallHook
 from bank_runtime.bank_assistant import bank_assistant
 from bank_runtime.personal_skills import activate_personal_skill
 from bank_runtime.personalization import (
@@ -62,6 +63,7 @@ class BankRuntimePlugin:
         api.register_runtime_hook(ManagedSessionPrepareHook())
         api.register_runtime_hook(ManagedSessionDisableLongTermMemoryHook())
         api.register_runtime_hook(BankRuntimePersonalizationHook())
+        api.register_runtime_hook(BankRuntimeGatewayInstallHook())
         api.register_runtime_hook(BankRuntimePersonalizationRedactionHook())
         api.register_runtime_hook(ManagedSessionCommitHook())
         api.register_runtime_hook(ManagedSessionErrorHook())

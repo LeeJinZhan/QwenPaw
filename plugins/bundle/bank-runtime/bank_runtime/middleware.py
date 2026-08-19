@@ -1,13 +1,5 @@
-"""Fail-closed middleware extension point for later Gateway integration."""
+"""Compatibility import for the Task 8 Gateway middleware package."""
 
-from __future__ import annotations
+from .gateway.middleware import bank_runtime_middleware_factory
 
-from typing import Any
-
-
-def bank_runtime_middleware_factory(
-    context: Any,
-    agent_config: Any,
-) -> None:
-    """Do not install behavior until Task 8 supplies Gateway mediation."""
-    return None
+__all__ = ["bank_runtime_middleware_factory"]
