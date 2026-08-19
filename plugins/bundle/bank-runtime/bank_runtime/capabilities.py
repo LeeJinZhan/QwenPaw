@@ -8,6 +8,7 @@ from qwenpaw.__version__ import __version__ as qwenpaw_version
 
 from .release import BANK_RUNTIME_PLUGIN_VERSION
 from .auth import require_service_identity
+from .production_guard import require_production_readiness
 
 _CAPABILITIES = {
     "agent_scoped_chat": True,
@@ -62,6 +63,7 @@ def build_capability_router() -> APIRouter:
             agent_id,
             unavailable_detail="Capability preflight is unavailable",
         )
+        require_production_readiness()
         return capability_manifest()
 
     return router

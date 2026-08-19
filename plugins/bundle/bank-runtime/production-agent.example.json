@@ -1,0 +1,102 @@
+{
+  "id": "bank-assistant",
+  "name": "Bank Assistant",
+  "description": "Runtime-managed production worker",
+  "workspace_dir": "/app/working/workspaces/bank-assistant",
+  "backend": "qwenpaw",
+  "channels": {
+    "imessage": {"enabled": false},
+    "discord": {"enabled": false},
+    "dingtalk": {"enabled": false},
+    "feishu": {"enabled": false},
+    "qq": {"enabled": false},
+    "onebot": {"enabled": false},
+    "telegram": {"enabled": false},
+    "mattermost": {"enabled": false},
+    "mqtt": {"enabled": false},
+    "console": {"enabled": false},
+    "matrix": {"enabled": false},
+    "voice": {"enabled": false},
+    "sip": {"enabled": false},
+    "wecom": {"enabled": false},
+    "xiaoyi": {"enabled": false},
+    "yuanbao": {"enabled": false},
+    "wechat": {"enabled": false},
+    "slack": {"enabled": false},
+    "bank-runtime": {"enabled": true}
+  },
+  "mcp": {"clients": {}, "migration_version": 1},
+  "tools": {
+    "builtin_tools": {
+      "activate_personal_skill": {"name": "activate_personal_skill", "enabled": true},
+      "append_file": {"name": "append_file", "enabled": false},
+      "ast_search": {"name": "ast_search", "enabled": false},
+      "bank_assistant": {"name": "bank_assistant", "enabled": true},
+      "browser": {"name": "browser", "enabled": false},
+      "chat_with_agent": {"name": "chat_with_agent", "enabled": false},
+      "check_agent_task": {"name": "check_agent_task", "enabled": false},
+      "create_goal": {"name": "create_goal", "enabled": false},
+      "delegate_external_agent": {"name": "delegate_external_agent", "enabled": false},
+      "desktop_screenshot": {"name": "desktop_screenshot", "enabled": false},
+      "edit_file": {"name": "edit_file", "enabled": false},
+      "execute_shell_command": {"name": "execute_shell_command", "enabled": false},
+      "get_current_time": {"name": "get_current_time", "enabled": false},
+      "get_goal": {"name": "get_goal", "enabled": false},
+      "get_token_usage": {"name": "get_token_usage", "enabled": false},
+      "glob_search": {"name": "glob_search", "enabled": false},
+      "grep_search": {"name": "grep_search", "enabled": false},
+      "list_agents": {"name": "list_agents", "enabled": false},
+      "materialize_skill": {"name": "materialize_skill", "enabled": false},
+      "read_file": {"name": "read_file", "enabled": false},
+      "run_tool_batch": {"name": "run_tool_batch", "enabled": false},
+      "send_file_to_user": {"name": "send_file_to_user", "enabled": false},
+      "set_user_timezone": {"name": "set_user_timezone", "enabled": false},
+      "spawn_subagent": {"name": "spawn_subagent", "enabled": false},
+      "submit_to_agent": {"name": "submit_to_agent", "enabled": false},
+      "update_goal": {"name": "update_goal", "enabled": false},
+      "view_image": {"name": "view_image", "enabled": false},
+      "view_video": {"name": "view_video", "enabled": false},
+      "web_fetch": {"name": "web_fetch", "enabled": false},
+      "web_search": {"name": "web_search", "enabled": false},
+      "write_file": {"name": "write_file", "enabled": false}
+    }
+  },
+  "security": {
+    "tool_guard": {
+      "enabled": true,
+      "denied_tools": [
+        "browser",
+        "desktop_screenshot",
+        "execute_shell_command"
+      ]
+    },
+    "sandbox_enabled": false,
+    "allow_no_auth_hosts": [],
+    "trusted_proxies": []
+  },
+  "acp": {
+    "node_path": "",
+    "agents": {
+      "opencode": {"enabled": false, "command": "", "args": [], "env": {}},
+      "qwen_code": {"enabled": false, "command": "", "args": [], "env": {}},
+      "claude_code": {"enabled": false, "command": "", "args": [], "env": {}},
+      "codex": {"enabled": false, "command": "", "args": [], "env": {}},
+      "qoder": {"enabled": false, "command": "", "args": [], "env": {}}
+    }
+  },
+  "coding_mode": {"enabled": false},
+  "plan": {"enabled": false},
+  "running": {
+    "memory_manager_backend": "remelight",
+    "reme_light_memory_config": {
+      "memory_search_enabled": false,
+      "auto_memory_interval": 0,
+      "dream_cron_enabled": false,
+      "daily_paper_cron_enabled": false,
+      "auto_memory_inbox_push_enabled": false,
+      "auto_dream_inbox_push_enabled": false,
+      "daily_paper_inbox_push_enabled": false,
+      "auto_memory_search_config": {"enabled": false, "max_results": 1}
+    }
+  }
+}

@@ -80,7 +80,9 @@ class BankRuntimePlugin:
         api.register_startup_hook(
             hook_name="bank_runtime_startup_guard",
             callback=bank_runtime_startup_guard,
-            priority=10,
+            # Plugin tools and workspace skill providers use priorities 50+
+            # and 100. Audit the final registry rather than a partial view.
+            priority=1000,
         )
         api.register_middleware(
             bank_runtime_middleware_factory,

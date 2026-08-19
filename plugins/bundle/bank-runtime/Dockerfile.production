@@ -1,0 +1,37 @@
+ARG PYTHON_IMAGE=python:3.11-slim-bookworm
+
+FROM ${PYTHON_IMAGE}
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 \
+    QWENPAW_PORT=8088 \
+    QWENPAW_WORKING_DIR=/app/working \
+    QWENPAW_BACKUP_DIR=/app/working.backups \
+    QWENPAW_ENABLED_CHANNELS=bank-runtime \
+    BANK_RUNTIME_PRODUCTION_GUARD=1
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends build-essential ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /opt/qwenpaw
+COPY pyproject.toml setup.py README.md ./
+COPY src ./src
+COPY website/public/docs ./src/qwenpaw/docs
+RUN pip install --no-cache-dir . \
+    && rm -rf build \
+    && apt-get purge -y --auto-remove build-essential
+
+COPY plugins/bundle/bank-runtime/production-requirements.txt /tmp/production-requirements.txt
+RUN pip install --no-cache-dir -r /tmp/production-requirements.txt \
+    && rm -f /tmp/production-requirements.txt
+
+COPY plugins/bundle/bank-runtime /opt/bank-runtime-plugin
+RUN useradd --create-home --uid 10001 --shell /usr/sbin/nologin qwenpaw \
+    && mkdir -p /app/working /app/working.secret /app/working.backups /app/task-files \
+    && chown -R 10001:10001 /app
+
+USER 10001:10001
+EXPOSE 8088
+ENTRYPOINT ["/opt/bank-runtime-plugin/production-entrypoint.sh"]

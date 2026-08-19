@@ -1,0 +1,60 @@
+services:
+  qwenpaw:
+    build:
+      context: ../../..
+      dockerfile: plugins/bundle/bank-runtime/Dockerfile.production
+    image: ${QWENPAW_CANDIDATE_IMAGE:?QWENPAW_CANDIDATE_IMAGE is required}
+    environment:
+      BANK_RUNTIME_PRODUCTION_GUARD: "1"
+      QWENPAW_ENABLED_CHANNELS: bank-runtime
+      QWENPAW_PORT: 8088
+      QWENPAW_WORKING_DIR: /app/working
+      QWENPAW_SECRET_DIR: /app/working.secret
+      QWENPAW_BACKUP_DIR: /app/working.backups
+      QWENPAW_TASK_FILE_ROOT: /app/task-files
+      QWENPAW_SERVICE_TOKEN: ${QWENPAW_SERVICE_TOKEN:?QWENPAW_SERVICE_TOKEN is required}
+      QWENPAW_RUNTIME_HEALTH_AGENT_ID: ${QWENPAW_RUNTIME_HEALTH_AGENT_ID:-bank-assistant}
+      QWENPAW_RUNTIME_AGENT_CONFIG: ${QWENPAW_RUNTIME_AGENT_CONFIG:-/app/working/workspaces/bank-assistant/agent.json}
+      QWENPAW_RUNTIME_BASE_URL: http://runtime-api:8765
+      QWENPAW_TOOL_GATEWAY_BASE_URL: http://runtime-api:8765
+      QWENPAW_SANDBOX_BROKER_BASE_URL: http://runtime-api:8765
+      PERSONAL_SKILLS_ALLOWED_OSS_HOSTS: ${PERSONAL_SKILLS_ALLOWED_OSS_HOSTS:?PERSONAL_SKILLS_ALLOWED_OSS_HOSTS is required}
+      OSS_ENDPOINT: ${OSS_ENDPOINT:-}
+      OSS_BUCKET: ${OSS_BUCKET:-}
+      OSS_ACCESS_KEY_ID: ${OSS_ACCESS_KEY_ID:-}
+      OSS_ACCESS_KEY_SECRET: ${OSS_ACCESS_KEY_SECRET:-}
+    expose:
+      - "8088"
+    volumes:
+      - ${QWENPAW_WORKING_HOST_DIR:?QWENPAW_WORKING_HOST_DIR is required}:/app/working
+      - ${QWENPAW_SECRET_HOST_DIR:?QWENPAW_SECRET_HOST_DIR is required}:/app/working.secret
+      - ${QWENPAW_BACKUP_HOST_DIR:?QWENPAW_BACKUP_HOST_DIR is required}:/app/working.backups
+      - ${QWENPAW_TASK_FILE_HOST_DIR:?QWENPAW_TASK_FILE_HOST_DIR is required}:/app/task-files
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=256m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 512
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          PYTHONPATH=/opt/bank-runtime-plugin python -m bank_runtime.delivery_probe
+          --root-config /app/working/config.json
+          --agent-config "$${QWENPAW_RUNTIME_AGENT_CONFIG}"
+          --health-base-url http://127.0.0.1:8088
+      interval: 10s
+      timeout: 8s
+      retries: 12
+      start_period: 30s
+    restart: unless-stopped
+    networks:
+      - bank-agent-runtime-net
+
+networks:
+  bank-agent-runtime-net:
+    external: true
+    name: bank-agent-runtime-net

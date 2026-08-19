@@ -56,6 +56,7 @@ def test_manifest_is_strictly_scoped_to_qwenpaw_2_1() -> None:
     manifest = PluginManifest.from_dict(manifest_data)
 
     assert manifest.id == "bank-runtime"
+    assert manifest.plugin_type == "channel"
     assert manifest.entry.backend == "plugin.py"
     assert manifest_data["qwenpaw_version"] == {
         "min": "2.1.0",
@@ -70,8 +71,8 @@ def test_delivery_manifest_pins_source_and_blocks_unknown_image_digest() -> None
     assert delivery["qwenpaw_upstream_commit"] == (
         "e4995dcf516d27400fbc33891aa3dcbcf79acc7a"
     )
-    assert delivery["bank_runtime_plugin_version"] == "0.6.0"
-    assert delivery["runtime_release_id"] == "candidate-2.1-console"
+    assert delivery["bank_runtime_plugin_version"] == "0.7.0"
+    assert delivery["runtime_release_id"] == "candidate-2.1-production-guard"
     assert delivery["optional_pawapps"] == {
         "local": ["bank-runtime-console@0.1.0"],
         "dev": ["bank-runtime-console@0.1.0"],
@@ -108,7 +109,6 @@ def test_plugin_registers_router_channel_hook_and_middleware(
     ]
     assert set(fresh_registry.get_registered_channels()) == {"bank-runtime"}
     assert [item.hook_name for item in fresh_registry.get_startup_hooks()] == [
-        "bank_runtime_startup_guard",
         "register_tool_bank-runtime_bank_assistant",
         "register_tool_bank-runtime_activate_personal_skill",
         "rt_hook_bank-runtime_bank_runtime_session_prepare",
@@ -124,6 +124,7 @@ def test_plugin_registers_router_channel_hook_and_middleware(
         "rt_hook_bank-runtime_bank_runtime_sandbox_cleanup",
         "rt_hook_bank-runtime_bank_runtime_session_cleanup",
         "install_skills_bank-runtime",
+        "bank_runtime_startup_guard",
     ]
     middleware = fresh_registry.get_middleware_factories()
     assert len(middleware) == 1
@@ -172,7 +173,7 @@ def test_capability_endpoint_is_safe_and_declares_managed_session_state(
     assert response.status_code == 200
     assert response.json() == {
         "qwenpaw_version": "2.1.0",
-        "bank_runtime_plugin_version": "0.6.0",
+        "bank_runtime_plugin_version": "0.7.0",
         "protocols": [
             "bank-runtime-text-sse/v1",
             "session/2.0",

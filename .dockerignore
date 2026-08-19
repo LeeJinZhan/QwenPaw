@@ -5,6 +5,7 @@
 .vscode
 *.md
 !README.md
+!plugins/bundle/bank-runtime/skills/**/*.md
 
 # Python dev and cache
 __pycache__
@@ -30,7 +31,9 @@ pytest.ini
 .eslintrc
 .stylelintrc
 
-# Frontend: exclude build artifacts; ship pre-built src/console/dist in image
+# Frontend: exclude build artifacts and local console remnants. The regular
+# deploy image builds Console in its own stage; the production bank image does
+# not expose or ship Console routes.
 website
 !website/
 !website/public/
@@ -42,8 +45,7 @@ console/.vite
 node_modules
 **/node_modules
 **/dist
-!src/qwenpaw/console/dist
-!src/qwenpaw/console/dist/**
+src/qwenpaw/console
 **/.vite
 
 # Example and local config (mount at runtime instead)

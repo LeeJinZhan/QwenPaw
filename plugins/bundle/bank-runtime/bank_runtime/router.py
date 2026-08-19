@@ -13,6 +13,7 @@ from qwenpaw.schemas import AgentRequest
 
 from .auth import require_service_identity
 from .events import project_sse_stream
+from .production_guard import require_production_readiness
 from .release import BANK_RUNTIME_PLUGIN_VERSION
 
 
@@ -27,6 +28,7 @@ def _trusted_agent_id(
             status_code=401,
             detail="Agent-scoped service identity does not match",
         )
+    require_production_readiness()
     return trusted
 
 

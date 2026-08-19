@@ -1,5 +1,8 @@
-"""Lifecycle hooks for the Bank Runtime plugin skeleton."""
+"""Lifecycle hooks for the Bank Runtime plugin."""
+
+from .production_guard import execute_production_guard
 
 
 def bank_runtime_startup_guard() -> None:
-    """Task 2 placeholder: capability flags remain false by construction."""
+    """Evaluate the strict production surface after all registrations."""
+    execute_production_guard()
