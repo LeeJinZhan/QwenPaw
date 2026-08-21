@@ -69,6 +69,20 @@ def test_scope_accepts_only_current_manifest_or_request_search_candidates() -> N
         scope.selection_records(["file_unreadable"])
 
 
+def test_scope_accepts_runtime_opaque_context_manifest_reference() -> None:
+    request = _request(
+        sandbox_context={
+            "context_manifest_id": "ctxm_001",
+            "task_id": "task_001",
+            "signature": "signed",
+        }
+    )
+
+    scope = SandboxRequestScope.from_request(request)
+
+    assert scope.sandbox_context["context_manifest_id"] == "ctxm_001"
+
+
 @pytest.mark.parametrize(
     "candidate_request",
     [

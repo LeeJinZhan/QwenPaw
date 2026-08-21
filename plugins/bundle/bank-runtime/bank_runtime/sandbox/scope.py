@@ -44,7 +44,12 @@ class SandboxRequestScope:
         context = dict(context)
         if _safe_id(context.get("task_id"), "sandbox task_id") != task_id:
             raise SandboxScopeError("Runtime sandbox task scope mismatch")
-        if not str(context.get("context_id") or "").strip():
+        context_reference = str(
+            context.get("context_id")
+            or context.get("context_manifest_id")
+            or ""
+        ).strip()
+        if not context_reference:
             raise SandboxScopeError("Runtime sandbox context id is required")
         if not str(context.get("signature") or "").strip():
             raise SandboxScopeError("Runtime sandbox signature is required")

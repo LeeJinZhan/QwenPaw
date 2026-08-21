@@ -49,6 +49,17 @@ class _MemoryManager:
         return [self.memory_search]
 
 
+class _ReadOnlySessionWorkspace:
+    """Match QwenPaw 2.1 Workspace's service-backed session property."""
+
+    def __init__(self, session):
+        self._service_manager = SimpleNamespace(services={"session": session})
+
+    @property
+    def session(self):
+        return self._service_manager.services.get("session")
+
+
 def _request(
     *,
     user_id="user-a",
@@ -119,6 +130,19 @@ async def test_active_missing_session_fails_with_stable_error_code(tmp_path):
     assert "path" not in str(raised.value).lower()
     await ManagedSessionCleanupHook().run(ctx)
     assert current_managed_session_scope() is None
+
+
+@pytest.mark.asyncio
+async def test_prepare_supports_qwenpaw_21_read_only_session_property(tmp_path):
+    delegate = SafeJSONSession(str(tmp_path))
+    ctx = _ctx(delegate)
+    ctx.workspace = _ReadOnlySessionWorkspace(delegate)
+
+    await ManagedSessionPrepareHook().run(ctx)
+
+    assert isinstance(ctx.workspace.session, ManagedSessionStore)
+    assert ctx.workspace.session.delegate is delegate
+    await ManagedSessionCleanupHook().run(ctx)
 
 
 @pytest.mark.asyncio

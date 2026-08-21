@@ -92,6 +92,33 @@ def current_managed_session_scope() -> ManagedSessionScope | None:
     return _current_scope.get()
 
 
+def _install_managed_session_store(workspace: Any) -> "ManagedSessionStore":
+    """Install the wrapper on legacy and QwenPaw 2.1 workspaces."""
+
+    current = getattr(workspace, "session", None)
+    if isinstance(current, ManagedSessionStore):
+        return current
+    if current is None:
+        raise ManagedSessionError("RUNTIME_SESSION_REQUEST_INVALID")
+
+    store = ManagedSessionStore(current)
+    service_manager = getattr(workspace, "_service_manager", None)
+    services = getattr(service_manager, "services", None)
+    if isinstance(services, dict) and services.get("session") is current:
+        services["session"] = store
+    else:
+        try:
+            setattr(workspace, "session", store)
+        except (AttributeError, TypeError) as exc:
+            raise ManagedSessionError(
+                "RUNTIME_SESSION_REQUEST_INVALID"
+            ) from exc
+
+    if getattr(workspace, "session", None) is not store:
+        raise ManagedSessionError("RUNTIME_SESSION_REQUEST_INVALID")
+    return store
+
+
 class ManagedSessionStore:
     """Permanent workspace wrapper; request decisions live in ContextVar."""
 
@@ -280,10 +307,7 @@ class ManagedSessionPrepareHook(LifecycleHook):
         if operation not in {"append", "regenerate"}:
             raise ManagedSessionError("RUNTIME_SESSION_REQUEST_INVALID")
 
-        store = ctx.workspace.session
-        if not isinstance(store, ManagedSessionStore):
-            store = ManagedSessionStore(store)
-            ctx.workspace.session = store
+        store = _install_managed_session_store(ctx.workspace)
         key = (
             values["agent_id"],
             values["user_id"],
