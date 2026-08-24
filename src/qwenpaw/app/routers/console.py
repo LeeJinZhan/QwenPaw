@@ -30,6 +30,7 @@ from qwenpaw.schemas import (
 from ...utils.logging import LOG_FILE_PATH, sanitize_log_value
 from ..agent_context import get_agent_for_request
 from ..approvals.display import approval_display_fields
+from ..channels.console.channel import CONSOLE_REQUEST_ATTRIBUTE_FIELDS
 from ..chats.title_generator import generate_and_update_title
 from ..utils import check_upload_size
 
@@ -200,6 +201,17 @@ def _extract_session_and_payload(request_data: Union[AgentRequest, dict]):
         mso = request_data.get("model_slot_override")
     if mso is not None:
         native_payload["model_slot_override"] = mso
+
+    request_attributes: dict[str, Any] = {}
+    for field in CONSOLE_REQUEST_ATTRIBUTE_FIELDS:
+        if isinstance(request_data, AgentRequest):
+            value = getattr(request_data, field, None)
+        else:
+            value = request_data.get(field)
+        if value is not None:
+            request_attributes[field] = value
+    if request_attributes:
+        native_payload["request_attributes"] = request_attributes
 
     return native_payload
 

@@ -228,6 +228,62 @@ async def test_existing_session_ignores_bootstrap_and_binds_full_scope(tmp_path)
 
 
 @pytest.mark.asyncio
+async def test_stale_session_rebuilds_from_runtime_bootstrap(tmp_path):
+    delegate = SafeJSONSession(str(tmp_path))
+    legacy_agent = SimpleNamespace(
+        state_dict=lambda: {
+            "state": {
+                "context": [
+                    {"role": "user", "content": [{"type": "text", "text": "legacy"}]}
+                ]
+            }
+        }
+    )
+    await delegate.save_session_state(
+        session_id="session-001",
+        user_id="user-a",
+        channel="bank-runtime",
+        agent=legacy_agent,
+    )
+    ctx = _ctx(
+        delegate,
+        request=_request(
+            task_id="task-recovered",
+            session_state="stale",
+            bootstrap={
+                "version": "2.0",
+                "messages": [
+                    {"role": "user", "content": "runtime-authorized history"},
+                    {"role": "assistant", "content": "restored answer"},
+                ],
+            },
+        ),
+    )
+
+    await _prepare_and_load(ctx)
+
+    context = ctx.session_state["state"]["context"]
+    assert [message["role"] for message in context] == ["user", "assistant"]
+    assert context[0]["content"][0]["text"] == "runtime-authorized history"
+    await ManagedSessionCleanupHook().run(ctx)
+
+
+@pytest.mark.asyncio
+async def test_stale_session_requires_valid_runtime_bootstrap(tmp_path):
+    delegate = SafeJSONSession(str(tmp_path))
+    ctx = _ctx(
+        delegate,
+        request=_request(session_state="stale", bootstrap={"version": "2.0"}),
+    )
+
+    with pytest.raises(ManagedSessionError) as raised:
+        await ManagedSessionPrepareHook().run(ctx)
+
+    assert raised.value.error_code == "RUNTIME_SESSION_REQUEST_INVALID"
+    await ManagedSessionCleanupHook().run(ctx)
+
+
+@pytest.mark.asyncio
 async def test_cross_user_or_agent_scope_cannot_load_copied_state(tmp_path):
     delegate = SafeJSONSession(str(tmp_path))
     first = _ctx(delegate, agent=_Agent({"state": {"context": []}}))

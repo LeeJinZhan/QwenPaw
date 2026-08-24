@@ -148,6 +148,12 @@ class ManagedSessionStore:
             channel=scope.channel,
             allow_not_exist=True,
         )
+        if scope.declared_state == "stale":
+            restored = _bootstrap_agent_state(scope.session_id, bootstrap)
+            if restored is None:
+                raise ManagedSessionError("RUNTIME_SESSION_REQUEST_INVALID")
+            scope.loaded_agent_state = restored
+            return
         if stored:
             marker = stored.get(_SCOPE_KEY)
             if not self._scope_marker_matches(scope, marker):

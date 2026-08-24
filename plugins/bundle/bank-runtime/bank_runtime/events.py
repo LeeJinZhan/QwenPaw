@@ -7,6 +7,10 @@ from collections.abc import AsyncIterable, AsyncIterator
 from typing import Any
 
 _TERMINAL_EVENTS = {"answer.completed", "answer.failed"}
+_RECOVERABLE_SESSION_ERROR_CODES = {
+    "RUNTIME_SESSION_NOT_FOUND",
+    "RUNTIME_SESSION_SCOPE_MISMATCH",
+}
 
 
 def _text(value: Any) -> str:
@@ -143,7 +147,7 @@ class CompactEventProjector:
             "status": "failed",
             "message": message,
         }
-        if error_code == "RUNTIME_SESSION_NOT_FOUND":
+        if error_code in _RECOVERABLE_SESSION_ERROR_CODES:
             failed["error_code"] = error_code
         return failed
 

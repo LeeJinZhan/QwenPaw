@@ -18,6 +18,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from qwenpaw.schemas import (
+    AgentRequest,
     ContentType,
     ImageContent,
     Message,
@@ -27,6 +28,7 @@ from qwenpaw.schemas import (
     TextContent,
     VideoContent,
 )
+from qwenpaw.app.routers.console import _extract_session_and_payload
 
 
 @pytest.fixture
@@ -156,6 +158,40 @@ class TestBuildAgentRequestFromNative:
         assert req.input[0].metadata == {
             "qwenpaw_client_message_id": "client-2",
         }
+
+    def test_bank_runtime_request_attributes_survive_console_bridge(
+        self,
+        console_channel,
+    ):
+        original = AgentRequest(
+            input=[Message(role="user", content=[TextContent(text="read it")])],
+            session_id="qpaw-session",
+            user_id="u001",
+            channel="bank-runtime",
+            runtime_task_id="task-1",
+            attachments_manifest=[{"file_id": "file-1"}],
+            sandbox_context={"task_id": "task-1", "context_id": "ctx-1"},
+            runtime_tool_gateway={"base_url": "http://runtime.test"},
+            session_mode="managed",
+            session_contract_version="2.0",
+            identity_json={"user_id": "u001"},
+        )
+
+        native = _extract_session_and_payload(original)
+        rebuilt = console_channel.build_agent_request_from_native(native)
+
+        assert rebuilt.runtime_task_id == "task-1"
+        assert rebuilt.attachments_manifest == [{"file_id": "file-1"}]
+        assert rebuilt.sandbox_context == {
+            "task_id": "task-1",
+            "context_id": "ctx-1",
+        }
+        assert rebuilt.runtime_tool_gateway == {
+            "base_url": "http://runtime.test",
+        }
+        assert rebuilt.session_mode == "managed"
+        assert rebuilt.session_contract_version == "2.0"
+        assert rebuilt.identity_json == {"user_id": "u001"}
 
     def test_non_dict_payload_returns_empty_request(
         self,

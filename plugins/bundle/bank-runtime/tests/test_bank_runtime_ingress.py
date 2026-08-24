@@ -427,7 +427,7 @@ async def test_projector_emits_one_sanitized_failure_on_stream_error():
     ]
 
 
-def test_projector_preserves_only_the_stable_session_missing_code():
+def test_projector_preserves_only_recoverable_session_codes():
     missing = CompactEventProjector("task-001").project(
         {
             "object": "response",
@@ -448,6 +448,16 @@ def test_projector_preserves_only_the_stable_session_missing_code():
             },
         }
     )
+    scope_mismatch = CompactEventProjector("task-001").project(
+        {
+            "object": "response",
+            "status": "failed",
+            "error": {
+                "code": "RUNTIME_SESSION_SCOPE_MISMATCH",
+                "message": "/private/session/path must not leak",
+            },
+        }
+    )
 
     assert missing == [
         {
@@ -462,5 +472,13 @@ def test_projector_preserves_only_the_stable_session_missing_code():
             "event": "answer.failed",
             "status": "failed",
             "message": "回答生成失败",
+        }
+    ]
+    assert scope_mismatch == [
+        {
+            "event": "answer.failed",
+            "status": "failed",
+            "message": "回答生成失败",
+            "error_code": "RUNTIME_SESSION_SCOPE_MISMATCH",
         }
     ]

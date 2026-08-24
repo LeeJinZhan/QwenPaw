@@ -49,6 +49,39 @@ from ..utils import file_url_to_local_path
 
 logger = logging.getLogger(__name__)
 
+# Request-scoped extensions consumed by the bank-runtime plugin.  The
+# Console HTTP router converts the public AgentRequest into a channel-native
+# payload before this class rebuilds it, so these fields must cross that
+# bridge explicitly rather than being folded into persistent channel meta.
+CONSOLE_REQUEST_ATTRIBUTE_FIELDS = (
+    "attachments_manifest",
+    "conversation_id",
+    "execution_sandbox",
+    "identity_json",
+    "personal_skills_access_manifest",
+    "personal_skills_catalog",
+    "policy_search_context",
+    "qwenpaw_session_state",
+    "regenerate_from_task_id",
+    "runtime_constraints",
+    "runtime_context",
+    "runtime_datetime_context",
+    "runtime_execution_mode",
+    "runtime_generation_controls",
+    "runtime_governance",
+    "runtime_latency_marks",
+    "runtime_response_mode",
+    "runtime_task_id",
+    "runtime_tool_gateway",
+    "sandbox_context",
+    "session_bootstrap",
+    "session_contract_version",
+    "session_mode",
+    "session_operation",
+    "trace_id",
+    "worker_protocol",
+)
+
 # ANSI colour helpers (degrade gracefully if not a tty)
 _USE_COLOR = hasattr(sys.stdout, "isatty") and sys.stdout.isatty()
 
@@ -273,6 +306,11 @@ class ConsoleChannel(BaseChannel):
         mso = payload.get("model_slot_override")
         if mso is not None:
             request.model_slot_override = mso
+        request_attributes = payload.get("request_attributes")
+        if isinstance(request_attributes, dict):
+            for field in CONSOLE_REQUEST_ATTRIBUTE_FIELDS:
+                if field in request_attributes:
+                    setattr(request, field, request_attributes[field])
         return request
 
     async def _extract_media_message(self, message: Message) -> Message | None:
