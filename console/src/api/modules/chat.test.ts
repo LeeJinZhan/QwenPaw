@@ -154,6 +154,17 @@ describe("chatApi.listChats", () => {
       expect.stringContaining("channel=dingtalk"),
     );
   });
+
+  it("hides Runtime-managed chats from every Console list consumer", async () => {
+    vi.mocked(request).mockResolvedValue([
+      { id: "console-chat", channel: "console" },
+      { id: "managed-chat", channel: "bank-runtime" },
+    ] as never);
+
+    const result = await chatApi.listChats();
+
+    expect(result.map((chat) => chat.id)).toEqual(["console-chat"]);
+  });
 });
 
 // ---------------------------------------------------------------------------

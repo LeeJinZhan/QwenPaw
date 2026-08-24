@@ -18,6 +18,13 @@ export interface ChatUploadResponse {
 }
 
 const FILES_PREVIEW = "/files/preview";
+const RUNTIME_MANAGED_CHANNEL = "bank-runtime";
+
+export function filterConsoleVisibleChats<
+  T extends { channel?: string | null },
+>(chats: T[]): T[] {
+  return chats.filter((chat) => chat.channel !== RUNTIME_MANAGED_CHANNEL);
+}
 
 export const chatApi = {
   /** Upload a file for chat attachment. Returns URL path for content. */
@@ -66,7 +73,9 @@ export const chatApi = {
     if (params?.archived !== undefined)
       searchParams.append("archived", String(params.archived));
     const query = searchParams.toString();
-    return request<ChatSpec[]>(`/chats${query ? `?${query}` : ""}`);
+    return request<ChatSpec[]>(`/chats${query ? `?${query}` : ""}`).then(
+      filterConsoleVisibleChats,
+    );
   },
 
   createChat: (chat: Partial<ChatSpec>) =>
@@ -134,7 +143,9 @@ export const sessionApi = {
     if (params?.user_id) searchParams.append("user_id", params.user_id);
     if (params?.channel) searchParams.append("channel", params.channel);
     const query = searchParams.toString();
-    return request<Session[]>(`/chats${query ? `?${query}` : ""}`);
+    return request<Session[]>(`/chats${query ? `?${query}` : ""}`).then(
+      filterConsoleVisibleChats,
+    );
   },
 
   getSession: (sessionId: string) =>

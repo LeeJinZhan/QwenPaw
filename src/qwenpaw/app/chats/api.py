@@ -34,6 +34,46 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/chats", tags=["chats"])
 
+_RUNTIME_MANAGED_CHANNEL = "bank-runtime"
+
+
+def _is_runtime_managed(chat: ChatSpec) -> bool:
+    """Return whether Runtime, rather than QwenPaw Console, owns the chat."""
+    return chat.channel == _RUNTIME_MANAGED_CHANNEL
+
+
+def _chat_not_found(chat_id: str) -> HTTPException:
+    """Avoid revealing whether a protected Runtime-managed chat exists."""
+    return HTTPException(
+        status_code=404,
+        detail=f"Chat not found: {chat_id}",
+    )
+
+
+async def _require_control_plane_chat(
+    mgr: ChatManager,
+    chat_id: str,
+) -> ChatSpec:
+    chat = await mgr.get_chat(chat_id)
+    if chat is None or _is_runtime_managed(chat):
+        raise _chat_not_found(chat_id)
+    return chat
+
+
+async def _reject_runtime_managed_chat_ids(
+    mgr: ChatManager,
+    chat_ids: list[str],
+) -> None:
+    requested = set(chat_ids)
+    if not requested:
+        return
+    chats = await mgr.list_chats(archived=None)
+    if any(
+        chat.id in requested and _is_runtime_managed(chat)
+        for chat in chats
+    ):
+        raise HTTPException(status_code=404, detail="One or more chats not found")
+
 
 async def get_workspace(request: Request):
     """Get the workspace for the active agent."""
@@ -131,6 +171,7 @@ async def list_chats(
         channel=channel,
         archived=archived,
     )
+    chats = [chat for chat in chats if not _is_runtime_managed(chat)]
     tracker = workspace.task_tracker
     result = []
     for spec in chats:
@@ -155,6 +196,11 @@ async def create_chat(
     Returns:
         Created chat spec with UUID
     """
+    if _is_runtime_managed(request):
+        raise HTTPException(
+            status_code=403,
+            detail="Runtime-managed chats cannot be created here",
+        )
     chat_id = str(uuid4())
     spec = ChatSpec(
         id=chat_id,
@@ -182,6 +228,7 @@ async def batch_delete_chats(
         True if deleted, False if failed
 
     """
+    await _reject_runtime_managed_chat_ids(mgr, chat_ids)
     chats = {chat.id: chat for chat in await mgr.list_chats(archived=None)}
     deleted = await mgr.delete_chats(chat_ids=chat_ids)
     if deleted:
@@ -216,6 +263,7 @@ async def batch_archive_chats(
     workspace=Depends(get_workspace),
 ):
     """Batch archive chats. Running chats are skipped."""
+    await _reject_runtime_managed_chat_ids(mgr, payload.chat_ids)
     tracker = workspace.task_tracker
     return await mgr.batch_archive(
         chat_ids=payload.chat_ids,
@@ -229,6 +277,7 @@ async def batch_unarchive_chats(
     mgr: ChatManager = Depends(get_chat_manager),
 ):
     """Batch unarchive chats."""
+    await _reject_runtime_managed_chat_ids(mgr, payload.chat_ids)
     return await mgr.batch_unarchive(chat_ids=payload.chat_ids)
 
 
@@ -242,6 +291,7 @@ async def archive_chat(
 
     Returns 409 if the chat is currently running.
     """
+    await _require_control_plane_chat(mgr, chat_id)
     status = await workspace.task_tracker.get_status(chat_id)
     try:
         result = await mgr.archive_chat(chat_id, check_status=status)
@@ -264,6 +314,7 @@ async def unarchive_chat(
     mgr: ChatManager = Depends(get_chat_manager),
 ):
     """Unarchive a single chat. Idempotent."""
+    await _require_control_plane_chat(mgr, chat_id)
     result = await mgr.unarchive_chat(chat_id)
     if result is None:
         raise HTTPException(
@@ -280,9 +331,7 @@ async def get_chat_project_dir(
     workspace=Depends(get_workspace),
 ) -> dict:
     """Return the Session override and effective project directory."""
-    chat = await mgr.get_chat(chat_id)
-    if chat is None:
-        raise HTTPException(status_code=404, detail="Chat not found")
+    chat = await _require_control_plane_chat(mgr, chat_id)
     return await _project_directory_response(chat, workspace)
 
 
@@ -294,6 +343,8 @@ async def set_chat_project_dir(
     workspace=Depends(get_workspace),
 ) -> dict:
     """Persist a validated Session project directory override."""
+
+    await _require_control_plane_chat(mgr, chat_id)
 
     def _resolve_target() -> Path:
         target = Path(body.project_dir).expanduser().resolve()
@@ -321,6 +372,7 @@ async def clear_chat_project_dir(
     workspace=Depends(get_workspace),
 ) -> dict:
     """Clear the override and inherit the Agent default project directory."""
+    await _require_control_plane_chat(mgr, chat_id)
     chat = await mgr.set_project_dir(chat_id, None)
     if chat is None:
         raise HTTPException(status_code=404, detail="Chat not found")
@@ -351,12 +403,7 @@ async def get_chat(
     Raises:
         HTTPException: If chat not found (404)
     """
-    chat_spec = await mgr.get_chat(chat_id)
-    if not chat_spec:
-        raise HTTPException(
-            status_code=404,
-            detail=f"Chat not found: {chat_id}",
-        )
+    chat_spec = await _require_control_plane_chat(mgr, chat_id)
 
     state = await session.get_session_state_dict(
         chat_spec.session_id,
@@ -432,6 +479,7 @@ async def update_chat(
     Raises:
         HTTPException: If chat not found (404)
     """
+    await _require_control_plane_chat(mgr, chat_id)
     updated = await mgr.patch_chat(chat_id, spec)
     if updated is None:
         raise HTTPException(
@@ -462,7 +510,7 @@ async def delete_chat(
     Raises:
         HTTPException: If chat not found (404)
     """
-    chat = await mgr.get_chat(chat_id)
+    chat = await _require_control_plane_chat(mgr, chat_id)
     deleted = await mgr.delete_chats(chat_ids=[chat_id])
     if not deleted:
         raise HTTPException(
