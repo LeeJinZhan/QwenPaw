@@ -1,6 +1,6 @@
 import React, { useCallback, useMemo, useRef, useState } from "react";
 import { Dropdown, Input } from "antd";
-import type { InputRef } from "antd";
+import type { InputRef, MenuProps } from "antd";
 import { useTranslation } from "react-i18next";
 import {
   SparkMoreLine,
@@ -100,9 +100,10 @@ const SessionItem: React.FC<SessionItemProps> = ({
     }
   }, [editValue, name, onEditSubmit, onEditCancel]);
 
-  const dropdownItems = useMemo(
-    () => [
-      {
+  const dropdownItems = useMemo<NonNullable<MenuProps["items"]>>(() => {
+    const items: NonNullable<MenuProps["items"]> = [];
+    if (onPin) {
+      items.push({
         key: "pin",
         icon: pinned ? (
           <SparkMarkFill size={14} />
@@ -113,41 +114,47 @@ const SessionItem: React.FC<SessionItemProps> = ({
           ? t("chat.contextMenu.unpin", "Unpin")
           : t("chat.contextMenu.pin", "Pin"),
         onClick: () => onPin?.(sessionId),
-      },
-      {
+      });
+    }
+    if (onEdit) {
+      items.push({
         key: "rename",
         icon: <SparkEditLine size={14} />,
         label: t("chat.contextMenu.rename", "Rename"),
         onClick: handleStartEdit,
-      },
-      {
+      });
+    }
+    if (onArchive) {
+      items.push({
         key: "archive",
         icon: <SparkAistorageLine size={14} />,
         label: archived
           ? t("sessions.archive.unaction", "Unarchive")
           : t("sessions.archive.action", "Archive"),
         onClick: () => onArchive?.(sessionId),
-      },
-      { type: "divider" as const },
-      {
+      });
+    }
+    if (onDelete) {
+      if (items.length > 0) items.push({ type: "divider" });
+      items.push({
         key: "delete",
         icon: <SparkDeleteLine size={14} />,
         label: t("chat.contextMenu.delete", "Delete"),
         danger: true,
         onClick: () => onDelete?.(sessionId),
-      },
-    ],
-    [
-      pinned,
-      archived,
-      sessionId,
-      t,
-      onPin,
-      onArchive,
-      onDelete,
-      handleStartEdit,
-    ],
-  );
+      });
+    }
+    return items;
+  }, [
+    pinned,
+    archived,
+    sessionId,
+    t,
+    onPin,
+    onArchive,
+    onDelete,
+    handleStartEdit,
+  ]);
 
   const cls = [
     styles.item,
@@ -261,7 +268,7 @@ const SessionItem: React.FC<SessionItemProps> = ({
       )}
 
       {/* More button — unified for both variants */}
-      {!editing && (
+      {!editing && dropdownItems.length > 0 && (
         <Dropdown
           menu={{ items: dropdownItems }}
           trigger={["click"]}
@@ -276,10 +283,12 @@ const SessionItem: React.FC<SessionItemProps> = ({
     </div>
   );
 
-  return (
+  return dropdownItems.length > 0 ? (
     <Dropdown menu={{ items: dropdownItems }} trigger={["contextMenu"]}>
       {itemContent}
     </Dropdown>
+  ) : (
+    itemContent
   );
 };
 

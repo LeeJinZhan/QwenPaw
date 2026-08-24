@@ -112,6 +112,10 @@ import { useCodingTabsStore } from "../../stores/codingTabsStore";
 import { RichFileReferenceInputProvider } from "./RichFileReferenceInput";
 import type { ParsedFileReference } from "./fileReferenceFormatting";
 import { scrollReverseMessageList } from "./messageScroll";
+import {
+  isRuntimeManagedChat,
+  runtimeConversationIdFromSessionId,
+} from "../../api/modules/runtimeConsole";
 
 interface ApprovalMessageData {
   requestId: string;
@@ -1172,8 +1176,13 @@ export default function ChatPage() {
     () => getSessionIdFromPath(location.pathname),
     [location.pathname],
   );
+  const runtimeManagedRoute = Boolean(
+    chatId && runtimeConversationIdFromSessionId(chatId),
+  );
   const queueSessionId = chatId ?? sessionApi.lastActiveChatId ?? "new";
-  const backendChatId = resolveBackendChatId(chatId);
+  const backendChatId = runtimeManagedRoute
+    ? undefined
+    : resolveBackendChatId(chatId);
   const pendingProjectDir = backendChatId
     ? undefined
     : getPendingProjectDirectory(selectedAgent, queueSessionId) ?? undefined;
@@ -1855,6 +1864,8 @@ export default function ChatPage() {
   const chatIdRef = useRef(chatId);
   const navigateRef = useRef(navigate);
   const chatRef = useRef<IAgentScopeRuntimeWebUIRef>(null);
+  const [runtimeManagedSession, setRuntimeManagedSession] = useState(false);
+  const runtimeSessionReadOnly = runtimeManagedRoute || runtimeManagedSession;
   const pendingSenderClearRef = useRef<string | null>(null);
 
   useEffect(() => {
@@ -2417,6 +2428,15 @@ export default function ChatPage() {
       }
     };
 
+    sessionApi.onSessionContextChanged = (session) => {
+      const readOnly = isRuntimeManagedChat(session);
+      setRuntimeManagedSession(readOnly);
+      window.requestAnimationFrame(() => {
+        chatRef.current?.input.setDisabled(readOnly);
+      });
+    };
+    setRuntimeManagedSession(window.currentChannel === "bank-runtime");
+
     sessionApi.onSessionCreated = (sessionId) => {
       if (!isChatActiveRef.current) return;
       const agentId = selectedAgentRef.current;
@@ -2449,6 +2469,7 @@ export default function ChatPage() {
       sessionApi.onSessionRemoved = null;
       sessionApi.onSessionSelected = null;
       sessionApi.onSessionCreated = null;
+      sessionApi.onSessionContextChanged = null;
     };
   }, []);
 
@@ -2771,6 +2792,30 @@ export default function ChatPage() {
   const chatMessagesAreaRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
+    const applyReadOnlyState = () => {
+      chatRef.current?.input.setDisabled(runtimeSessionReadOnly);
+    };
+    applyReadOnlyState();
+    const frameId = window.requestAnimationFrame(applyReadOnlyState);
+    const container = chatMessagesAreaRef.current;
+    const observer = runtimeSessionReadOnly
+      ? new MutationObserver(applyReadOnlyState)
+      : null;
+    if (container && observer) {
+      observer.observe(container, {
+        attributes: true,
+        attributeFilter: ["disabled"],
+        childList: true,
+        subtree: true,
+      });
+    }
+    return () => {
+      window.cancelAnimationFrame(frameId);
+      observer?.disconnect();
+    };
+  }, [chatId, refreshKey, runtimeSessionReadOnly]);
+
+  useEffect(() => {
     const root = chatMessagesAreaRef.current;
     if (!root) return;
 
@@ -2859,6 +2904,9 @@ export default function ChatPage() {
         description: "",
       }));
     const handleBeforeSubmit = async () => {
+      if (runtimeSessionReadOnly || window.currentChannel === "bank-runtime") {
+        return false;
+      }
       if (isComposingRef.current) return false;
       // Single-tab ownership: non-owner tabs are queue-only. Re-route every
       // submit (Enter / send button / programmatic) to the shared queue and
@@ -3164,7 +3212,28 @@ export default function ChatPage() {
         ...(i18nConfig as any)?.sender,
         beforeSubmit: handleBeforeSubmit,
         allowSpeech: whisperChecked && !whisperEnabled,
-        beforeUI: showSenderBeforeUI ? (
+        beforeUI: runtimeSessionReadOnly ? (
+          <Alert
+            type="info"
+            showIcon
+            banner
+            message={t(
+              "chat.runtime.readOnlyNotice",
+              "This conversation is managed by Bank Runtime and is available here for review only.",
+            )}
+            action={
+              <Button
+                size="small"
+                type="primary"
+                onClick={() =>
+                  window.dispatchEvent(new Event("qwenpaw:sidebar-new-chat"))
+                }
+              >
+                {t("chat.runtime.newTestChat", "New test chat")}
+              </Button>
+            }
+          />
+        ) : showSenderBeforeUI ? (
           <>
             {isQueueOnlyTab && (
               <Alert
@@ -3284,7 +3353,12 @@ export default function ChatPage() {
               },
             }
           : {}),
-        placeholder: extPlaceholder ?? t("chat.inputPlaceholder"),
+        placeholder: runtimeSessionReadOnly
+          ? t(
+              "chat.runtime.readOnlyPlaceholder",
+              "Runtime-managed history is read-only",
+            )
+          : extPlaceholder ?? t("chat.inputPlaceholder"),
         ...(extDisclaimer !== undefined ? { disclaimer: extDisclaimer } : {}),
         suggestions: [...baseSuggestions, ...activePluginSuggestions],
       },
@@ -3518,6 +3592,7 @@ export default function ChatPage() {
     bgTaskCount,
     bgBackendSessionId,
     queueSessionId,
+    runtimeSessionReadOnly,
   ]);
 
   const filesDrawerClass =

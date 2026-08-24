@@ -74,8 +74,8 @@ def test_delivery_manifest_pins_source_and_blocks_unknown_image_digest() -> None
     assert delivery["bank_runtime_plugin_version"] == "0.7.0"
     assert delivery["runtime_release_id"] == "candidate-2.1-production-guard"
     assert delivery["optional_pawapps"] == {
-        "local": ["bank-runtime-console@0.1.0"],
-        "dev": ["bank-runtime-console@0.1.0"],
+        "local": [],
+        "dev": [],
         "production": [],
     }
     assert delivery["production_profile"]["dependency_lock_input"] == (

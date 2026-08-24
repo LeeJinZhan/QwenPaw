@@ -5,7 +5,16 @@ import React, {
   useRef,
   useState,
 } from "react";
-import { Drawer, Empty, Input, Spin, Tooltip } from "antd";
+import {
+  Button,
+  Drawer,
+  Empty,
+  Input,
+  Modal,
+  Space,
+  Spin,
+  Tooltip,
+} from "antd";
 import { VariableSizeList, type ListChildComponentProps } from "react-window";
 import { useTranslation } from "react-i18next";
 import { useNavigate, useLocation } from "react-router-dom";
@@ -45,6 +54,11 @@ import {
 import { useAppMessage } from "../../../../hooks/useAppMessage";
 import styles from "./index.module.less";
 import type { ChatStatus } from "../../../../api/types/chat";
+import {
+  isRuntimeManagedChat,
+  RUNTIME_CONNECTION_CHANGED_EVENT,
+  runtimeConsoleApi,
+} from "../../../../api/modules/runtimeConsole";
 
 /** Fixed height of each session item row */
 const SESSION_ROW_HEIGHT = 77;
@@ -119,6 +133,7 @@ const VirtualRow = React.memo(function VirtualRow({
     ? getChannelLabel(channelKey, data.t)
     : undefined;
   const isEditing = data.editingSessionId === session.id;
+  const runtimeManaged = isRuntimeManagedChat(session);
 
   return (
     <div style={style}>
@@ -144,10 +159,10 @@ const VirtualRow = React.memo(function VirtualRow({
         editing={isEditing}
         editValue={isEditing ? data.editValue : undefined}
         onClick={data.handleSessionClick}
-        onEdit={data.handleEditStart}
-        onDelete={data.handleDelete}
-        onPin={data.handlePinToggle}
-        onArchive={data.handleArchiveToggle}
+        onEdit={runtimeManaged ? undefined : data.handleEditStart}
+        onDelete={runtimeManaged ? undefined : data.handleDelete}
+        onPin={runtimeManaged ? undefined : data.handlePinToggle}
+        onArchive={runtimeManaged ? undefined : data.handleArchiveToggle}
         onEditChange={data.handleEditChange}
         onEditSubmit={data.handleEditSubmit}
         onEditCancel={data.handleEditCancel}
@@ -221,6 +236,7 @@ const formatCreatedAtCached = (raw: string | null | undefined): string => {
 
 /** Resolve the real backend UUID from an extended session (id may be a local timestamp) */
 const getBackendId = (session: ExtendedChatSession): string | null => {
+  if (isRuntimeManagedChat(session)) return null;
   if (session.realId) return session.realId;
   const id = session.id;
   if (!/^\d+$/.test(id)) return id;
@@ -235,6 +251,30 @@ const ChatSessionDrawer: React.FC<ChatSessionDrawerProps> = (props) => {
   const sdkState = useChatAnywhereSessionsState();
   const selectedAgent = useAgentStore((state) => state.selectedAgent);
   const createNewSession = useCreateNewSession();
+  const [runtimeConnected, setRuntimeConnected] = useState(() =>
+    runtimeConsoleApi.isConnected(),
+  );
+  const [runtimeIdentity, setRuntimeIdentity] = useState(() =>
+    runtimeConsoleApi.currentIdentity(),
+  );
+  const [runtimeConnectOpen, setRuntimeConnectOpen] = useState(false);
+  const [runtimeUserId, setRuntimeUserId] = useState("");
+  const [runtimeOrgId, setRuntimeOrgId] = useState("");
+  const [runtimeConnectLoading, setRuntimeConnectLoading] = useState(false);
+  const [runtimeConnectError, setRuntimeConnectError] = useState("");
+
+  useEffect(() => {
+    const syncConnection = () => {
+      setRuntimeConnected(runtimeConsoleApi.isConnected());
+      setRuntimeIdentity(runtimeConsoleApi.currentIdentity());
+    };
+    window.addEventListener(RUNTIME_CONNECTION_CHANGED_EVENT, syncConnection);
+    return () =>
+      window.removeEventListener(
+        RUNTIME_CONNECTION_CHANGED_EVENT,
+        syncConnection,
+      );
+  }, []);
 
   // In embedded mode, maintain a local session list fetched directly from the
   // API so we don't depend on the SDK context tree (which lives inside
@@ -340,6 +380,38 @@ const ChatSessionDrawer: React.FC<ChatSessionDrawerProps> = (props) => {
     if (!sessionApi.isActiveOwner(owner)) return;
     setSessions(list);
   }, [setSessions]);
+
+  const handleRuntimeConnect = useCallback(async () => {
+    if (!runtimeUserId.trim() || !runtimeOrgId.trim()) return;
+    setRuntimeConnectLoading(true);
+    setRuntimeConnectError("");
+    try {
+      await runtimeConsoleApi.connect(
+        runtimeUserId.trim(),
+        runtimeOrgId.trim(),
+      );
+      setRuntimeConnectOpen(false);
+      await refreshSessions();
+    } catch {
+      setRuntimeConnectError(
+        t(
+          "chat.runtime.loginFailed",
+          "Connection failed. Check the user ID and organization ID, then try again.",
+        ),
+      );
+    } finally {
+      setRuntimeConnectLoading(false);
+    }
+  }, [refreshSessions, runtimeOrgId, runtimeUserId, t]);
+
+  const handleRuntimeDisconnect = useCallback(async () => {
+    const currentWasRuntimeManaged =
+      (window as Window & { currentChannel?: string }).currentChannel ===
+      "bank-runtime";
+    runtimeConsoleApi.disconnect();
+    await refreshSessions();
+    if (currentWasRuntimeManaged) await handleCreateSession();
+  }, [handleCreateSession, refreshSessions]);
 
   /** Open drawer → refresh session list and start polling */
   useEffect(() => {
@@ -453,6 +525,7 @@ const ChatSessionDrawer: React.FC<ChatSessionDrawerProps> = (props) => {
       const session = sessions.find((s) => s.id === sessionId) as
         | ExtendedChatSession
         | undefined;
+      if (isRuntimeManagedChat(session)) return;
       const backendId = session ? getBackendId(session) : null;
 
       if (backendId) {
@@ -505,10 +578,14 @@ const ChatSessionDrawer: React.FC<ChatSessionDrawerProps> = (props) => {
   /** Enter rename mode for a session */
   const handleEditStart = useCallback(
     (sessionId: string, currentName: string) => {
+      const session = sessions.find((item) => item.id === sessionId);
+      if (isRuntimeManagedChat(session as ExtendedChatSession | undefined)) {
+        return;
+      }
       setEditingSessionId(sessionId);
       setEditValue(currentName);
     },
-    [],
+    [sessions],
   );
 
   /** Update rename input value */
@@ -524,6 +601,11 @@ const ChatSessionDrawer: React.FC<ChatSessionDrawerProps> = (props) => {
     const session = sessions.find((s) => s.id === editingSessionId) as
       | ExtendedChatSession
       | undefined;
+    if (isRuntimeManagedChat(session)) {
+      setEditingSessionId(null);
+      setEditValue("");
+      return;
+    }
     const backendId = session ? getBackendId(session) : null;
     const newName = editValue.trim();
 
@@ -552,6 +634,7 @@ const ChatSessionDrawer: React.FC<ChatSessionDrawerProps> = (props) => {
       const session = sessions.find((s) => s.id === sessionId) as
         | ExtendedChatSession
         | undefined;
+      if (isRuntimeManagedChat(session)) return;
       const backendId = session ? getBackendId(session) : null;
 
       if (backendId && session) {
@@ -577,6 +660,7 @@ const ChatSessionDrawer: React.FC<ChatSessionDrawerProps> = (props) => {
       const session = sessions.find((s) => s.id === sessionId) as
         | ExtendedChatSession
         | undefined;
+      if (isRuntimeManagedChat(session)) return;
       const backendId = session ? getBackendId(session) : null;
       if (!backendId) return;
       const wasArchived = !!session?.archived;
@@ -773,6 +857,30 @@ const ChatSessionDrawer: React.FC<ChatSessionDrawerProps> = (props) => {
           <span className={styles.headerTitle}>{t("chat.allChats")}</span>
         </div>
         <div className={styles.headerRight}>
+          {runtimeConnected ? (
+            <Tooltip title={t("chat.runtime.disconnect", "Disconnect Runtime")}>
+              <Button
+                type="text"
+                size="small"
+                onClick={handleRuntimeDisconnect}
+              >
+                {runtimeIdentity
+                  ? `${runtimeIdentity.orgId}/${runtimeIdentity.userId}`
+                  : t("chat.runtime.disconnect", "Disconnect Runtime")}
+              </Button>
+            </Tooltip>
+          ) : (
+            <Button
+              type="text"
+              size="small"
+              onClick={() => {
+                setRuntimeConnectError("");
+                setRuntimeConnectOpen(true);
+              }}
+            >
+              {t("chat.runtime.connect", "Connect Runtime")}
+            </Button>
+          )}
           {!props.embedded && (
             <Tooltip
               title={
@@ -855,6 +963,50 @@ const ChatSessionDrawer: React.FC<ChatSessionDrawerProps> = (props) => {
         )}
         <div className={styles.bottomGradient} />
       </div>
+
+      <Modal
+        open={runtimeConnectOpen}
+        title={t("chat.runtime.connectTitle", "Connect Bank Runtime")}
+        okText={t("chat.runtime.connect", "Connect Runtime")}
+        cancelText={t("common.cancel", "Cancel")}
+        confirmLoading={runtimeConnectLoading}
+        okButtonProps={{
+          disabled: !runtimeUserId.trim() || !runtimeOrgId.trim(),
+        }}
+        onOk={() => void handleRuntimeConnect()}
+        onCancel={() => {
+          if (runtimeConnectLoading) return;
+          setRuntimeConnectError("");
+          setRuntimeConnectOpen(false);
+        }}
+      >
+        <p>
+          {t(
+            "chat.runtime.connectDescription",
+            "Enter the external user ID and organization ID whose Runtime-managed conversation history you need to inspect.",
+          )}
+        </p>
+        <Space direction="vertical" size={12} style={{ width: "100%" }}>
+          <Input
+            autoComplete="off"
+            value={runtimeUserId}
+            placeholder={t("chat.runtime.userId", "User ID")}
+            onChange={(event) => setRuntimeUserId(event.target.value)}
+          />
+          <Input
+            autoComplete="off"
+            value={runtimeOrgId}
+            placeholder={t("chat.runtime.orgId", "Organization ID")}
+            onChange={(event) => setRuntimeOrgId(event.target.value)}
+            onPressEnter={() => void handleRuntimeConnect()}
+          />
+          {runtimeConnectError ? (
+            <div role="alert" style={{ color: "var(--ant-color-error)" }}>
+              {runtimeConnectError}
+            </div>
+          ) : null}
+        </Space>
+      </Modal>
     </>
   );
 

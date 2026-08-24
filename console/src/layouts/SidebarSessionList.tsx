@@ -29,6 +29,7 @@ import {
 import { useCollapsedSessionGroups } from "../hooks/useCollapsedSessionGroups";
 import SessionItem from "../components/SessionItem";
 import styles from "./sidebarSessionList.module.less";
+import { isRuntimeManagedChat } from "../api/modules/runtimeConsole";
 
 /** Fixed height of each session item row */
 const SESSION_ROW_HEIGHT = 42;
@@ -102,6 +103,7 @@ const VirtualRow = React.memo(function VirtualRow({
     ? getChannelLabel(channelKey, data.t)
     : undefined;
   const isEditing = data.editingSessionId === session.id;
+  const runtimeManaged = isRuntimeManagedChat(session);
 
   return (
     <div style={style}>
@@ -123,10 +125,10 @@ const VirtualRow = React.memo(function VirtualRow({
         editing={isEditing}
         editValue={isEditing ? data.editValue : undefined}
         onClick={data.handleSessionClick}
-        onEdit={data.handleEditStart}
-        onDelete={data.handleDelete}
-        onPin={data.handlePinToggle}
-        onArchive={data.handleArchiveToggle}
+        onEdit={runtimeManaged ? undefined : data.handleEditStart}
+        onDelete={runtimeManaged ? undefined : data.handleDelete}
+        onPin={runtimeManaged ? undefined : data.handlePinToggle}
+        onArchive={runtimeManaged ? undefined : data.handleArchiveToggle}
         onEditChange={data.handleEditChange}
         onEditSubmit={data.handleEditSubmit}
         onEditCancel={data.handleEditCancel}

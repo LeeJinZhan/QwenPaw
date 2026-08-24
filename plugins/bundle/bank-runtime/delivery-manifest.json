@@ -15,8 +15,8 @@
   ],
   "runtime_release_id": "candidate-2.1-production-guard",
   "optional_pawapps": {
-    "local": ["bank-runtime-console@0.1.0"],
-    "dev": ["bank-runtime-console@0.1.0"],
+    "local": [],
+    "dev": [],
     "production": []
   },
   "production_profile": {

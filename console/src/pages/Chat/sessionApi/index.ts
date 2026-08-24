@@ -17,6 +17,13 @@ import {
 } from "../turnUsage";
 import { useTurnUsageStore } from "../turnUsageStore";
 import { QWENPAW_CLIENT_MESSAGE_ID_KEY } from "../../../utils/clientMessageId";
+import {
+  isRuntimeManagedChat,
+  runtimeConsoleApi,
+  runtimeConversationIdFromSessionId,
+  runtimeConversationToChatHistory,
+  runtimeSummaryToChatSpec,
+} from "../../../api/modules/runtimeConsole";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -791,6 +798,7 @@ class SessionApi implements IAgentScopeRuntimeWebUISessionAPI {
     this.onSessionRemoved = null;
     this.onSessionSelected = null;
     this.onSessionCreated = null;
+    this.onSessionContextChanged = null;
   }
 
   /**
@@ -896,6 +904,9 @@ class SessionApi implements IAgentScopeRuntimeWebUISessionAPI {
    */
   onSessionCreated: ((sessionId: string) => void) | null = null;
 
+  /** Called whenever the selected session's channel or metadata is applied. */
+  onSessionContextChanged: ((session: ExtendedSession) => void) | null = null;
+
   /**
    * When reconnecting to a running conversation, the backend history may not
    * include the latest user message (it's only persisted after generation
@@ -998,6 +1009,7 @@ class SessionApi implements IAgentScopeRuntimeWebUISessionAPI {
     window.currentSessionId = session.sessionId || "";
     window.currentUserId = session.userId || DEFAULT_USER_ID;
     window.currentChannel = session.channel || DEFAULT_CHANNEL;
+    this.onSessionContextChanged?.(session);
   }
 
   /** Resets window identity globals to their defaults. Called on agent
@@ -1018,7 +1030,9 @@ class SessionApi implements IAgentScopeRuntimeWebUISessionAPI {
 
   /** Returns the real backend UUID, or null when not yet resolved. */
   getRealIdForSession(sessionId: string): string | null {
-    return this.findSession(sessionId)?.realId ?? null;
+    const session = this.findSession(sessionId);
+    if (isRuntimeManagedChat(session)) return null;
+    return session?.realId ?? null;
   }
 
   /** Resolves the effective ID for URL navigation (prefers backend UUID). */
@@ -1271,6 +1285,16 @@ class SessionApi implements IAgentScopeRuntimeWebUISessionAPI {
     entry.promise = (async () => {
       try {
         const chats = await api.listChats({ archived: false });
+        if (runtimeConsoleApi.isConnected()) {
+          try {
+            const runtimePage = await runtimeConsoleApi.listConversations();
+            chats.push(...runtimePage.items.map(runtimeSummaryToChatSpec));
+          } catch (error) {
+            // Runtime history is an optional read-only source. Its failure
+            // must not make native QwenPaw test chats unavailable.
+            console.warn("Unable to load Runtime-managed conversations", error);
+          }
+        }
         // A result from a stale epoch must not replace the current agent's
         // session list; hand back the current list without mutation.
         if (!this.isActiveOwner(owner)) {
@@ -1368,15 +1392,28 @@ class SessionApi implements IAgentScopeRuntimeWebUISessionAPI {
       }
     }
 
-    const chatHistory = await api.getChat(backendId, { signal });
+    const runtimeManaged = isRuntimeManagedChat(listEntry);
+    const runtimeConversationId = runtimeManaged
+      ? String(
+          listEntry?.meta?.runtimeConversationId ||
+            runtimeConversationIdFromSessionId(backendId) ||
+            "",
+        )
+      : "";
+    if (runtimeManaged && !runtimeConversationId) {
+      throw new Error("Runtime conversation id is missing");
+    }
+    const chatHistory = runtimeManaged
+      ? runtimeConversationToChatHistory(
+          await runtimeConsoleApi.getConversation(runtimeConversationId),
+        )
+      : await api.getChat(backendId, { signal });
     if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
     const generating = isGenerating(chatHistory);
     const messages = convertMessages(chatHistory.messages || []);
-    const patchedPending = this.patchLastUserMessage(
-      messages,
-      generating,
-      backendId,
-    );
+    const patchedPending = runtimeManaged
+      ? false
+      : this.patchLastUserMessage(messages, generating, backendId);
 
     const session: ExtendedSession = {
       id: displayId,
@@ -1386,7 +1423,7 @@ class SessionApi implements IAgentScopeRuntimeWebUISessionAPI {
       channel: listEntry?.channel || DEFAULT_CHANNEL,
       messages,
       meta: listEntry?.meta || {},
-      realId: listEntry?.realId,
+      realId: runtimeManaged ? undefined : listEntry?.realId,
       generating,
     };
 
@@ -1556,6 +1593,13 @@ class SessionApi implements IAgentScopeRuntimeWebUISessionAPI {
     const { messages: _msgs, ...metadata } = session;
     const index = this.sessionList.findIndex((s) => s.id === metadata.id);
 
+    if (
+      index > -1 &&
+      isRuntimeManagedChat(this.sessionList[index] as ExtendedSession)
+    ) {
+      return [...this.sessionList];
+    }
+
     if (index > -1) {
       this.sessionList[index] = { ...this.sessionList[index], ...metadata };
     } else {
@@ -1624,6 +1668,8 @@ class SessionApi implements IAgentScopeRuntimeWebUISessionAPI {
     const { id: sessionId } = session;
 
     const existing = this.findSession(sessionId);
+
+    if (isRuntimeManagedChat(existing)) return [...this.sessionList];
 
     const deleteId =
       existing?.realId ?? (isLocalTimestamp(sessionId) ? null : sessionId);
