@@ -8,12 +8,25 @@ from pathlib import Path
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
+from pydantic import BaseModel, ConfigDict, Field
 import uvicorn
 
 from .config import MinerUSettings
 from .document_store import DocumentStore
 from .mineru_client import MinerUHttpClient
 from .tools import MinerUToolService, ToolContractError
+
+
+class RuntimeDocumentRef(BaseModel):
+    """The paired Runtime identifiers required to resolve one task file."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    file_id: str = Field(min_length=1, description="Runtime uploaded file ID")
+    file_ref: str = Field(
+        min_length=1,
+        description="Opaque task-scoped file reference supplied with the attachment",
+    )
 
 
 class MinerUMcpService:
@@ -48,19 +61,20 @@ class MinerUMcpService:
             name="parse_documents",
             description=(
                 "Parse 1-5 Runtime-authorized documents with MinerU. "
-                "Accepts only opaque file_ref values, never paths or URLs."
+                "Each document must contain both file_id and its paired opaque "
+                "file_ref from the current attachment; never pass paths or URLs."
             ),
             structured_output=True,
         )
         async def parse_documents(
-            documents: list[dict[str, Any]],
+            documents: list[RuntimeDocumentRef],
             parse_method: str = "auto",
             language: str = "auto",
             options: dict[str, bool] | None = None,
         ) -> dict[str, Any]:
             try:
                 return await self.tool_service.parse_documents(
-                    documents,
+                    [document.model_dump() for document in documents],
                     parse_method=parse_method,
                     language=language,
                     options=options,

@@ -92,6 +92,16 @@ async def test_qwen_native_driver_exposes_display_namespace_without_mcp_prefix(
             "MinerU__read_document_chunks",
         ]
         assert all("mcp__" not in item.exposure.tool_name for item in capabilities)
+        parse_capability = next(
+            item for item in capabilities if item.name == "parse_documents"
+        )
+        document_schema = parse_capability.input_schema["properties"]["documents"]
+        item_schema = document_schema["items"]
+        if "$ref" in item_schema:
+            definition_name = item_schema["$ref"].rsplit("/", 1)[-1]
+            item_schema = parse_capability.input_schema["$defs"][definition_name]
+        assert set(item_schema["required"]) == {"file_id", "file_ref"}
+        assert set(item_schema["properties"]) == {"file_id", "file_ref"}
 
         read_capability = next(
             item for item in capabilities if item.name == "read_document_chunks"

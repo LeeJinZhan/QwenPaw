@@ -73,6 +73,7 @@ CONSOLE_REQUEST_ATTRIBUTE_FIELDS = (
     "runtime_response_mode",
     "runtime_task_id",
     "runtime_tool_gateway",
+    "runtime_tool_visibility",
     "sandbox_context",
     "session_bootstrap",
     "session_contract_version",

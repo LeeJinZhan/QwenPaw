@@ -149,6 +149,49 @@ class DriverManager:
 
         await self._shutdown_handlers(old_handlers)
 
+    async def retry_inactive_enabled_drivers(self) -> dict[str, bool]:
+        """Retry enabled persistent Drivers that are not currently active.
+
+        Plugin-hosted endpoints may become available only after workspace
+        services have started.  This recovery pass deliberately leaves every
+        healthy handler untouched and retries only cards whose initial build
+        did not publish a handler.
+        """
+        results: dict[str, bool] = {}
+        for path in await self._card_store.list_paths():
+            try:
+                card = await self._card_store.load_path(path)
+            except Exception as exc:
+                logger.warning(
+                    "Failed to inspect Driver during recovery from %s: %s",
+                    path,
+                    exc,
+                    exc_info=True,
+                )
+                continue
+
+            async with self._lock:
+                active = card.name in self._handlers
+            if active or not card.enabled:
+                continue
+
+            try:
+                await self.reload_driver(card.name)
+                results[card.name] = True
+                logger.info(
+                    "Recovered inactive Driver '%s' after plugin startup",
+                    card.name,
+                )
+            except Exception as exc:
+                results[card.name] = False
+                logger.warning(
+                    "Failed to recover inactive Driver '%s': %s",
+                    card.name,
+                    exc,
+                    exc_info=True,
+                )
+        return results
+
     async def upsert_driver(
         self,
         card: DriverCard,

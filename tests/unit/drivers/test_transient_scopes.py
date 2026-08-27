@@ -93,6 +93,17 @@ def _card(
     )
 
 
+class _FlakyStartupHandler(_FakeHandler):
+    init_attempts: ClassVar[dict[str, int]] = {}
+
+    async def _setup(self) -> None:
+        attempts = self.init_attempts.get(self.name, 0) + 1
+        self.init_attempts[self.name] = attempts
+        if self.card.endpoint.get("fail_first") and attempts == 1:
+            raise RuntimeError(f"Transient startup failure for {self.name}")
+        await super()._setup()
+
+
 def _manager(tmp_path: Path) -> DriverManager:
     manager = DriverManager(
         tmp_path / "drivers",
@@ -109,6 +120,47 @@ def _scope_context(scope_id: str) -> dict[str, str]:
 @pytest.fixture(autouse=True)
 def _reset_handler_state() -> None:
     _FakeHandler.shutdown_names = []
+    _FlakyStartupHandler.init_attempts = {}
+
+
+async def test_retry_inactive_enabled_drivers_recovers_startup_race(
+    tmp_path: Path,
+) -> None:
+    manager = _manager(tmp_path)
+    manager.register_handler_type("fake", _FlakyStartupHandler)
+    await manager.card_store.save(
+        DriverCard(
+            name="recovering",
+            protocol="fake",
+            endpoint={"fail_first": True},
+            enabled=True,
+        ),
+    )
+    await manager.card_store.save(_card("healthy"))
+
+    await manager.start()
+
+    assert _FlakyStartupHandler.init_attempts == {
+        "healthy": 1,
+        "recovering": 1,
+    }
+    assert [
+        item.driver_name for item in await manager.list_capabilities()
+    ] == ["healthy"]
+
+    recovered = await manager.retry_inactive_enabled_drivers()
+
+    assert recovered == {"recovering": True}
+    assert _FlakyStartupHandler.init_attempts == {
+        "healthy": 1,
+        "recovering": 2,
+    }
+    assert [
+        item.driver_name for item in await manager.list_capabilities()
+    ] == ["healthy", "recovering"]
+
+    assert await manager.retry_inactive_enabled_drivers() == {}
+    assert _FlakyStartupHandler.init_attempts["healthy"] == 1
 
 
 async def test_transient_drivers_are_additive_and_scope_isolated(

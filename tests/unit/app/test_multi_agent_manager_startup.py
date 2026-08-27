@@ -720,3 +720,22 @@ async def test_cancelled_start_cleans_pending_state(monkeypatch) -> None:
     assert manager.get_agent_startup_status("custom") == (
         AgentStartupStatus.FAILED
     )
+
+
+@pytest.mark.asyncio
+async def test_retry_inactive_drivers_visits_only_loaded_driver_managers(
+) -> None:
+    manager = MultiAgentManager()
+    default_drivers = AsyncMock()
+    default_drivers.retry_inactive_enabled_drivers.return_value = {
+        "mineru": True,
+    }
+    manager.agents = {
+        "default": SimpleNamespace(driver_manager=default_drivers),
+        "without-drivers": SimpleNamespace(driver_manager=None),
+    }
+
+    result = await manager.retry_inactive_drivers()
+
+    assert result == {"default": {"mineru": True}}
+    default_drivers.retry_inactive_enabled_drivers.assert_awaited_once_with()

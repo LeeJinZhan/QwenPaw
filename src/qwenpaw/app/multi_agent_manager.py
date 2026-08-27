@@ -71,6 +71,31 @@ class MultiAgentManager:
         """Return an already loaded workspace without starting it."""
         return self.agents.get(agent_id)
 
+    async def retry_inactive_drivers(
+        self,
+    ) -> dict[str, dict[str, bool]]:
+        """Retry inactive enabled Drivers in already-started workspaces."""
+        results: dict[str, dict[str, bool]] = {}
+        for agent_id, workspace in list(self.agents.items()):
+            driver_manager = workspace.driver_manager
+            if driver_manager is None:
+                continue
+            try:
+                recovered = (
+                    await driver_manager.retry_inactive_enabled_drivers()
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Failed to retry inactive Drivers for agent '%s': %s",
+                    agent_id,
+                    exc,
+                    exc_info=True,
+                )
+                continue
+            if recovered:
+                results[agent_id] = recovered
+        return results
+
     async def get_agent(self, agent_id: str) -> Workspace:
         """Get agent workspace by ID (lazy loading with dedup).
 

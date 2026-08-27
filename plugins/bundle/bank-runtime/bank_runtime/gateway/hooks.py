@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+import logging
 
 from qwenpaw.hooks.base import LifecycleHook
 from qwenpaw.runtime.hooks import HookContext, HookResult
@@ -12,6 +13,9 @@ from .visibility import (
     filter_managed_driver_tools,
     parse_runtime_tool_visibility,
 )
+
+
+_logger = logging.getLogger("qwenpaw.plugins.bank_runtime.gateway.hooks")
 
 
 class BankRuntimeToolVisibilityHook(LifecycleHook):
@@ -44,6 +48,18 @@ class BankRuntimeToolVisibilityHook(LifecycleHook):
             and projection.worker_type == "qwenpaw"
             and projection.binding_snapshot_hash == gateway_snapshot_hash
             else frozenset()
+        )
+        projection_hash = (
+            projection.binding_snapshot_hash if projection is not None else ""
+        )
+        _logger.debug(
+            "bank-runtime visibility: projection=%s worker_type=%s "
+            "projection_hash=%s gateway_hash=%s allowed=%s",
+            projection is not None,
+            projection.worker_type if projection is not None else "",
+            projection_hash[:15],
+            gateway_snapshot_hash[:15],
+            sorted(allowed_names),
         )
         filter_managed_driver_tools(agent.toolkit, allowed_names)
         return HookResult()

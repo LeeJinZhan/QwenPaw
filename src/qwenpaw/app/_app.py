@@ -518,6 +518,19 @@ async def lifespan(  # pylint: disable=too-many-statements,too-many-branches
                         exc_info=True,
                     )
 
+            # Some MCP endpoints are hosted by plugins and therefore become
+            # reachable only after their startup hooks complete.  Recover only
+            # enabled Drivers that failed the initial workspace startup pass;
+            # healthy connections are left untouched.
+            recovered_drivers = (
+                await workspace_registry.retry_inactive_drivers()
+            )
+            if recovered_drivers:
+                logger.info(
+                    "Recovered plugin-hosted Drivers after startup hooks: %s",
+                    recovered_drivers,
+                )
+
             # ---- Approval Service ----
             try:
                 default_agent = await workspace_registry.get_agent(

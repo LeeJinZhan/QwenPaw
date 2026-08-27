@@ -172,6 +172,12 @@ class TestBuildAgentRequestFromNative:
             attachments_manifest=[{"file_id": "file-1"}],
             sandbox_context={"task_id": "task-1", "context_id": "ctx-1"},
             runtime_tool_gateway={"base_url": "http://runtime.test"},
+            runtime_tool_visibility={
+                "worker_type": "qwenpaw",
+                "worker_tool_names": ["MinerU__parse_documents"],
+                "binding_snapshot_hash": f"sha256:{'a' * 64}",
+                "authoritative": False,
+            },
             session_mode="managed",
             session_contract_version="2.0",
             identity_json={"user_id": "u001"},
@@ -188,6 +194,12 @@ class TestBuildAgentRequestFromNative:
         }
         assert rebuilt.runtime_tool_gateway == {
             "base_url": "http://runtime.test",
+        }
+        assert rebuilt.runtime_tool_visibility == {
+            "worker_type": "qwenpaw",
+            "worker_tool_names": ["MinerU__parse_documents"],
+            "binding_snapshot_hash": f"sha256:{'a' * 64}",
+            "authoritative": False,
         }
         assert rebuilt.session_mode == "managed"
         assert rebuilt.session_contract_version == "2.0"

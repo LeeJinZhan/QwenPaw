@@ -216,6 +216,12 @@ async def build_driver_agent_tools(
     if not tools:
         return [], []
 
+    logger.debug(
+        "Built Driver tools for request channel=%s: %s",
+        request_context.get("channel", ""),
+        [tool.name for tool in tools],
+    )
+
     from ...agents.prompt import build_driver_policy_recheck_hint
 
     return tools, [build_driver_policy_recheck_hint()]
