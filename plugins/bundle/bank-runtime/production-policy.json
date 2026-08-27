@@ -1,11 +1,11 @@
 {
   "schema_version": "bank-runtime-production-policy/v1",
   "approved_registry": {
-    "plugins": ["bank-runtime"],
-    "plugin_channels": ["bank-runtime"],
+    "required_plugins": ["bank-runtime"],
+    "required_plugin_channels": ["bank-runtime"],
     "agents": ["bank-assistant"],
-    "registered_modes": ["default", "coding", "goal", "mission"],
-    "registered_tools": [
+    "required_registered_modes": ["default", "coding", "goal", "mission"],
+    "required_registered_tools": [
       "activate_personal_skill",
       "append_file",
       "ast_search",
@@ -70,7 +70,7 @@
   },
   "delivery_authority": {
     "network_egress": ["runtime", "tool-gateway", "sandbox", "oss"],
-    "mcp_clients": [],
+    "mcp_clients": "runtime_tool_gateway_governed",
     "host_mounts": ["working", "secret", "backup", "task-files"],
     "host_system_permissions": [],
     "optional_pawapps": []

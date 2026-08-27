@@ -106,7 +106,6 @@ def _approved_snapshot(**overrides: object) -> ProductionSnapshot:
         ("active_features", {"computer_use"}, "forbidden_feature"),
         ("enabled_harnesses", {"codex"}, "forbidden_harness"),
         ("enabled_harnesses", {"qoder"}, "forbidden_harness"),
-        ("plugins", {"bank-runtime", "market-weather"}, "unknown_plugin"),
         ("active_features", {"long_term_memory"}, "forbidden_feature"),
     ],
 )
@@ -127,24 +126,24 @@ def test_any_forbidden_capability_makes_readiness_fail(
 
 
 @pytest.mark.parametrize(
-    ("field", "unknown", "reason"),
+    ("field", "required", "reason"),
     [
-        ("registered_tools", "unexpected_tool", "unknown_registered_tool"),
-        ("registered_modes", "unexpected_mode", "unknown_mode"),
-        ("plugin_channels", "unexpected-channel", "unknown_channel"),
-        ("loaded_agents", "unexpected-agent", "unknown_agent"),
+        ("plugins", "bank-runtime", "missing_required_plugin"),
+        ("registered_tools", "bank_assistant", "missing_registered_tool"),
+        ("registered_modes", "default", "missing_registered_mode"),
+        ("plugin_channels", "bank-runtime", "missing_required_channel"),
     ],
 )
-def test_unknown_registry_item_blocks_startup(
+def test_missing_required_registry_item_blocks_startup(
     field: str,
-    unknown: str,
+    required: str,
     reason: str,
 ) -> None:
     policy = load_production_policy(POLICY_PATH)
     current = getattr(_approved_snapshot(), field)
 
     result = evaluate_snapshot(
-        _approved_snapshot(**{field: set(current) | {unknown}}),
+        _approved_snapshot(**{field: set(current) - {required}}),
         policy,
     )
 
@@ -152,9 +151,37 @@ def test_unknown_registry_item_blocks_startup(
     assert reason in result.reason_codes
 
 
+def test_unapproved_agent_still_blocks_startup() -> None:
+    result = evaluate_snapshot(
+        _approved_snapshot(loaded_agents={"bank-assistant", "unexpected-agent"}),
+        load_production_policy(POLICY_PATH),
+    )
+
+    assert result.ready is False
+    assert "unknown_agent" in result.reason_codes
+
+
 def test_approved_registry_snapshot_is_ready() -> None:
     result = evaluate_snapshot(
         _approved_snapshot(),
+        load_production_policy(POLICY_PATH),
+    )
+
+    assert result.ready is True
+    assert result.reason_codes == ()
+
+
+def test_runtime_governed_mcp_and_extra_plugin_registry_do_not_block_startup() -> None:
+    baseline = _approved_snapshot()
+    result = evaluate_snapshot(
+        _approved_snapshot(
+            plugins={"bank-runtime", "bank-mineru-mcp"},
+            plugin_channels=set(baseline.plugin_channels) | {"plugin-admin-only"},
+            registered_modes=set(baseline.registered_modes) | {"document-mode"},
+            registered_tools=set(baseline.registered_tools)
+            | {"MinerU__parse_documents"},
+            enabled_mcp_clients={"mineru"},
+        ),
         load_production_policy(POLICY_PATH),
     )
 
@@ -252,7 +279,7 @@ def test_production_agent_profile_disables_external_authority() -> None:
         assert secret_key not in serialized
 
 
-def test_profile_attack_configuration_is_rejected_without_echoing_values() -> None:
+def test_profile_accepts_enabled_mcp_without_echoing_connection_values() -> None:
     profile = json.loads(PROFILE_PATH.read_text(encoding="utf-8"))
     profile["mcp"]["clients"]["evil"] = {
         "enabled": True,
@@ -261,14 +288,27 @@ def test_profile_attack_configuration_is_rejected_without_echoing_values() -> No
 
     result = validate_production_agent_profile(profile)
 
-    assert result.ready is False
-    assert "enabled_mcp_client" in result.reason_codes
+    assert result.ready is True
+    assert "enabled_mcp_client" not in result.reason_codes
     assert "very-secret" not in result.public_payload()
     assert "example.invalid" not in result.public_payload()
 
 
 def test_production_root_config_disables_browser_plugins_and_global_authority() -> None:
     config = json.loads(ROOT_CONFIG_PATH.read_text(encoding="utf-8"))
+
+    result = validate_production_root_config(config)
+
+    assert result.ready is True
+
+
+def test_root_config_accepts_admin_installed_plugins_and_enabled_mcp() -> None:
+    config = json.loads(ROOT_CONFIG_PATH.read_text(encoding="utf-8"))
+    config["plugins"]["bank-mineru-mcp"] = {"enabled": True}
+    config["mcp"]["clients"]["mineru"] = {
+        "enabled": True,
+        "url": "http://127.0.0.1:18081/mcp",
+    }
 
     result = validate_production_root_config(config)
 
@@ -382,14 +422,19 @@ def test_production_image_pins_base_and_embeds_source_identity() -> None:
         in dockerfile
     )
     assert dockerfile.count("ARG PYTHON_IMAGE") == 2
-    assert "COPY plugins/bundle/bank-runtime/production-python311-linux-amd64.lock" in dockerfile
+    assert (
+        "COPY plugins/bundle/bank-runtime/production-python311-linux-amd64.lock"
+        in dockerfile
+    )
     assert "--require-hashes" in dockerfile
     assert "--no-deps --no-build-isolation ." in dockerfile
     assert "python -m pip uninstall -y pip wheel setuptools" in dockerfile
     assert 'find_spec("pip") is None' in dockerfile
     assert 'find_spec("setuptools") is None' in dockerfile
     assert 'find_spec("pkg_resources") is None' in dockerfile
-    assert "from qwenpaw.app.channels.registry import get_channel_registry" in dockerfile
+    assert (
+        "from qwenpaw.app.channels.registry import get_channel_registry" in dockerfile
+    )
     assert '"console" in get_channel_registry()' in dockerfile
     assert "ARG BANK_RUNTIME_SOURCE_COMMIT" in dockerfile
     assert "source_commit_invalid" in dockerfile
@@ -446,12 +491,12 @@ def test_production_compose_has_no_host_port_or_extra_system_authority() -> None
         assert forbidden not in compose
 
 
-def test_production_entrypoint_rejects_unreviewed_plugins_and_insecure_defaults() -> (
+def test_production_entrypoint_allows_admin_plugins_and_rejects_insecure_defaults() -> (
     None
 ):
     entrypoint = ENTRYPOINT_PATH.read_text(encoding="utf-8")
 
-    assert "unexpected_plugin_directory" in entrypoint
+    assert "unexpected_plugin_directory" not in entrypoint
     assert "production_config_missing" in entrypoint
     assert "production_directory_not_writable" in entrypoint
     assert 'task_file_dir="${QWENPAW_TASK_FILE_ROOT:-/app/task-files}"' in entrypoint
@@ -459,6 +504,18 @@ def test_production_entrypoint_rejects_unreviewed_plugins_and_insecure_defaults(
     assert "qwenpaw init --defaults" not in entrypoint
     assert 'export PYTHONPATH="/opt/bank-runtime-plugin' in entrypoint
     assert "bank_runtime.delivery_probe" in entrypoint
+
+
+def test_mineru_plugin_is_packaged_with_loopback_only_deployment_settings() -> None:
+    dockerfile = DOCKERFILE_PATH.read_text(encoding="utf-8")
+    compose = COMPOSE_PATH.read_text(encoding="utf-8")
+
+    assert "plugins/bundle/bank-mineru-mcp" in dockerfile
+    assert "BANK_MINERU_BASE_URL:" in compose
+    assert "BANK_MINERU_TOKEN_FILE: /app/working.secret/mineru.token" in compose
+    assert 'BANK_MINERU_MCP_HOST: "127.0.0.1"' in compose
+    assert 'BANK_MINERU_MCP_PORT: "18081"' in compose
+    assert "18081:18081" not in compose
 
 
 def test_dependency_probe_reports_categories_without_import_details() -> None:
@@ -530,10 +587,10 @@ def _strict_registry(app: FastAPI, profile: dict) -> SimpleNamespace:
         config=profile,
         plugins=SimpleNamespace(
             tool_registry=SimpleNamespace(
-                names=lambda: sorted(policy.approved_registered_tools)
+                names=lambda: sorted(policy.required_registered_tools)
             ),
             modes=[
-                SimpleNamespace(name=name) for name in policy.approved_registered_modes
+                SimpleNamespace(name=name) for name in policy.required_registered_modes
             ],
         ),
     )

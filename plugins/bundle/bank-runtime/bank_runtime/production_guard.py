@@ -15,11 +15,11 @@ from fastapi import HTTPException, status
 
 @dataclass(frozen=True)
 class ProductionPolicy:
-    allowed_plugins: frozenset[str]
-    allowed_plugin_channels: frozenset[str]
+    required_plugins: frozenset[str]
+    required_plugin_channels: frozenset[str]
     allowed_agents: frozenset[str]
-    approved_registered_modes: frozenset[str]
-    approved_registered_tools: frozenset[str]
+    required_registered_modes: frozenset[str]
+    required_registered_tools: frozenset[str]
     allowed_reachable_tools: frozenset[str]
     allowed_enabled_channels: frozenset[str]
     allowed_route_prefixes: tuple[str, ...]
@@ -124,11 +124,11 @@ def load_production_policy(path: Path | None = None) -> ProductionPolicy:
     payload = json.loads(policy_path.read_text(encoding="utf-8"))
     approved = payload["approved_registry"]
     return ProductionPolicy(
-        allowed_plugins=_strings(approved["plugins"]),
-        allowed_plugin_channels=_strings(approved["plugin_channels"]),
+        required_plugins=_strings(approved["required_plugins"]),
+        required_plugin_channels=_strings(approved["required_plugin_channels"]),
         allowed_agents=_strings(approved["agents"]),
-        approved_registered_modes=_strings(approved["registered_modes"]),
-        approved_registered_tools=_strings(approved["registered_tools"]),
+        required_registered_modes=_strings(approved["required_registered_modes"]),
+        required_registered_tools=_strings(approved["required_registered_tools"]),
         allowed_reachable_tools=_strings(approved["reachable_tools"]),
         allowed_enabled_channels=_strings(approved["enabled_channels"]),
         allowed_route_prefixes=tuple(payload["http"]["allowed_prefixes"]),
@@ -158,25 +158,17 @@ def evaluate_snapshot(
     tools = set(snapshot.registered_tools)
     reachable = set(snapshot.reachable_tools)
 
-    if plugins - policy.allowed_plugins:
-        reasons.add("unknown_plugin")
-    if policy.allowed_plugins - plugins:
+    if policy.required_plugins - plugins:
         reasons.add("missing_required_plugin")
-    if channels - policy.allowed_plugin_channels:
-        reasons.add("unknown_channel")
-    if policy.allowed_plugin_channels - channels:
+    if policy.required_plugin_channels - channels:
         reasons.add("missing_required_channel")
     if agents - policy.allowed_agents:
         reasons.add("unknown_agent")
     if policy.allowed_agents - agents:
         reasons.add("missing_required_agent")
-    if modes - policy.approved_registered_modes:
-        reasons.add("unknown_mode")
-    if policy.approved_registered_modes - modes:
+    if policy.required_registered_modes - modes:
         reasons.add("missing_registered_mode")
-    if tools - policy.approved_registered_tools:
-        reasons.add("unknown_registered_tool")
-    if policy.approved_registered_tools - tools:
+    if policy.required_registered_tools - tools:
         reasons.add("missing_registered_tool")
     if reachable & policy.forbidden_tools:
         reasons.add("forbidden_tool")
@@ -184,8 +176,6 @@ def evaluate_snapshot(
         reasons.add("unapproved_reachable_tool")
     if set(snapshot.enabled_channels) - policy.allowed_enabled_channels:
         reasons.add("unapproved_enabled_channel")
-    if set(snapshot.enabled_mcp_clients):
-        reasons.add("enabled_mcp_client")
     if set(snapshot.enabled_harnesses) & policy.forbidden_harnesses:
         reasons.add("forbidden_harness")
     if set(snapshot.enabled_harnesses) - policy.forbidden_harnesses:
@@ -409,7 +399,7 @@ def execute_production_guard(
         if callable(get_http_registrations):
             for registration in get_http_registrations():
                 if str(getattr(registration, "plugin_id", "")) in (
-                    policy.allowed_plugins
+                    policy.required_plugins
                 ):
                     allowed_plugin_routes.extend(
                         getattr(registration, "routes", ()),
@@ -456,11 +446,6 @@ def validate_production_agent_profile(profile: dict[str, Any]) -> GuardResult:
         if isinstance(profile.get("tools"), dict)
         else None
     )
-    mcp_clients = _enabled_names(
-        (profile.get("mcp") or {}).get("clients")
-        if isinstance(profile.get("mcp"), dict)
-        else None
-    )
     harnesses = _enabled_names(
         (profile.get("acp") or {}).get("agents")
         if isinstance(profile.get("acp"), dict)
@@ -470,8 +455,6 @@ def validate_production_agent_profile(profile: dict[str, Any]) -> GuardResult:
         reasons.add("unapproved_enabled_channel")
     if tools - {"bank_assistant", "activate_personal_skill"}:
         reasons.add("unapproved_reachable_tool")
-    if mcp_clients:
-        reasons.add("enabled_mcp_client")
     if harnesses:
         reasons.add("forbidden_harness")
 
@@ -506,8 +489,12 @@ def validate_production_root_config(config: dict[str, Any]) -> GuardResult:
     ):
         reasons.add("browser_authority_present")
     plugins = config.get("plugins") or {}
-    if not isinstance(plugins, dict) or set(plugins) != {"bank-runtime"}:
-        reasons.add("unapproved_plugin_config")
+    if (
+        not isinstance(plugins, dict)
+        or not isinstance(plugins.get("bank-runtime"), dict)
+        or plugins["bank-runtime"].get("enabled") is not True
+    ):
+        reasons.add("missing_required_plugin")
     if _enabled_names(_mapping(config.get("channels"))) != {"bank-runtime"}:
         reasons.add("unapproved_enabled_channel")
     tools = _mapping(config.get("tools"))
@@ -516,9 +503,6 @@ def validate_production_root_config(config: dict[str, Any]) -> GuardResult:
         "activate_personal_skill",
     }:
         reasons.add("unapproved_reachable_tool")
-    mcp = _mapping(config.get("mcp"))
-    if _enabled_names(_mapping(mcp.get("clients"))):
-        reasons.add("enabled_mcp_client")
     acp = _mapping(config.get("acp"))
     if _enabled_names(_mapping(acp.get("agents"))):
         reasons.add("forbidden_harness")

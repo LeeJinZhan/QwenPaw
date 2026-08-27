@@ -32,6 +32,7 @@ RUN python -m pip uninstall -y pip wheel setuptools \
     && python -c 'import importlib.util; assert importlib.util.find_spec("pip") is None; assert importlib.util.find_spec("setuptools") is None; assert importlib.util.find_spec("pkg_resources") is None; from qwenpaw.app.channels.registry import get_channel_registry; assert "console" in get_channel_registry()'
 
 COPY plugins/bundle/bank-runtime /opt/bank-runtime-plugin
+COPY plugins/bundle/bank-mineru-mcp /opt/bank-mineru-mcp-plugin
 RUN useradd --create-home --uid 10001 --shell /usr/sbin/nologin qwenpaw \
     && mkdir -p /app/working /app/working.secret /app/working.backups /app/task-files \
     && chown -R 10001:10001 /app

@@ -25,14 +25,6 @@ for required_dir in "$working_dir" "$secret_dir" "$backup_dir" "$task_file_dir";
 done
 
 mkdir -p "$plugins_dir"
-for plugin_dir in "$plugins_dir"/*; do
-    [ -e "$plugin_dir" ] || [ -L "$plugin_dir" ] || continue
-    if [ "$(basename "$plugin_dir")" != "bank-runtime" ]; then
-        echo "unexpected_plugin_directory" >&2
-        exit 1
-    fi
-done
-
 if [ -e "$bank_plugin_dir" ] && [ ! -L "$bank_plugin_dir" ]; then
     echo "bank_runtime_plugin_not_immutable" >&2
     exit 1
