@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 import sys
 from types import SimpleNamespace
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -22,6 +23,7 @@ def _request(**overrides):
             "context_id": "ctx_001",
             "task_id": "task_001",
             "signature": "signed",
+            "expires_at": (datetime.now(timezone.utc) + timedelta(minutes=30)).isoformat(),
         },
         "attachments_manifest": [
             {
@@ -75,6 +77,7 @@ def test_scope_accepts_runtime_opaque_context_manifest_reference() -> None:
             "context_manifest_id": "ctxm_001",
             "task_id": "task_001",
             "signature": "signed",
+            "expires_at": (datetime.now(timezone.utc) + timedelta(minutes=30)).isoformat(),
         }
     )
 
@@ -113,16 +116,59 @@ def test_scope_rejects_duplicate_or_excessive_model_selection() -> None:
                 "source": "conversation",
                 "readable": True,
             }
-            for index in range(4)
+            for index in range(5)
         ]
     )
     with pytest.raises(SandboxScopeError):
         scope.selection_records(["file_0", "file_0"])
+    assert len(scope.selection_records(["file_0", "file_1", "file_2", "file_3"])) == 4
+    scope.mark_selected(["file_0", "file_1", "file_2", "file_3"])
     with pytest.raises(SandboxScopeError):
-        scope.selection_records(["file_0", "file_1", "file_2", "file_3"])
-    scope.mark_selected(["file_0", "file_1", "file_2"])
-    with pytest.raises(SandboxScopeError):
-        scope.selection_records(["file_3"])
+        scope.selection_records(["file_4"])
+
+
+def test_scope_limits_current_and_selected_files_to_five_per_task() -> None:
+    request = _request(
+        attachments_manifest=[
+            {
+                "file_id": f"file_current_{index}",
+                "source": "current_task",
+                "content_type": "text/plain",
+                "size_bytes": 1,
+            }
+            for index in range(4)
+        ]
+    )
+    scope = SandboxRequestScope.from_request(request)
+    scope.remember_discovered(
+        [
+            {
+                "file_id": "file_history_1",
+                "source": "conversation",
+                "readable": True,
+            },
+            {
+                "file_id": "file_history_2",
+                "source": "assistant_workspace",
+                "readable": True,
+            },
+        ]
+    )
+
+    assert len(scope.selection_records(["file_history_1"])) == 1
+    scope.mark_selected(["file_history_1"])
+    with pytest.raises(SandboxScopeError, match="limit"):
+        scope.selection_records(["file_history_2"])
+
+    with pytest.raises(SandboxScopeError, match="manifest"):
+        SandboxRequestScope.from_request(
+            _request(
+                attachments_manifest=[
+                    {"file_id": f"file_{index}", "source": "current_task"}
+                    for index in range(6)
+                ]
+            )
+        )
 
 
 def test_scope_public_metadata_never_retains_storage_locators() -> None:

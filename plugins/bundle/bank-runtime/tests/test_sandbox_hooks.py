@@ -23,9 +23,10 @@ from bank_runtime.sandbox import tools as sandbox_tools
 
 
 class _Cache:
-    def __init__(self, root: Path) -> None:
+    def __init__(self, root: Path, events: list[str] | None = None) -> None:
         self.root = root
         self.cleaned = []
+        self.events = events if events is not None else []
 
     async def prepare_files(self, scope, file_ids, broker, selection_records=None):
         del scope, broker, selection_records
@@ -39,12 +40,31 @@ class _Cache:
                 content_type="text/plain",
                 size_bytes=path.stat().st_size,
                 original_name="材料.txt",
-                expires_at="2026-08-19T12:00:00+08:00",
+                expires_at="2099-08-19T12:00:00+08:00",
+                task_id="task_001",
             )
         ]
 
     async def cleanup(self, task_id):
         self.cleaned.append(task_id)
+        self.events.append(f"cleanup:{task_id}")
+
+
+class _FileRefs:
+    def __init__(self, events: list[str]) -> None:
+        self.events = events
+        self.issued = []
+
+    def purge_expired(self):
+        self.events.append("purge")
+
+    def issue(self, prepared, *, expires_at):
+        self.issued.append((prepared.file_id, prepared.task_id, expires_at))
+        self.events.append(f"issue:{prepared.file_id}")
+        return f"fr1_{prepared.file_id}"
+
+    def revoke_task(self, task_id):
+        self.events.append(f"revoke:{task_id}")
 
 
 def _ctx(tmp_path):
@@ -56,6 +76,7 @@ def _ctx(tmp_path):
             "context_id": "ctx_001",
             "task_id": "task_001",
             "signature": "signed",
+            "expires_at": "2099-08-19T12:00:00+08:00",
         },
         attachments_manifest=[
             {
@@ -93,9 +114,12 @@ async def test_current_attachments_are_prepared_before_execute_and_cleaned(
     tmp_path,
     monkeypatch,
 ) -> None:
-    cache = _Cache(tmp_path / "task-files")
+    events: list[str] = []
+    cache = _Cache(tmp_path / "task-files", events)
+    file_refs = _FileRefs(events)
     monkeypatch.setenv("QWENPAW_SERVICE_TOKEN", "service-secret")
     monkeypatch.setattr(sandbox_hooks, "_CACHE", cache)
+    monkeypatch.setattr(sandbox_hooks, "_FILE_REFS", file_refs)
     ctx = _ctx(tmp_path)
 
     await BankRuntimeSandboxInstallHook().run(ctx)
@@ -112,9 +136,11 @@ async def test_current_attachments_are_prepared_before_execute_and_cleaned(
     )
     assert "untrusted attachment text" in rendered
     assert "trusted='false'" in rendered
+    assert file_refs.issued[0][0:2] == ("file_current", "task_001")
 
     await BankRuntimeSandboxCleanupHook().run(ctx)
     assert cache.cleaned == ["task_001"]
+    assert events[-2:] == ["revoke:task_001", "cleanup:task_001"]
 
 
 @pytest.mark.asyncio

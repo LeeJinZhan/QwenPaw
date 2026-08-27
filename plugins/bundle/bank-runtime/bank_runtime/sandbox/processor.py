@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-import re
+from collections.abc import Mapping
 import zipfile
-from xml.etree import ElementTree
+from xml.sax.saxutils import quoteattr
 
 from agentscope.message import DataBlock, TextBlock
 from agentscope.message._block import URLSource
@@ -24,9 +24,7 @@ _TEXT_EXTENSIONS = {
     ".log",
 }
 _OOXML = {".docx", ".xlsx", ".pptx"}
-_MAX_ZIP_MEMBERS = 4096
-_MAX_ZIP_BYTES = 64 * 1024 * 1024
-_MAX_PDF_PAGES = 500
+_TOOL_REQUIRED = {"pdf", "docx", "xlsx", "pptx"}
 
 
 class AttachmentProcessor:
@@ -36,7 +34,12 @@ class AttachmentProcessor:
         self.per_file_chars = max(1, int(per_file_chars))
         self.task_chars = max(self.per_file_chars, int(task_chars))
 
-    def process(self, files: list[PreparedSandboxFile]) -> list[TextBlock | DataBlock]:
+    def process(
+        self,
+        files: list[PreparedSandboxFile],
+        *,
+        file_refs: Mapping[str, str] | None = None,
+    ) -> list[TextBlock | DataBlock]:
         blocks: list[TextBlock | DataBlock] = []
         remaining = self.task_chars
         for prepared in files:
@@ -52,6 +55,14 @@ class AttachmentProcessor:
                     )
                 )
                 continue
+            if kind in _TOOL_REQUIRED:
+                file_ref = str((file_refs or {}).get(prepared.file_id) or "").strip()
+                if not file_ref:
+                    raise SandboxCacheError(
+                        "Attachment file reference is required"
+                    )
+                blocks.append(self._tool_required(prepared, file_ref))
+                continue
             if kind == "binary":
                 blocks.append(
                     self._status(
@@ -60,7 +71,7 @@ class AttachmentProcessor:
                     )
                 )
                 continue
-            text = self._extract(kind, prepared)
+            text = _decode(prepared.local_path.read_bytes())
             allowance = min(self.per_file_chars, remaining)
             rendered = text[:allowance]
             truncated = len(text) > len(rendered)
@@ -69,7 +80,7 @@ class AttachmentProcessor:
                 TextBlock(
                     type="text",
                     text=(
-                        f"<runtime_attachment name={prepared.original_name!r} trusted='false'>\n"
+                        f"<runtime_attachment name={quoteattr(prepared.original_name)} trusted='false'>\n"
                         f"{rendered}\n</runtime_attachment>"
                         + ("\n[Attachment text truncated.]" if truncated else "")
                     ),
@@ -79,7 +90,8 @@ class AttachmentProcessor:
 
     def _kind(self, prepared: PreparedSandboxFile) -> str:
         path = prepared.local_path
-        prefix = path.read_bytes()[:512]
+        with path.open("rb") as handle:
+            prefix = handle.read(512)
         mime = prepared.content_type.split(";", 1)[0].lower()
         suffix = path.suffix.lower()
         if prefix.startswith(b"%PDF-"):
@@ -117,26 +129,27 @@ class AttachmentProcessor:
             return "text"
         return "binary"
 
-    def _extract(self, kind: str, prepared: PreparedSandboxFile) -> str:
-        if kind == "text":
-            return _decode(prepared.local_path.read_bytes())
-        if kind == "pdf":
-            from pypdf import PdfReader
-
-            try:
-                reader = PdfReader(str(prepared.local_path), strict=True)
-                if reader.is_encrypted:
-                    raise SandboxCacheError("PDF is encrypted")
-                if len(reader.pages) > _MAX_PDF_PAGES:
-                    raise SandboxCacheError("PDF page quota exceeded")
-                return "\n\n".join(
-                    str(page.extract_text() or "") for page in reader.pages
-                )
-            except SandboxCacheError:
-                raise
-            except Exception as exc:
-                raise SandboxCacheError("PDF parsing failed") from exc
-        return _extract_ooxml(prepared.local_path, kind)
+    @staticmethod
+    def _tool_required(prepared: PreparedSandboxFile, file_ref: str) -> TextBlock:
+        attributes = " ".join(
+            (
+                f"file_id={quoteattr(prepared.file_id)}",
+                f"display_name={quoteattr(prepared.original_name)}",
+                f"media_type={quoteattr(prepared.content_type)}",
+                f"size_bytes={quoteattr(str(prepared.size_bytes))}",
+                'processing="tool_required"',
+                f"file_ref={quoteattr(file_ref)}",
+                'trust="user_supplied_untrusted_content"',
+            )
+        )
+        return TextBlock(
+            type="text",
+            text=(
+                f"<runtime_attachment {attributes}>\n"
+                "该文件正文尚未读取。如当前问题依赖其内容，请选择已授权且支持该类型的文件处理工具。\n"
+                "</runtime_attachment>"
+            ),
+        )
 
     @staticmethod
     def _status(prepared: PreparedSandboxFile, message: str) -> TextBlock:
@@ -152,55 +165,6 @@ def _decode(value: bytes) -> str:
         except UnicodeDecodeError:
             continue
     raise SandboxCacheError("Attachment text encoding is unsupported")
-
-
-def _extract_ooxml(path, kind: str) -> str:
-    with zipfile.ZipFile(path) as archive:
-        members = archive.infolist()
-        if (
-            len(members) > _MAX_ZIP_MEMBERS
-            or sum(item.file_size for item in members) > _MAX_ZIP_BYTES
-        ):
-            raise SandboxCacheError("Office archive quota exceeded")
-        names = []
-        for item in members:
-            name = item.filename.replace("\\", "/")
-            if name.startswith("/") or any(
-                part in {"", ".", ".."} for part in name.split("/")
-            ):
-                raise SandboxCacheError("Office archive path is invalid")
-            if _office_member(kind, name):
-                names.append(name)
-        text: list[str] = []
-        for name in sorted(names, key=_natural_key):
-            try:
-                root = ElementTree.fromstring(archive.read(name))
-            except ElementTree.ParseError as exc:
-                raise SandboxCacheError("Office XML is invalid") from exc
-            values = [
-                node.text for node in root.iter() if node.text and node.text.strip()
-            ]
-            if values:
-                text.append(" ".join(values))
-        return "\n\n".join(text)
-
-
-def _office_member(kind: str, name: str) -> bool:
-    if kind == "docx":
-        return (
-            name == "word/document.xml"
-            or name.startswith("word/header")
-            or name.startswith("word/footer")
-        )
-    if kind == "xlsx":
-        return name == "xl/sharedStrings.xml" or name.startswith("xl/worksheets/sheet")
-    return name.startswith("ppt/slides/slide") or name.startswith(
-        "ppt/notesSlides/notesSlide"
-    )
-
-
-def _natural_key(value: str) -> list[object]:
-    return [int(item) if item.isdigit() else item for item in re.split(r"(\d+)", value)]
 
 
 __all__ = ["AttachmentProcessor"]

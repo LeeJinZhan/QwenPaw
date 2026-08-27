@@ -5,6 +5,7 @@ import sys
 import zipfile
 
 import pytest
+from agentscope.message import TextBlock
 from pypdf import PdfWriter
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
@@ -27,19 +28,22 @@ def _prepared(path: Path, *, content_type: str) -> PreparedSandboxFile:
     )
 
 
-def test_processor_rejects_office_archive_path_traversal(tmp_path) -> None:
+def test_processor_does_not_inspect_office_archive_members(tmp_path) -> None:
     path = tmp_path / "malicious.docx"
     with zipfile.ZipFile(path, "w") as archive:
         archive.writestr("../word/document.xml", "<x>secret</x>")
-    with pytest.raises(SandboxCacheError):
-        AttachmentProcessor().process(
-            [
-                _prepared(
-                    path,
-                    content_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                )
-            ]
-        )
+    block = AttachmentProcessor().process(
+        [
+            _prepared(
+                path,
+                content_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            )
+        ],
+        file_refs={"file_001": "fr1_office"},
+    )[0]
+    assert isinstance(block, TextBlock)
+    assert "tool_required" in block.text
+    assert "secret" not in block.text
 
 
 def test_processor_rejects_declared_text_with_binary_signature(tmp_path) -> None:
@@ -49,19 +53,27 @@ def test_processor_rejects_declared_text_with_binary_signature(tmp_path) -> None
         AttachmentProcessor().process([_prepared(path, content_type="text/plain")])
 
 
-def test_processor_rejects_pdf_over_page_quota(tmp_path) -> None:
+def test_processor_routes_pdf_to_an_opaque_tool_required_block(tmp_path) -> None:
     path = tmp_path / "oversized.pdf"
     writer = PdfWriter()
-    for _ in range(501):
-        writer.add_blank_page(width=72, height=72)
+    writer.add_blank_page(width=72, height=72)
     with path.open("wb") as handle:
         writer.write(handle)
 
-    with pytest.raises(SandboxCacheError, match="page quota"):
-        AttachmentProcessor().process([_prepared(path, content_type="application/pdf")])
+    prepared = _prepared(path, content_type="application/pdf")
+    block = AttachmentProcessor().process(
+        [prepared],
+        file_refs={"file_001": "fr1_opaque"},
+    )[0]
+
+    assert isinstance(block, TextBlock)
+    assert "processing=\"tool_required\"" in block.text
+    assert "file_ref=\"fr1_opaque\"" in block.text
+    assert "file_id=\"file_001\"" in block.text
+    assert "正文尚未读取" in block.text
 
 
-def test_processor_normalizes_encrypted_pdf_failure(tmp_path) -> None:
+def test_processor_does_not_attempt_to_decrypt_or_extract_pdf_text(tmp_path) -> None:
     path = tmp_path / "encrypted.pdf"
     writer = PdfWriter()
     writer.add_blank_page(width=72, height=72)
@@ -69,7 +81,20 @@ def test_processor_normalizes_encrypted_pdf_failure(tmp_path) -> None:
     with path.open("wb") as handle:
         writer.write(handle)
 
-    with pytest.raises(SandboxCacheError, match="PDF is encrypted"):
+    prepared = _prepared(path, content_type="application/pdf")
+    block = AttachmentProcessor().process(
+        [prepared],
+        file_refs={"file_001": "fr1_encrypted"},
+    )[0]
+    assert isinstance(block, TextBlock)
+    assert "tool_required" in block.text
+
+
+def test_processor_requires_file_ref_for_complex_documents(tmp_path) -> None:
+    path = tmp_path / "report.pdf"
+    path.write_bytes(b"%PDF-1.7\n")
+
+    with pytest.raises(SandboxCacheError, match="reference"):
         AttachmentProcessor().process([_prepared(path, content_type="application/pdf")])
 
 

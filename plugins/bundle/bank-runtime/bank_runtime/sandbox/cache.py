@@ -29,6 +29,7 @@ class PreparedSandboxFile:
     size_bytes: int
     original_name: str
     expires_at: str
+    task_id: str = ""
 
 
 class TaskAttachmentCache:
@@ -36,9 +37,9 @@ class TaskAttachmentCache:
         self,
         root: str | Path | None = None,
         *,
-        max_files: int = 20,
-        max_total_bytes: int = 64 * 1024 * 1024,
-        max_file_bytes: int = 32 * 1024 * 1024,
+        max_files: int = 5,
+        max_total_bytes: int = 200 * 1024 * 1024,
+        max_file_bytes: int = 200 * 1024 * 1024,
     ) -> None:
         self.root = (
             Path(
@@ -116,6 +117,7 @@ class TaskAttachmentCache:
                         item = await _run_thread(
                             self._materialize,
                             task_root,
+                            scope.task_id,
                             file_id,
                             locators[file_id],
                             broker,
@@ -174,6 +176,7 @@ class TaskAttachmentCache:
     def _materialize(
         self,
         task_root: Path,
+        task_id: str,
         file_id: str,
         locator: dict[str, Any],
         broker: Any,
@@ -227,6 +230,7 @@ class TaskAttachmentCache:
             size_bytes=written,
             original_name=name,
             expires_at=str(locator.get("expires_at") or "")[:64],
+            task_id=task_id,
         )
 
 
