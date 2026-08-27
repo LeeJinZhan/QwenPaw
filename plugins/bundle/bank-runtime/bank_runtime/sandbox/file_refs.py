@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import hashlib
 import hmac
 import os
@@ -16,6 +16,7 @@ from .cache import PreparedSandboxFile
 
 _TASK_ID = re.compile(r"[A-Za-z0-9_-]{1,160}")
 _EXTENSION = re.compile(r"\.[A-Za-z0-9]{1,15}")
+_TOMBSTONE_TTL = timedelta(days=7)
 
 
 class FileRefError(RuntimeError):
@@ -48,17 +49,21 @@ class FileRefRegistry:
         process_start_key: bytes | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
-        self._root = Path(
-            root
-            or os.environ.get("QWENPAW_TASK_FILE_ROOT")
-            or "/tmp/qwenpaw-runtime-task-files"
-        ).expanduser().resolve()
+        self._root = (
+            Path(
+                root
+                or os.environ.get("QWENPAW_TASK_FILE_ROOT")
+                or "/tmp/qwenpaw-runtime-task-files"
+            )
+            .expanduser()
+            .resolve()
+        )
         self._key = process_start_key or secrets.token_bytes(32)
         if len(self._key) < 32:
             raise ValueError("process_start_key must contain at least 32 bytes")
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._entries: dict[str, ResolvedTaskFile] = {}
-        self._expired: set[str] = set()
+        self._expired: dict[str, datetime] = {}
 
     def issue(
         self,
@@ -95,7 +100,9 @@ class FileRefRegistry:
             raise FileRefError("FILE_REF_INVALID", "Task file size changed")
         extension = path.suffix.lower()
         if not _EXTENSION.fullmatch(extension):
-            raise FileRefError("FILE_TYPE_UNSUPPORTED", "Task file extension is unsupported")
+            raise FileRefError(
+                "FILE_TYPE_UNSUPPORTED", "Task file extension is unsupported"
+            )
         digest = _sha256_file(path)
         nonce = secrets.token_bytes(32)
         nonce_text = _encode(nonce)
@@ -112,7 +119,7 @@ class FileRefRegistry:
             sha256=digest,
             expires_at=expiry,
         )
-        self._expired.discard(nonce_hash)
+        self._expired.pop(nonce_hash, None)
         return token
 
     def resolve(
@@ -124,10 +131,19 @@ class FileRefRegistry:
         nonce, nonce_hash = self._authenticate(file_ref)
         entry = self._entries.get(nonce_hash)
         if entry is None:
-            code = "FILE_REF_EXPIRED" if nonce_hash in self._expired else "FILE_REF_INVALID"
+            code = (
+                "FILE_REF_EXPIRED"
+                if nonce_hash in self._expired
+                else "FILE_REF_INVALID"
+            )
             raise FileRefError(code, "File reference is unavailable")
-        if expected_task_id is not None and entry.task_id != str(expected_task_id).strip():
-            raise FileRefError("FILE_ACCESS_DENIED", "File reference belongs to another task")
+        if (
+            expected_task_id is not None
+            and entry.task_id != str(expected_task_id).strip()
+        ):
+            raise FileRefError(
+                "FILE_ACCESS_DENIED", "File reference belongs to another task"
+            )
         if entry.expires_at <= _as_utc(self._clock()):
             self._expire(nonce_hash)
             raise FileRefError("FILE_REF_EXPIRED", "File reference has expired")
@@ -167,6 +183,11 @@ class FileRefRegistry:
         ]
         for nonce_hash in expired:
             self._expire(nonce_hash)
+        self._expired = {
+            nonce_hash: expired_at
+            for nonce_hash, expired_at in self._expired.items()
+            if expired_at + _TOMBSTONE_TTL > cutoff
+        }
         return len(expired)
 
     def _authenticate(self, file_ref: str) -> tuple[bytes, str]:
@@ -187,7 +208,7 @@ class FileRefRegistry:
 
     def _expire(self, nonce_hash: str) -> None:
         self._entries.pop(nonce_hash, None)
-        self._expired.add(nonce_hash)
+        self._expired[nonce_hash] = _as_utc(self._clock())
 
 
 def _encode(value: bytes) -> str:

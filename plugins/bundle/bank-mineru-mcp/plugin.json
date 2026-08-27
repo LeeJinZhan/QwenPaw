@@ -1,0 +1,23 @@
+{
+  "id": "bank-mineru-mcp",
+  "name": "Bank MinerU MCP",
+  "version": "0.1.0",
+  "description": "Task-scoped MinerU document parsing over a loopback MCP server",
+  "author": "Bank Agent Runtime Team",
+  "entry": {
+    "backend": "plugin.py"
+  },
+  "dependencies": [],
+  "qwenpaw_version": {
+    "min": "2.1.0",
+    "max": "2.2.0"
+  },
+  "meta": {
+    "requires_plugins": ["bank-runtime"],
+    "mcp_server": {
+      "transport": "streamable_http",
+      "path": "/mcp",
+      "tools": ["parse_documents", "read_document_chunks"]
+    }
+  }
+}

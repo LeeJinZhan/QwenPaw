@@ -53,6 +53,23 @@ def test_processor_rejects_declared_text_with_binary_signature(tmp_path) -> None
         AttachmentProcessor().process([_prepared(path, content_type="text/plain")])
 
 
+def test_processor_rejects_pdf_and_image_signature_mismatch(tmp_path) -> None:
+    fake_pdf = tmp_path / "fake.pdf"
+    fake_pdf.write_bytes(b"not a pdf")
+    with pytest.raises(SandboxCacheError, match="type mismatch"):
+        AttachmentProcessor().process(
+            [_prepared(fake_pdf, content_type="application/pdf")],
+            file_refs={"file_001": "fr1_fake"},
+        )
+
+    wrong_mime = tmp_path / "image.png"
+    wrong_mime.write_bytes(b"\x89PNG\r\n\x1a\n")
+    with pytest.raises(SandboxCacheError, match="type mismatch"):
+        AttachmentProcessor().process(
+            [_prepared(wrong_mime, content_type="image/jpeg")]
+        )
+
+
 def test_processor_routes_pdf_to_an_opaque_tool_required_block(tmp_path) -> None:
     path = tmp_path / "oversized.pdf"
     writer = PdfWriter()
@@ -67,9 +84,9 @@ def test_processor_routes_pdf_to_an_opaque_tool_required_block(tmp_path) -> None
     )[0]
 
     assert isinstance(block, TextBlock)
-    assert "processing=\"tool_required\"" in block.text
-    assert "file_ref=\"fr1_opaque\"" in block.text
-    assert "file_id=\"file_001\"" in block.text
+    assert 'processing="tool_required"' in block.text
+    assert 'file_ref="fr1_opaque"' in block.text
+    assert 'file_id="file_001"' in block.text
     assert "正文尚未读取" in block.text
 
 
@@ -121,3 +138,20 @@ def test_managed_session_removes_agentscope_file_data_block(tmp_path) -> None:
     assert sanitized["state"]["context"][0]["content"] == [
         {"type": "text", "text": "describe"}
     ]
+
+
+def test_image_keeps_native_block_and_exposes_optional_opaque_tool_ref(
+    tmp_path,
+) -> None:
+    path = tmp_path / "image.png"
+    path.write_bytes(b"\x89PNG\r\n\x1a\n")
+    blocks = AttachmentProcessor().process(
+        [_prepared(path, content_type="image/png")],
+        file_refs={"file_001": "fr1_image"},
+    )
+    assert len(blocks) == 2
+    assert blocks[0].type == "data"
+    assert blocks[0].source.media_type == "image/png"
+    assert isinstance(blocks[1], TextBlock)
+    assert 'processing="native_or_tool"' in blocks[1].text
+    assert 'file_ref="fr1_image"' in blocks[1].text

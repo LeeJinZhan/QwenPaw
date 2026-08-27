@@ -461,6 +461,16 @@ async def test_success_commit_sanitizes_runtime_attachment_and_locator(tmp_path)
                                     "locator": "oss://private/object",
                                     "_runtime_sandbox_attachment": True,
                                 },
+                                {
+                                    "type": "text",
+                                    "text": (
+                                        '<runtime_attachment file_ref="fr1_'
+                                        + "a" * 64
+                                        + "_"
+                                        + "b" * 64
+                                        + '">private metadata</runtime_attachment>'
+                                    ),
+                                },
                             ],
                         },
                         {
@@ -485,6 +495,7 @@ async def test_success_commit_sanitizes_runtime_attachment_and_locator(tmp_path)
     assert "file://" not in serialized
     assert "oss://" not in serialized
     assert "_runtime_sandbox_attachment" not in serialized
+    assert "fr1_" not in serialized
     assert state["agent"]["state"]["context"][0]["content"] == [
         {"type": "text", "text": "describe it"}
     ]

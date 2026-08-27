@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import re
 import threading
 from contextvars import ContextVar, Token
 from dataclasses import dataclass
@@ -21,6 +22,7 @@ from qwenpaw.runtime.phases import Phase
 _SCOPE_KEY = "bank_runtime_scope"
 _CTX_TOKEN_KEY = "bank_runtime_session_context_token"
 _DROP = object()
+_RUNTIME_REFERENCE = re.compile(r"\b(?:fr1|dr1|cur1)_[0-9a-f]{64}_[0-9a-f]{64}\b")
 
 
 class ManagedSessionError(AgentRuntimeErrorException):
@@ -110,9 +112,7 @@ def _install_managed_session_store(workspace: Any) -> "ManagedSessionStore":
         try:
             setattr(workspace, "session", store)
         except (AttributeError, TypeError) as exc:
-            raise ManagedSessionError(
-                "RUNTIME_SESSION_REQUEST_INVALID"
-            ) from exc
+            raise ManagedSessionError("RUNTIME_SESSION_REQUEST_INVALID") from exc
 
     if getattr(workspace, "session", None) is not store:
         raise ManagedSessionError("RUNTIME_SESSION_REQUEST_INVALID")
@@ -509,6 +509,8 @@ def _sanitize_value(value: Any) -> Any:
             if clean is not _DROP:
                 result.append(clean)
         return result
+    if isinstance(value, str):
+        return _RUNTIME_REFERENCE.sub("[runtime-reference-redacted]", value)
     if not isinstance(value, dict):
         return value
     if value.get("_runtime_sandbox_attachment") is True:
@@ -522,6 +524,9 @@ def _sanitize_value(value: Any) -> Any:
         "bucket",
         "locator",
         "object_key",
+        "file_ref",
+        "document_ref",
+        "cursor",
         "read_url",
         "runtime_tool_gateway",
         "sandbox_context",
@@ -538,7 +543,12 @@ def _sanitize_value(value: Any) -> Any:
 
 
 def _is_unsafe_file_block(value: dict[str, Any]) -> bool:
-    if str(value.get("type") or "").lower() not in {
+    block_type = str(value.get("type") or "").lower()
+    if block_type == "text":
+        text = str(value.get("text") or "")
+        if "<runtime_attachment " in text:
+            return True
+    if block_type not in {
         "audio",
         "data",
         "file",
