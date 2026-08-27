@@ -314,6 +314,56 @@ def test_stream_projects_incremental_thinking_and_answer_with_one_terminal(
     )
 
 
+def test_stream_projects_qwenpaw_21_boolean_delta_text_chunks(monkeypatch):
+    channel = _FakeChannel(
+        [
+            {
+                "object": "content",
+                "type": "text",
+                "status": "in_progress",
+                "delta": True,
+                "msg_id": "answer-1",
+                "index": 0,
+                "text": "你",
+            },
+            {
+                "object": "content",
+                "type": "text",
+                "status": "in_progress",
+                "delta": True,
+                "msg_id": "answer-1",
+                "index": 0,
+                "text": "好",
+            },
+            {
+                "object": "content",
+                "type": "text",
+                "status": "completed",
+                "delta": False,
+                "msg_id": "answer-1",
+                "index": 0,
+                "text": "你好",
+            },
+            {"object": "response", "status": "completed"},
+        ]
+    )
+    response = _client(monkeypatch, _workspace(channel=channel)).post(
+        "/api/bank-runtime/agents/assistant-a/chat",
+        headers=_headers(),
+        json=_request_body(),
+    )
+
+    assert response.status_code == 200
+    events = _response_events(response)
+    assert [event["event"] for event in events] == [
+        "status.changed",
+        "answer.chunk",
+        "answer.chunk",
+        "answer.completed",
+    ]
+    assert [event.get("text") for event in events[1:3]] == ["你", "好"]
+
+
 def test_stop_resolves_only_the_bank_runtime_session(monkeypatch):
     tracker = _StopTracker()
     response = _client(

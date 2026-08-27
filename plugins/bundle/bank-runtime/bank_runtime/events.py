@@ -110,9 +110,12 @@ class CompactEventProjector:
             or raw_event.get("id")
             or stream_type
         )
-        current = _text(
-            raw_event.get("delta") or raw_event.get("content") or raw_event.get("text")
-        )
+        raw_delta = raw_event.get("delta")
+        if isinstance(raw_delta, bool):
+            raw_content = raw_event.get("text") or raw_event.get("content")
+        else:
+            raw_content = raw_delta or raw_event.get("content") or raw_event.get("text")
+        current = _text(raw_content)
         key = (event, message_id)
         previous = self._snapshots.get(key, "")
         if raw_event.get("delta"):
