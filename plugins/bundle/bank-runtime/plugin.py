@@ -13,6 +13,7 @@ from bank_runtime.channel import BankRuntimeChannel
 from bank_runtime.hooks import bank_runtime_startup_guard
 from bank_runtime.middleware import bank_runtime_middleware_factory
 from bank_runtime.gateway.middleware import BankRuntimeGatewayInstallHook
+from bank_runtime.gateway.hooks import BankRuntimeToolVisibilityHook
 from bank_runtime.sandbox.hooks import (
     BankRuntimeAttachmentPrepareHook,
     BankRuntimeSandboxCleanupHook,
@@ -69,6 +70,7 @@ class BankRuntimePlugin:
         api.register_runtime_hook(ManagedSessionDisableLongTermMemoryHook())
         api.register_runtime_hook(BankRuntimePersonalizationHook())
         api.register_runtime_hook(BankRuntimeGatewayInstallHook())
+        api.register_runtime_hook(BankRuntimeToolVisibilityHook())
         api.register_runtime_hook(BankRuntimeSandboxInstallHook())
         api.register_runtime_hook(BankRuntimeAttachmentPrepareHook())
         api.register_runtime_hook(BankRuntimePersonalizationRedactionHook())

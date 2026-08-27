@@ -121,6 +121,7 @@ def test_plugin_registers_router_channel_hook_and_middleware(
         "rt_hook_bank-runtime_bank_runtime_disable_long_term_memory",
         "rt_hook_bank-runtime_bank_runtime_personalization",
         "rt_hook_bank-runtime_bank_runtime_gateway_install",
+        "rt_hook_bank-runtime_bank_runtime_tool_visibility",
         "rt_hook_bank-runtime_bank_runtime_sandbox_install",
         "rt_hook_bank-runtime_bank_runtime_attachment_prepare",
         "rt_hook_bank-runtime_bank_runtime_personalization_redaction",
@@ -287,12 +288,12 @@ def test_duplicate_registration_fails_before_adding_partial_state(
 
     assert app.routes == expected_routes
     assert len(fresh_registry.get_http_router_registrations()) == 1
-    assert len(fresh_registry.get_startup_hooks()) == 16
+    assert len(fresh_registry.get_startup_hooks()) == 17
     assert len(fresh_registry.get_middleware_factories()) == 1
 
     with pytest.raises(ValueError, match="already registered"):
         module.BankRuntimePlugin().register(api)
 
     assert len(fresh_registry.get_http_router_registrations()) == 1
-    assert len(fresh_registry.get_startup_hooks()) == 16
+    assert len(fresh_registry.get_startup_hooks()) == 17
     assert len(fresh_registry.get_middleware_factories()) == 1
