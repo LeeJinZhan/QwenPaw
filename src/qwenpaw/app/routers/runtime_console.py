@@ -20,6 +20,10 @@ router = APIRouter(prefix="/runtime-console", tags=["runtime-console"])
 EXTERNAL_USER_ID_HEADER = "X-Runtime-External-User-Id"
 EXTERNAL_ORG_ID_HEADER = "X-Runtime-External-Org-Id"
 EXTERNAL_ID_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,127}$"
+DEFAULT_RUNTIME_CONTEXT_PATH = "/bank-agent-runtime"
+RUNTIME_CONTEXT_PATH_PATTERN = re.compile(
+    r"^/[a-z0-9]+(?:-[a-z0-9]+)*(?:/[a-z0-9]+(?:-[a-z0-9]+)*)*$"
+)
 
 
 class RuntimeConnectRequest(BaseModel):
@@ -85,6 +89,21 @@ def _external_identity(user_id: str | None, org_id: str | None) -> dict[str, str
     return {"user_id": normalized_user_id, "org_id": normalized_org_id}
 
 
+def _runtime_context_path() -> str:
+    context_path = str(
+        os.environ.get("QWENPAW_RUNTIME_CONTEXT_PATH")
+        or DEFAULT_RUNTIME_CONTEXT_PATH
+    ).strip()
+    if not RUNTIME_CONTEXT_PATH_PATTERN.fullmatch(context_path):
+        raise HTTPException(status_code=503, detail="Runtime is unavailable")
+    return context_path
+
+
+def _runtime_api_path(path: str) -> str:
+    normalized_path = path if path.startswith("/") else f"/{path}"
+    return f"{_runtime_context_path()}/api/v1{normalized_path}"
+
+
 async def _runtime_request(
     method: str,
     path: str,
@@ -131,7 +150,7 @@ async def connect_runtime_console(body: RuntimeConnectRequest) -> dict[str, Any]
     identity = _external_identity(body.user_id, body.org_id)
     await _runtime_request(
         "GET",
-        "/api/v1/conversations?page=1&page_size=1",
+        _runtime_api_path("/conversations?page=1&page_size=1"),
         external_identity=identity,
     )
     return {"connected": True, "identity": identity}
@@ -153,7 +172,7 @@ async def list_runtime_conversations(
     identity = _external_identity(external_user_id, external_org_id)
     return await _runtime_request(
         "GET",
-        f"/api/v1/conversations?page={page}&page_size={page_size}",
+        _runtime_api_path(f"/conversations?page={page}&page_size={page_size}"),
         external_identity=identity,
     )
 
@@ -173,6 +192,6 @@ async def get_runtime_conversation(
     identity = _external_identity(external_user_id, external_org_id)
     return await _runtime_request(
         "GET",
-        f"/api/v1/conversations/{quote(conversation_id, safe='')}",
+        _runtime_api_path(f"/conversations/{quote(conversation_id, safe='')}"),
         external_identity=identity,
     )
