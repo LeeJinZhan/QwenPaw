@@ -10,10 +10,11 @@ import {
 describe("runtimeConsoleApi", () => {
   beforeEach(() => {
     sessionStorage.clear();
+    localStorage.clear();
     vi.restoreAllMocks();
   });
 
-  it("keeps only the external identity in this browser tab", async () => {
+  it("restores the external identity after the browser tab session ends", async () => {
     vi.stubGlobal(
       "fetch",
       vi.fn().mockResolvedValue(
@@ -40,9 +41,14 @@ describe("runtimeConsoleApi", () => {
       userId: "u001",
       orgId: "org001",
     });
-    expect(
-      localStorage.getItem("qwenpaw-runtime-external-identity-v1"),
-    ).toBeNull();
+    sessionStorage.clear();
+    expect(runtimeConsoleApi.currentIdentity()).toEqual({
+      userId: "u001",
+      orgId: "org001",
+    });
+    expect(localStorage.getItem("qwenpaw-runtime-external-identity-v1")).toBe(
+      JSON.stringify({ userId: "u001", orgId: "org001" }),
+    );
   });
 
   it("sends external identity only to the fixed QwenPaw proxy", async () => {
@@ -71,7 +77,7 @@ describe("runtimeConsoleApi", () => {
   });
 
   it("clears only the Runtime identity when the proxy rejects it", async () => {
-    sessionStorage.setItem(
+    localStorage.setItem(
       "qwenpaw-runtime-external-identity-v1",
       JSON.stringify({ userId: "u001", orgId: "org001" }),
     );
@@ -89,6 +95,27 @@ describe("runtimeConsoleApi", () => {
       "Runtime identity required",
     );
     expect(runtimeConsoleApi.isConnected()).toBe(false);
+    expect(
+      localStorage.getItem("qwenpaw-runtime-external-identity-v1"),
+    ).toBeNull();
+  });
+
+  it("migrates a connected tab identity into persistent storage", () => {
+    sessionStorage.setItem(
+      "qwenpaw-runtime-external-identity-v1",
+      JSON.stringify({ userId: "u001", orgId: "org001" }),
+    );
+
+    expect(runtimeConsoleApi.currentIdentity()).toEqual({
+      userId: "u001",
+      orgId: "org001",
+    });
+    expect(localStorage.getItem("qwenpaw-runtime-external-identity-v1")).toBe(
+      JSON.stringify({ userId: "u001", orgId: "org001" }),
+    );
+    expect(
+      sessionStorage.getItem("qwenpaw-runtime-external-identity-v1"),
+    ).toBeNull();
   });
 });
 

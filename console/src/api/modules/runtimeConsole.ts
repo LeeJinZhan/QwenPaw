@@ -71,27 +71,48 @@ export class RuntimeConsoleRequestError extends Error {
 }
 
 function getRuntimeIdentity(): RuntimeExternalIdentity | null {
-  const serialized = sessionStorage.getItem(RUNTIME_EXTERNAL_IDENTITY_KEY);
-  if (!serialized) return null;
-  try {
-    const parsed = JSON.parse(serialized) as Partial<RuntimeExternalIdentity>;
-    const userId = String(parsed.userId || "").trim();
-    const orgId = String(parsed.orgId || "").trim();
-    return userId && orgId ? { userId, orgId } : null;
-  } catch {
-    return null;
-  }
+  const parseIdentity = (
+    serialized: string | null,
+  ): RuntimeExternalIdentity | null => {
+    if (!serialized) return null;
+    try {
+      const parsed = JSON.parse(serialized) as Partial<RuntimeExternalIdentity>;
+      const userId = String(parsed.userId || "").trim();
+      const orgId = String(parsed.orgId || "").trim();
+      return userId && orgId ? { userId, orgId } : null;
+    } catch {
+      return null;
+    }
+  };
+
+  const persistedIdentity = parseIdentity(
+    localStorage.getItem(RUNTIME_EXTERNAL_IDENTITY_KEY),
+  );
+  if (persistedIdentity) return persistedIdentity;
+
+  const tabIdentity = parseIdentity(
+    sessionStorage.getItem(RUNTIME_EXTERNAL_IDENTITY_KEY),
+  );
+  if (!tabIdentity) return null;
+
+  // Migrate connections created before Runtime identity persistence was
+  // introduced. The identity contains no Runtime credential or app token.
+  localStorage.setItem(
+    RUNTIME_EXTERNAL_IDENTITY_KEY,
+    JSON.stringify(tabIdentity),
+  );
+  sessionStorage.removeItem(RUNTIME_EXTERNAL_IDENTITY_KEY);
+  return tabIdentity;
 }
 
 function setRuntimeIdentity(identity: RuntimeExternalIdentity): void {
-  sessionStorage.setItem(
-    RUNTIME_EXTERNAL_IDENTITY_KEY,
-    JSON.stringify(identity),
-  );
+  localStorage.setItem(RUNTIME_EXTERNAL_IDENTITY_KEY, JSON.stringify(identity));
+  sessionStorage.removeItem(RUNTIME_EXTERNAL_IDENTITY_KEY);
   window.dispatchEvent(new Event(RUNTIME_CONNECTION_CHANGED_EVENT));
 }
 
 function clearRuntimeIdentity(): void {
+  localStorage.removeItem(RUNTIME_EXTERNAL_IDENTITY_KEY);
   sessionStorage.removeItem(RUNTIME_EXTERNAL_IDENTITY_KEY);
   window.dispatchEvent(new Event(RUNTIME_CONNECTION_CHANGED_EVENT));
 }

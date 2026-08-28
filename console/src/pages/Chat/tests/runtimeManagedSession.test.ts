@@ -18,6 +18,7 @@ const NATIVE_CHAT: ChatSpec = {
 describe("Runtime-managed conversations in the native Chat page", () => {
   beforeEach(() => {
     sessionApi.resetForTests();
+    localStorage.clear();
     sessionStorage.setItem(
       "qwenpaw-runtime-external-identity-v1",
       JSON.stringify({ userId: "u001", orgId: "org001" }),
@@ -70,6 +71,7 @@ describe("Runtime-managed conversations in the native Chat page", () => {
 
   afterEach(() => {
     sessionApi.resetForTests();
+    localStorage.clear();
     sessionStorage.clear();
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
