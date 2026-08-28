@@ -512,6 +512,8 @@ def test_mineru_plugin_is_packaged_with_loopback_only_deployment_settings() -> N
 
     assert "plugins/bundle/bank-mineru-mcp" in dockerfile
     assert "BANK_MINERU_BASE_URL:" in compose
+    assert "BANK_MINERU_PROVIDER:" in compose
+    assert "BANK_MINERU_PROXY_URL:" in compose
     assert "BANK_MINERU_TOKEN_FILE: /app/working.secret/mineru.token" in compose
     assert 'BANK_MINERU_MCP_HOST: "127.0.0.1"' in compose
     assert 'BANK_MINERU_MCP_PORT: "18081"' in compose

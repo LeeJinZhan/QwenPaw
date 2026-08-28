@@ -18,6 +18,8 @@ class MinerUSettings:
     base_url: str
     submit_mode: str
     token: str = field(repr=False)
+    provider: str = "self_hosted"
+    proxy_url: str = ""
     connect_timeout_seconds: float = 5
     upload_timeout_seconds: float = 120
     parse_timeout_seconds: float = 900
@@ -31,9 +33,21 @@ class MinerUSettings:
 
     @classmethod
     def from_environment(cls) -> "MinerUSettings":
-        base_url = _base_url(os.environ.get("BANK_MINERU_BASE_URL", ""))
+        provider = (
+            str(os.environ.get("BANK_MINERU_PROVIDER", "self_hosted")).strip().lower()
+        )
+        if provider not in {"self_hosted", "official_flash"}:
+            raise MinerUConfigError(
+                "MinerU provider must be self_hosted or official_flash"
+            )
+        default_base_url = (
+            "https://mineru.net/api/v1/agent" if provider == "official_flash" else ""
+        )
+        base_url = _base_url(
+            os.environ.get("BANK_MINERU_BASE_URL", "") or default_base_url
+        )
         submit_mode = str(os.environ.get("BANK_MINERU_SUBMIT_MODE", "tasks")).strip()
-        if submit_mode not in {"tasks", "file_parse"}:
+        if provider == "self_hosted" and submit_mode not in {"tasks", "file_parse"}:
             raise MinerUConfigError("MinerU submit mode must be tasks or file_parse")
         host = str(os.environ.get("BANK_MINERU_MCP_HOST", "127.0.0.1")).strip()
         if host not in {"127.0.0.1", "::1", "localhost"}:
@@ -69,8 +83,16 @@ class MinerUSettings:
         )
         return cls(
             base_url=base_url,
-            submit_mode=submit_mode,
-            token=_read_token(os.environ.get("BANK_MINERU_TOKEN_FILE", "")),
+            submit_mode=(
+                submit_mode if provider == "self_hosted" else "official_flash"
+            ),
+            token=(
+                _read_token(os.environ.get("BANK_MINERU_TOKEN_FILE", ""))
+                if provider == "self_hosted"
+                else ""
+            ),
+            provider=provider,
+            proxy_url=_proxy_url(os.environ.get("BANK_MINERU_PROXY_URL", "")),
             connect_timeout_seconds=connect,
             upload_timeout_seconds=upload,
             parse_timeout_seconds=parse,
@@ -97,6 +119,24 @@ def _base_url(value: str) -> str:
     ):
         raise MinerUConfigError("MinerU base URL is invalid")
     return urlunsplit((parsed.scheme, parsed.netloc, parsed.path.rstrip("/"), "", ""))
+
+
+def _proxy_url(value: str) -> str:
+    normalized = str(value or "").strip().rstrip("/")
+    if not normalized:
+        return ""
+    parsed = urlsplit(normalized)
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path not in {"", "/"}
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise MinerUConfigError("MinerU proxy URL is invalid")
+    return urlunsplit((parsed.scheme, parsed.netloc, "", "", ""))
 
 
 def _read_token(value: str) -> str:

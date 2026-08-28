@@ -15,6 +15,7 @@ import uuid
 from .scope import SandboxRequestScope
 
 _SAFE_NAME = re.compile(r"[^A-Za-z0-9._-]+")
+_SAFE_EXTENSION = re.compile(r"\.[A-Za-z0-9]{1,15}")
 
 
 class SandboxCacheError(RuntimeError):
@@ -245,8 +246,14 @@ def _locator_size(locator: dict[str, Any]) -> int:
 
 
 def _safe_filename(value: Any) -> str:
-    name = str(value or "attachment").replace("\\", "/").split("/")[-1]
-    name = _SAFE_NAME.sub("_", name).strip("._")[:180]
+    leaf = str(value or "attachment").replace("\\", "/").split("/")[-1]
+    suffix = Path(leaf).suffix
+    if _SAFE_EXTENSION.fullmatch(suffix):
+        safe_suffix = suffix.lower()
+        stem = _SAFE_NAME.sub("_", leaf[: -len(suffix)]).strip("._")
+        stem = stem[: 180 - len(safe_suffix)].rstrip("._")
+        return f"{stem or 'attachment'}{safe_suffix}"
+    name = _SAFE_NAME.sub("_", leaf).strip("._")[:180]
     return name or "attachment"
 
 

@@ -37,10 +37,45 @@ def test_settings_load_bounded_environment_and_redact_token(
     assert "secret-value" not in repr(settings)
 
 
+def test_official_flash_settings_need_neither_token_nor_explicit_base_url(
+    monkeypatch,
+) -> None:
+    for key in (
+        "BANK_MINERU_BASE_URL",
+        "BANK_MINERU_SUBMIT_MODE",
+        "BANK_MINERU_TOKEN_FILE",
+    ):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("BANK_MINERU_PROVIDER", "official_flash")
+
+    settings = MinerUSettings.from_environment()
+
+    assert settings.provider == "official_flash"
+    assert settings.base_url == "https://mineru.net/api/v1/agent"
+    assert settings.token == ""
+
+
+def test_official_flash_settings_accept_dedicated_http_proxy(monkeypatch) -> None:
+    for key in (
+        "BANK_MINERU_BASE_URL",
+        "BANK_MINERU_SUBMIT_MODE",
+        "BANK_MINERU_TOKEN_FILE",
+    ):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("BANK_MINERU_PROVIDER", "official_flash")
+    monkeypatch.setenv("BANK_MINERU_PROXY_URL", "http://127.0.0.1:7897")
+
+    settings = MinerUSettings.from_environment()
+
+    assert settings.proxy_url == "http://127.0.0.1:7897"
+
+
 @pytest.mark.parametrize(
     ("key", "value", "message"),
     [
         ("BANK_MINERU_BASE_URL", "http://user:pass@mineru:8000", "URL"),
+        ("BANK_MINERU_PROVIDER", "automatic", "provider"),
+        ("BANK_MINERU_PROXY_URL", "http://user:pass@proxy:7897", "proxy"),
         ("BANK_MINERU_SUBMIT_MODE", "fallback", "mode"),
         ("BANK_MINERU_MCP_HOST", "0.0.0.0", "loopback"),
         ("BANK_MINERU_MCP_PORT", "70000", "port"),

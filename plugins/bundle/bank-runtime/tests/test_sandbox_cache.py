@@ -16,9 +16,18 @@ from bank_runtime.sandbox.scope import SandboxRequestScope
 
 
 class _Broker:
-    def __init__(self, object_root: Path, *, extra=False) -> None:
+    def __init__(
+        self,
+        object_root: Path,
+        *,
+        extra=False,
+        original_name: str | None = None,
+        content_type: str = "text/plain",
+    ) -> None:
         self.object_root = object_root
         self.extra = extra
+        self.original_name = original_name
+        self.content_type = content_type
         self.calls = []
 
     async def authorize_files(self, scope, file_ids, selection_records=None):
@@ -33,8 +42,8 @@ class _Broker:
                     "file_id": file_id,
                     "storage_provider": "local",
                     "object_key": file_id,
-                    "original_name": f"{file_id}.txt",
-                    "content_type": "text/plain",
+                    "original_name": self.original_name or f"{file_id}.txt",
+                    "content_type": self.content_type,
                     "size_bytes": len(content),
                     "content_hash": "sha256:" + hashlib.sha256(content).hexdigest(),
                     "expires_at": "2026-08-19T12:00:00+08:00",
@@ -89,6 +98,29 @@ async def test_cache_materializes_private_hash_bound_files_and_cleans_up(
 
     await cache.cleanup("task_001")
     assert not (tmp_path / "cache" / "task_001").exists()
+
+
+@pytest.mark.asyncio
+async def test_cache_preserves_extension_for_non_ascii_filename(tmp_path) -> None:
+    object_root = tmp_path / "objects"
+    object_root.mkdir()
+    cache = TaskAttachmentCache(tmp_path / "cache")
+
+    prepared = await cache.prepare_files(
+        _scope(),
+        ["file_current"],
+        _Broker(
+            object_root,
+            original_name="通义灵码安装及使用指南.pptx",
+            content_type=(
+                "application/vnd.openxmlformats-officedocument."
+                "presentationml.presentation"
+            ),
+        ),
+    )
+
+    assert prepared[0].original_name == "attachment.pptx"
+    assert prepared[0].local_path.suffix == ".pptx"
 
 
 @pytest.mark.asyncio

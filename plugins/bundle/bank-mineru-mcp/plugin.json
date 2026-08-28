@@ -1,7 +1,7 @@
 {
   "id": "bank-mineru-mcp",
   "name": "Bank MinerU MCP",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Task-scoped MinerU document parsing over a loopback MCP server",
   "author": "Bank Agent Runtime Team",
   "entry": {
