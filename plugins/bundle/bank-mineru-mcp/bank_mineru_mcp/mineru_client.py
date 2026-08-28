@@ -240,4 +240,16 @@ class MinerUHttpClient:
         return f"{self.settings.base_url}{endpoint}"
 
 
-__all__ = ["MinerUClientError", "MinerUHttpClient"]
+def build_mineru_client(
+    settings: MinerUSettings,
+    *,
+    http_client: httpx.AsyncClient | None = None,
+) -> Any:
+    if settings.provider == "official_flash":
+        from .official_flash_client import OfficialFlashMinerUClient
+
+        return OfficialFlashMinerUClient(settings, http_client=http_client)
+    return MinerUHttpClient(settings, http_client=http_client)
+
+
+__all__ = ["MinerUClientError", "MinerUHttpClient", "build_mineru_client"]

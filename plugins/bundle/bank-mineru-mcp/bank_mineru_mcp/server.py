@@ -13,7 +13,7 @@ import uvicorn
 
 from .config import MinerUSettings
 from .document_store import DocumentStore
-from .mineru_client import MinerUHttpClient
+from .mineru_client import build_mineru_client
 from .tools import MinerUToolService, ToolContractError
 
 
@@ -174,7 +174,7 @@ def build_mineru_mcp_service(
     root = Path(
         os.environ.get("QWENPAW_TASK_FILE_ROOT") or "/tmp/qwenpaw-runtime-task-files"
     )
-    client = MinerUHttpClient(settings)
+    client = build_mineru_client(settings)
     store = DocumentStore(
         root=root,
         max_document_bytes=settings.result_max_bytes,
