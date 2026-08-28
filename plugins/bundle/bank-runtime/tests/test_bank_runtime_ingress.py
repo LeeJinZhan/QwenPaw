@@ -364,6 +364,102 @@ def test_stream_projects_qwenpaw_21_boolean_delta_text_chunks(monkeypatch):
     assert [event.get("text") for event in events[1:3]] == ["你", "好"]
 
 
+def test_stream_keeps_reasoning_content_deltas_out_of_answer_chunks(monkeypatch):
+    channel = _FakeChannel(
+        [
+            {
+                "object": "message",
+                "id": "thinking-1",
+                "type": "reasoning",
+                "status": "in_progress",
+                "content": None,
+            },
+            {
+                "object": "content",
+                "type": "text",
+                "status": None,
+                "delta": True,
+                "msg_id": "thinking-1",
+                "text": "思",
+            },
+            {
+                "object": "content",
+                "type": "text",
+                "status": None,
+                "delta": True,
+                "msg_id": "thinking-1",
+                "text": "考",
+            },
+            {
+                "object": "message",
+                "id": "thinking-1",
+                "type": "reasoning",
+                "status": "completed",
+                "content": "思考",
+            },
+            {"object": "response", "status": "completed"},
+        ]
+    )
+    response = _client(monkeypatch, _workspace(channel=channel)).post(
+        "/api/bank-runtime/agents/assistant-a/chat",
+        headers=_headers(),
+        json=_request_body(),
+    )
+
+    assert response.status_code == 200
+    events = _response_events(response)
+    assert [event["event"] for event in events] == [
+        "status.changed",
+        "answer.thinking",
+        "answer.thinking",
+        "answer.completed",
+    ]
+    assert [event.get("text") for event in events[1:3]] == ["思", "考"]
+    assert not any(event["event"] == "answer.chunk" for event in events)
+
+
+def test_stream_keeps_plugin_call_arguments_out_of_answer_chunks(monkeypatch):
+    channel = _FakeChannel(
+        [
+            {
+                "object": "message",
+                "id": "plugin-call-1",
+                "type": "plugin_call",
+                "status": "in_progress",
+                "content": None,
+            },
+            {
+                "object": "content",
+                "type": "text",
+                "status": None,
+                "delta": True,
+                "msg_id": "plugin-call-1",
+                "text": "# 不应显示的文件正文",
+            },
+            {
+                "object": "message",
+                "id": "plugin-call-1",
+                "type": "plugin_call",
+                "status": "completed",
+                "content": "# 不应显示的文件正文",
+            },
+            {"object": "response", "status": "completed"},
+        ]
+    )
+    response = _client(monkeypatch, _workspace(channel=channel)).post(
+        "/api/bank-runtime/agents/assistant-a/chat",
+        headers=_headers(),
+        json=_request_body(),
+    )
+
+    assert response.status_code == 200
+    events = _response_events(response)
+    assert [event["event"] for event in events] == [
+        "status.changed",
+        "answer.completed",
+    ]
+
+
 def test_stop_resolves_only_the_bank_runtime_session(monkeypatch):
     tracker = _StopTracker()
     response = _client(

@@ -41,6 +41,7 @@ class CompactEventProjector:
     def __init__(self, runtime_task_id: str) -> None:
         self.runtime_task_id = runtime_task_id
         self._snapshots: dict[tuple[str, str], str] = {}
+        self._message_stream_types: dict[str, str] = {}
         self._terminal = False
 
     def project(self, raw_event: dict[str, Any]) -> list[dict[str, Any]]:
@@ -101,15 +102,28 @@ class CompactEventProjector:
         if obj not in {"message", "content"}:
             return []
 
-        stream_type = str(raw_event.get("type") or "message").strip().lower()
-        is_thinking = stream_type in {"reasoning", "thinking"}
-        event = "answer.thinking" if is_thinking else "answer.chunk"
         message_id = str(
             raw_event.get("msg_id")
             or raw_event.get("message_id")
             or raw_event.get("id")
-            or stream_type
+            or ""
         )
+        declared_stream_type = str(
+            raw_event.get("type") or "message"
+        ).strip().lower()
+        if obj == "message" and message_id:
+            self._message_stream_types[message_id] = declared_stream_type
+        stream_type = (
+            self._message_stream_types.get(message_id, declared_stream_type)
+            if obj == "content"
+            else declared_stream_type
+        )
+        if stream_type not in {"message", "reasoning", "thinking", "text"}:
+            return []
+        is_thinking = stream_type in {"reasoning", "thinking"}
+        event = "answer.thinking" if is_thinking else "answer.chunk"
+        if not message_id:
+            message_id = stream_type
         raw_delta = raw_event.get("delta")
         if isinstance(raw_delta, bool):
             raw_content = raw_event.get("text") or raw_event.get("content")
