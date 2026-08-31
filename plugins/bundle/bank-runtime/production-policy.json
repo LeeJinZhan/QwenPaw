@@ -8,6 +8,8 @@
     "required_registered_tools": [
       "activate_personal_skill",
       "append_file",
+      "artifact_generate",
+      "artifact_revise",
       "ast_search",
       "bank_assistant",
       "browser",
@@ -31,6 +33,7 @@
       "set_user_timezone",
       "spawn_subagent",
       "submit_to_agent",
+      "template_fill_docx",
       "update_goal",
       "view_image",
       "view_video",
@@ -38,7 +41,13 @@
       "web_search",
       "write_file"
     ],
-    "reachable_tools": ["activate_personal_skill", "bank_assistant"],
+    "reachable_tools": [
+      "activate_personal_skill",
+      "artifact_generate",
+      "artifact_revise",
+      "bank_assistant",
+      "template_fill_docx"
+    ],
     "enabled_channels": ["bank-runtime"]
   },
   "http": {

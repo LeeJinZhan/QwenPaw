@@ -13,6 +13,15 @@ from typing import Any, Callable, Iterable
 from fastapi import HTTPException, status
 
 
+_BANK_RUNTIME_REACHABLE_TOOLS = {
+    "activate_personal_skill",
+    "artifact_generate",
+    "artifact_revise",
+    "bank_assistant",
+    "template_fill_docx",
+}
+
+
 @dataclass(frozen=True)
 class ProductionPolicy:
     required_plugins: frozenset[str]
@@ -453,7 +462,7 @@ def validate_production_agent_profile(profile: dict[str, Any]) -> GuardResult:
     )
     if channels != {"bank-runtime"}:
         reasons.add("unapproved_enabled_channel")
-    if tools - {"bank_assistant", "activate_personal_skill"}:
+    if tools - _BANK_RUNTIME_REACHABLE_TOOLS:
         reasons.add("unapproved_reachable_tool")
     if harnesses:
         reasons.add("forbidden_harness")
@@ -498,10 +507,7 @@ def validate_production_root_config(config: dict[str, Any]) -> GuardResult:
     if _enabled_names(_mapping(config.get("channels"))) != {"bank-runtime"}:
         reasons.add("unapproved_enabled_channel")
     tools = _mapping(config.get("tools"))
-    if _enabled_names(_mapping(tools.get("builtin_tools"))) - {
-        "bank_assistant",
-        "activate_personal_skill",
-    }:
+    if _enabled_names(_mapping(tools.get("builtin_tools"))) - _BANK_RUNTIME_REACHABLE_TOOLS:
         reasons.add("unapproved_reachable_tool")
     acp = _mapping(config.get("acp"))
     if _enabled_names(_mapping(acp.get("agents"))):

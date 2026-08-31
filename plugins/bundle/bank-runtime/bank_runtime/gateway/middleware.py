@@ -28,6 +28,9 @@ _BLOCKED_NESTED_TOOLS = frozenset({"run_tool_batch"})
 _SANDBOX_BROKER_TOOLS = frozenset(
     {"runtime_sandbox_files_search", "runtime_sandbox_files_select"}
 )
+_RUNTIME_EXECUTED_TOOLS = frozenset(
+    {"artifact_generate", "artifact_revise", "template_fill_docx"}
+)
 
 
 @dataclass
@@ -139,6 +142,17 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
         started_at = time.monotonic()
         result_reported = False
         try:
+            if tool_name in _RUNTIME_EXECUTED_TOOLS:
+                result = await self.client.execute_runtime_tool(
+                    prepared.preflight,
+                    tool_name,
+                    tool_input,
+                )
+                yield _runtime_tool_response(
+                    str(getattr(tool_call, "id", "") or tool_call_id),
+                    result,
+                )
+                return
             if is_physical_tool(tool_name):
                 if self.sandbox_executor is None:
                     raise GatewayError("Runtime physical sandbox is unavailable")
@@ -436,6 +450,37 @@ def _sandbox_tool_response(
     return ToolResponse(
         id=response_id,
         content=[TextBlock(type="text", text=text)],
+        state=state,
+    )
+
+
+def _runtime_tool_response(
+    response_id: str,
+    result: Mapping[str, Any],
+) -> ToolResponse:
+    status = str(result.get("status") or "")
+    state = ToolResultState.SUCCESS if status == "success" else ToolResultState.ERROR
+    safe = {
+        key: value
+        for key, value in result.items()
+        if key
+        in {
+            "tool_call_id",
+            "decision",
+            "status",
+            "reason",
+            "error_code",
+            "result",
+        }
+    }
+    return ToolResponse(
+        id=response_id,
+        content=[
+            TextBlock(
+                type="text",
+                text=json.dumps(safe, ensure_ascii=False, sort_keys=True)[:262_144],
+            )
+        ],
         state=state,
     )
 

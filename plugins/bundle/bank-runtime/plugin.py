@@ -20,6 +20,11 @@ from bank_runtime.sandbox.hooks import (
     BankRuntimeSandboxInstallHook,
 )
 from bank_runtime.bank_assistant import bank_assistant
+from bank_runtime.artifact_tools import (
+    artifact_generate,
+    artifact_revise,
+    template_fill_docx,
+)
 from bank_runtime.personal_skills import activate_personal_skill
 from bank_runtime.personalization import (
     BankRuntimePersonalizationCleanupHook,
@@ -106,6 +111,30 @@ class BankRuntimePlugin:
             enabled=False,
             tool_type="network",
             target_param="skill_ref",
+        )
+        api.register_tool(
+            tool_name="artifact_generate",
+            tool_func=artifact_generate,
+            description="Generate a Runtime-governed office artifact",
+            icon="📄",
+            enabled=False,
+            tool_type="internal",
+        )
+        api.register_tool(
+            tool_name="artifact_revise",
+            tool_func=artifact_revise,
+            description="Create a new version of a Runtime-generated artifact",
+            icon="📝",
+            enabled=False,
+            tool_type="internal",
+        )
+        api.register_tool(
+            tool_name="template_fill_docx",
+            tool_func=template_fill_docx,
+            description="Fill an authorized published DOCX template",
+            icon="📑",
+            enabled=False,
+            tool_type="internal",
         )
         api.register_skill_provider(
             skills_dir=Path(__file__).parent / "skills",

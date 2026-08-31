@@ -46,6 +46,25 @@ class _Client:
         self.events.append(("result", tool_call_id, status, error_code))
         return {"status": status}
 
+    async def execute_runtime_tool(self, preflight, tool_name, tool_input):
+        self.events.append(
+            (
+                "runtime_execute",
+                preflight["tool_call_id"],
+                tool_name,
+                dict(tool_input),
+            )
+        )
+        return {
+            "tool_call_id": preflight["tool_call_id"],
+            "decision": "allow",
+            "status": "success",
+            "result": {
+                "artifact_job_id": "artifact_job_001",
+                "generated_file_ids": ["generated_file_001"],
+            },
+        }
+
 
 class _DelegateEngine:
     def __init__(self, decision: PermissionBehavior, events: list[tuple]) -> None:
@@ -207,6 +226,54 @@ async def test_physical_tool_executes_only_through_runtime_sandbox() -> None:
         "guard",
         "sandbox_execute",
         "result",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_artifact_tool_executes_in_runtime_and_never_calls_local_function() -> None:
+    client = _Client()
+    middleware = BankRuntimeGatewayMiddleware(client)
+    engine = GatewayPermissionEngine(
+        _DelegateEngine(PermissionBehavior.ALLOW, client.events),
+        middleware,
+    )
+    tool_input = {
+        "artifact_type": "docx",
+        "title": "会议纪要",
+        "content": {"sections": [{"heading": "结论", "paragraphs": ["通过"]}]},
+    }
+    decision = await engine.check_permission(
+        SimpleNamespace(name="artifact_generate", is_external_tool=False),
+        tool_input,
+    )
+    assert decision.behavior == PermissionBehavior.ALLOW
+
+    async def forbidden_local_execute(**_kwargs):
+        raise AssertionError("artifact tools must execute in Runtime")
+        yield
+
+    call = ToolCallBlock(
+        id="model_artifact_001",
+        name="artifact_generate",
+        input=json.dumps(tool_input, ensure_ascii=False),
+    )
+    output = [
+        item
+        async for item in middleware.on_acting(
+            SimpleNamespace(),
+            {"tool_call": call},
+            forbidden_local_execute,
+        )
+    ]
+
+    assert len(output) == 1
+    assert output[0].state == ToolResultState.SUCCESS
+    assert "artifact_job_001" in output[0].content[0].text
+    assert [event[0] for event in client.events] == [
+        "preflight",
+        "tool_guard",
+        "guard",
+        "runtime_execute",
     ]
 
 

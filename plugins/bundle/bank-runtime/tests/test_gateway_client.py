@@ -35,7 +35,7 @@ def _config() -> GatewayConfig:
     )
 
 
-def _permit(tool_input, *, agent_id="bank-assistant") -> dict:
+def _permit(tool_input, *, agent_id="bank-assistant", tool_id="policy_search") -> dict:
     return {
         "protocol_version": "runtime-worker/v1",
         "message_type": "tool.permit",
@@ -49,7 +49,7 @@ def _permit(tool_input, *, agent_id="bank-assistant") -> dict:
             "permit_nonce": "nonce-once",
             "task_id": "task_001",
             "agent_id": agent_id,
-            "tool_id": "policy_search",
+            "tool_id": tool_id,
             "input_hash": canonical_payload_hash(tool_input),
             "expires_at": (
                 datetime.now(timezone.utc) + timedelta(seconds=30)
@@ -106,6 +106,62 @@ async def test_client_keeps_one_correlation_across_preflight_guard_result(
     assert requests[2]["call_id"] == "runtime_call_001"
     assert all(request["worker_agent_id"] == "bank-assistant" for request in requests)
     assert not list(tmp_path.glob("*.json"))
+
+
+@pytest.mark.asyncio
+async def test_client_executes_runtime_native_tool_with_same_permit_and_input(
+    monkeypatch,
+) -> None:
+    client = GatewayClient(_config())
+    tool_input = {"artifact_type": "docx", "title": "纪要", "content": {}}
+    requests = []
+
+    async def post(payload):
+        requests.append(payload)
+        return {
+            "tool_call_id": "runtime_call_001",
+            "status": "success",
+            "result": {"artifact_job_id": "artifact_job_001"},
+        }
+
+    monkeypatch.setattr(client, "_post", post)
+    preflight = {
+        "tool_call_id": "runtime_call_001",
+        "call_id": "model_call_001",
+        "idempotency_key": "qwenpaw:model_call_001",
+        "permit": _permit(tool_input, tool_id="artifact_generate"),
+    }
+
+    result = await client.execute_runtime_tool(
+        preflight,
+        "artifact_generate",
+        tool_input,
+    )
+
+    assert result["result"]["artifact_job_id"] == "artifact_job_001"
+    assert requests == [
+        {
+            "phase": "execute",
+            "task_id": "task_001",
+            "session_id": "session_001",
+            "tool_session_id": "wts_001",
+            "policy_snapshot_id": "policy_001",
+            "worker_agent_id": "bank-assistant",
+            "worker_tool_name": "artifact_generate",
+            "input": tool_input,
+            "tool_call_id": "runtime_call_001",
+            "permit_id": "permit_001",
+            "protocol_version": "runtime-worker/v1",
+            "message_type": "tool.intent",
+            "task_scope_id": "scope_001",
+            "trace_id": "trace_001",
+            "call_id": "model_call_001",
+            "idempotency_key": "qwenpaw:model_call_001",
+            "capability_snapshot_hash": "sha256:capability",
+            "input_hash": canonical_payload_hash(tool_input),
+            "action_type": "execute",
+        }
+    ]
 
 
 @pytest.mark.asyncio

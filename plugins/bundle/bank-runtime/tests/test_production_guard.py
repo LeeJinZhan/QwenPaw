@@ -50,6 +50,8 @@ def _approved_snapshot(**overrides: object) -> ProductionSnapshot:
         "registered_modes": {"default", "coding", "goal", "mission"},
         "registered_tools": {
             "append_file",
+            "artifact_generate",
+            "artifact_revise",
             "ast_search",
             "bank_assistant",
             "browser",
@@ -73,6 +75,7 @@ def _approved_snapshot(**overrides: object) -> ProductionSnapshot:
             "set_user_timezone",
             "spawn_subagent",
             "submit_to_agent",
+            "template_fill_docx",
             "update_goal",
             "view_image",
             "view_video",
@@ -81,7 +84,13 @@ def _approved_snapshot(**overrides: object) -> ProductionSnapshot:
             "write_file",
             "activate_personal_skill",
         },
-        "reachable_tools": {"bank_assistant", "activate_personal_skill"},
+        "reachable_tools": {
+            "activate_personal_skill",
+            "artifact_generate",
+            "artifact_revise",
+            "bank_assistant",
+            "template_fill_docx",
+        },
         "enabled_channels": {"bank-runtime"},
         "enabled_mcp_clients": set(),
         "enabled_harnesses": set(),
@@ -351,7 +360,13 @@ def test_delivery_examples_survive_native_qwenpaw_validation() -> None:
     assert all(not item.enabled for item in root.acp.agents.values())
     assert {
         name for name, item in root.tools.builtin_tools.items() if item.enabled
-    } == {"bank_assistant", "activate_personal_skill"}
+    } == {
+        "activate_personal_skill",
+        "artifact_generate",
+        "artifact_revise",
+        "bank_assistant",
+        "template_fill_docx",
+    }
     assert agent.running.reme_light_memory_config.memory_search_enabled is False
     assert agent.running.reme_light_memory_config.dream_cron_enabled is False
 

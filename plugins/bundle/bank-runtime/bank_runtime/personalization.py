@@ -103,8 +103,19 @@ class BankRuntimePersonalizationHook(LifecycleHook):
                 section for section in (base_prompt, *sections, security) if section
             )
             from .bank_assistant import bank_assistant
+            from .artifact_tools import (
+                artifact_generate,
+                artifact_revise,
+                template_fill_docx,
+            )
 
             _ensure_request_tool(agent, bank_assistant)
+            for artifact_tool in (
+                artifact_generate,
+                artifact_revise,
+                template_fill_docx,
+            ):
+                _ensure_request_tool(agent, artifact_tool)
             if registry is not None:
                 _ensure_request_tool(agent, activate_personal_skill)
         return HookResult()

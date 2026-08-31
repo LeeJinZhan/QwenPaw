@@ -199,6 +199,41 @@ class GatewayClient:
             raise GatewayError("Runtime Tool Guard acknowledgement is invalid")
         return response
 
+    async def execute_runtime_tool(
+        self,
+        preflight: Mapping[str, Any],
+        tool_name: str,
+        tool_input: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Execute one preflighted Runtime-native tool using the consumed permit."""
+        permit = preflight.get("permit")
+        permit_payload = permit.get("payload") if isinstance(permit, Mapping) else None
+        if not isinstance(permit_payload, Mapping):
+            raise GatewayError("Runtime Tool Gateway permit is missing")
+        payload = {
+            "phase": "execute",
+            **self._scope_payload(),
+            "worker_tool_name": str(tool_name),
+            "input": dict(tool_input),
+            "tool_call_id": str(preflight.get("tool_call_id") or ""),
+            "permit_id": str(permit_payload.get("permit_id") or ""),
+            "protocol_version": PROTOCOL_VERSION,
+            "message_type": "tool.intent",
+            "task_scope_id": self.config.task_scope_id,
+            "trace_id": self.config.trace_id,
+            "call_id": str(preflight.get("call_id") or ""),
+            "idempotency_key": str(preflight.get("idempotency_key") or ""),
+            "capability_snapshot_hash": self.config.capability_snapshot_hash,
+            "input_hash": canonical_payload_hash(tool_input),
+            "action_type": "execute",
+        }
+        response = await self._post(payload)
+        if response.get("tool_call_id") != payload["tool_call_id"]:
+            raise GatewayError("Runtime tool execution acknowledgement is invalid")
+        if response.get("status") not in {"success", "failed", "blocked"}:
+            raise GatewayError("Runtime tool execution result is invalid")
+        return response
+
     async def report_result(
         self,
         tool_call_id: str,
