@@ -17,6 +17,7 @@ from .mineru_client import MinerUClientError
 _REMOTE_TASK_ID = re.compile(r"^[A-Za-z0-9_-]{1,160}$")
 _LANGUAGE = {"auto": "ch", "zh": "ch", "en": "en"}
 _FLASH_MAX_BYTES = 10 * 1024 * 1024
+_FLASH_MAX_PDF_PAGES = 20
 _API_ERROR_CODES = {
     "-30001": "DOCUMENT_TOO_LARGE",
     "-30002": "FILE_TYPE_UNSUPPORTED",
@@ -71,14 +72,34 @@ class OfficialFlashMinerUClient:
                     "Official MinerU Flash accepts files up to 10 MB",
                 )
             stem = upload_stems[item.file_id]
-            markdown, page_count = await self._parse_one(
-                item,
-                upload_name=f"{stem}{item.extension}",
-                parse_method=parse_method,
-                language=language,
-                tables=tables,
-                formulas=formulas,
-            )
+            page_count = _pdf_page_count(item)
+            if page_count is not None and page_count > _FLASH_MAX_PDF_PAGES:
+                parts: list[str] = []
+                for first_page in range(1, page_count + 1, _FLASH_MAX_PDF_PAGES):
+                    last_page = min(
+                        first_page + _FLASH_MAX_PDF_PAGES - 1,
+                        page_count,
+                    )
+                    markdown, _ = await self._parse_one(
+                        item,
+                        upload_name=f"{stem}{item.extension}",
+                        parse_method=parse_method,
+                        language=language,
+                        tables=tables,
+                        formulas=formulas,
+                        page_range=f"{first_page}-{last_page}",
+                    )
+                    parts.append(markdown.rstrip())
+                markdown = "\n\n".join(parts)
+            else:
+                markdown, page_count = await self._parse_one(
+                    item,
+                    upload_name=f"{stem}{item.extension}",
+                    parse_method=parse_method,
+                    language=language,
+                    tables=tables,
+                    formulas=formulas,
+                )
             results[stem] = {
                 "md_content": markdown,
                 "page_count": page_count,
@@ -97,6 +118,7 @@ class OfficialFlashMinerUClient:
         language: str,
         tables: bool,
         formulas: bool,
+        page_range: str | None = None,
     ) -> tuple[str, int | None]:
         payload: dict[str, Any] = {
             "file_name": upload_name,
@@ -108,6 +130,8 @@ class OfficialFlashMinerUClient:
             payload["is_ocr"] = True
         elif parse_method == "txt":
             payload["is_ocr"] = False
+        if page_range is not None:
+            payload["page_range"] = page_range
         submission = await self._request_api("POST", "/parse/file", json_body=payload)
         task_id = str(submission.get("task_id") or "")
         file_url = self._asset_url(submission.get("file_url"))
@@ -147,8 +171,12 @@ class OfficialFlashMinerUClient:
                     )
                 return task
             if state == "failed":
-                raise MinerUClientError(
+                error_code = _API_ERROR_CODES.get(
+                    str(task.get("err_code", "")),
                     "MINERU_PARSE_FAILED",
+                )
+                raise MinerUClientError(
+                    error_code,
                     "Official MinerU task failed",
                 )
             # Match the official SDK contract: only done and failed are
@@ -294,6 +322,21 @@ class OfficialFlashMinerUClient:
                 "Official MinerU asset URL is invalid",
             )
         return url
+
+
+def _pdf_page_count(item: Any) -> int | None:
+    if str(getattr(item, "extension", "")).lower() != ".pdf":
+        return None
+    try:
+        from pypdf import PdfReader
+
+        reader = PdfReader(Path(item.path), strict=False)
+        if reader.is_encrypted:
+            return None
+        page_count = len(reader.pages)
+    except Exception:
+        return None
+    return page_count if page_count > 0 else None
 
 
 __all__ = ["OfficialFlashMinerUClient"]

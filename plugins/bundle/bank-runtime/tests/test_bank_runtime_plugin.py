@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -62,6 +64,43 @@ def test_manifest_is_strictly_scoped_to_qwenpaw_2_1() -> None:
         "min": "2.1.0",
         "max": "2.2.0",
     }
+
+
+def test_plugin_entry_bootstraps_its_sibling_package_in_isolated_process() -> None:
+    """An installed plugin must not depend on a deployment PYTHONPATH."""
+    qwenpaw_root = PLUGIN_ROOT.parents[2]
+    source_root = qwenpaw_root / "src"
+    script = """
+import importlib.util
+import sys
+from pathlib import Path
+
+plugin_root = Path(sys.argv[1]).resolve()
+spec = importlib.util.spec_from_file_location(
+    "plugin_bank_runtime_isolated_test",
+    plugin_root / "plugin.py",
+    submodule_search_locations=[str(plugin_root)],
+)
+assert spec is not None and spec.loader is not None
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+module.__package__ = spec.name
+module.__path__ = [str(plugin_root)]
+spec.loader.exec_module(module)
+assert module.plugin.__class__.__name__ == "BankRuntimePlugin"
+"""
+    environment = dict(os.environ)
+    environment["PYTHONPATH"] = str(source_root)
+    completed = subprocess.run(
+        [sys.executable, "-c", script, str(PLUGIN_ROOT)],
+        cwd=qwenpaw_root,
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr
 
 
 def test_delivery_manifest_pins_source_and_blocks_unknown_image_digest() -> None:

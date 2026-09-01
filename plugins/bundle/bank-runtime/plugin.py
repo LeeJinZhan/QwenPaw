@@ -2,11 +2,20 @@
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 from fastapi import APIRouter
 
 from qwenpaw.plugins.api import PluginApi
+
+# ``qwenpaw plugin install`` executes this entry point as a dynamically
+# loaded module.  The plugin's sibling ``bank_runtime`` package therefore is
+# not importable unless the installation directory is explicitly exposed.
+# QwenPaw's loader removes this path again on unload or failed registration.
+_PLUGIN_DIR = str(Path(__file__).resolve().parent)
+if _PLUGIN_DIR not in sys.path:
+    sys.path.insert(0, _PLUGIN_DIR)
 
 from bank_runtime.capabilities import build_capability_router
 from bank_runtime.channel import BankRuntimeChannel

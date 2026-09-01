@@ -61,3 +61,12 @@ def test_skill_requires_structured_runtime_tools_and_no_shell_fallback() -> None
     for tool_name in ("artifact_generate", "artifact_revise", "template_fill_docx"):
         assert tool_name in skill
     assert "不得改用 shell" in skill
+
+
+def test_request_security_overlay_makes_office_tool_choice_mandatory() -> None:
+    personalization = (PLUGIN_ROOT / "bank_runtime" / "personalization.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert "MUST call artifact_generate" in personalization
+    assert "Never create an Office deliverable as a Python, Node, shell, or macro script" in personalization

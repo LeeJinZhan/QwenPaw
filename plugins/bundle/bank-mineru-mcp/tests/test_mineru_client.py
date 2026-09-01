@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 
 import httpx
+from pypdf import PdfWriter
 import pytest
 
 from bank_mineru_mcp.config import MinerUSettings
@@ -47,6 +48,25 @@ def _official_settings() -> MinerUSettings:
 def _file(tmp_path: Path) -> ResolvedTaskFile:
     path = tmp_path / "secret-name.pdf"
     path.write_bytes(b"%PDF-1.7\ncontent")
+    return ResolvedTaskFile(
+        task_id="task_001",
+        file_id="file_001",
+        path=path,
+        media_type="application/pdf",
+        extension=".pdf",
+        size_bytes=path.stat().st_size,
+        sha256="0" * 64,
+        expires_at=datetime.now(timezone.utc) + timedelta(hours=1),
+    )
+
+
+def _paged_pdf(tmp_path: Path, page_count: int) -> ResolvedTaskFile:
+    path = tmp_path / "secret-large-name.pdf"
+    writer = PdfWriter()
+    for _ in range(page_count):
+        writer.add_blank_page(width=595, height=842)
+    with path.open("wb") as handle:
+        writer.write(handle)
     return ResolvedTaskFile(
         task_id="task_001",
         file_id="file_001",
@@ -251,4 +271,108 @@ async def test_official_flash_uploads_polls_and_normalizes_markdown(tmp_path) ->
         ("GET", "/api/v1/agent/parse/flash-001"),
         ("GET", "/result/flash-001.md"),
     ]
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_official_flash_splits_large_pdf_into_twenty_page_tasks(
+    tmp_path,
+) -> None:
+    submitted_ranges: list[str] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and request.url.path == "/api/v1/agent/parse/file":
+            payload = json.loads((await request.aread()).decode())
+            page_range = payload["page_range"]
+            submitted_ranges.append(page_range)
+            task_number = len(submitted_ranges)
+            return httpx.Response(
+                200,
+                json={
+                    "code": 0,
+                    "data": {
+                        "task_id": f"flash-{task_number}",
+                        "file_url": (
+                            f"https://assets.mineru.test/upload/flash-{task_number}"
+                        ),
+                    },
+                },
+            )
+        if request.method == "PUT" and request.url.path.startswith("/upload/flash-"):
+            assert (await request.aread()).startswith(b"%PDF-")
+            return httpx.Response(200)
+        if request.url.path.startswith("/api/v1/agent/parse/flash-"):
+            task_number = int(request.url.path.rsplit("-", 1)[1])
+            segment_pages = 4 if task_number == 3 else 20
+            return httpx.Response(
+                200,
+                json={
+                    "code": 0,
+                    "data": {
+                        "task_id": f"flash-{task_number}",
+                        "state": "done",
+                        "markdown_url": (
+                            f"https://assets.mineru.test/result/flash-{task_number}.md"
+                        ),
+                        "extract_progress": {
+                            "extracted_pages": segment_pages,
+                            "total_pages": segment_pages,
+                        },
+                    },
+                },
+            )
+        if request.url.path.startswith("/result/flash-"):
+            task_number = int(request.url.path.removesuffix(".md").rsplit("-", 1)[1])
+            return httpx.Response(200, text=f"第 {task_number} 段")
+        return httpx.Response(404)
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = build_mineru_client(_official_settings(), http_client=http)
+
+    result, _ = await client.parse([_paged_pdf(tmp_path, 44)])
+
+    assert submitted_ranges == ["1-20", "21-40", "41-44"]
+    assert result["results"]["file_file_001"] == {
+        "md_content": "第 1 段\n\n第 2 段\n\n第 3 段",
+        "page_count": 44,
+    }
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_official_flash_preserves_failed_task_error_code(tmp_path) -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            return httpx.Response(
+                200,
+                json={
+                    "code": 0,
+                    "data": {
+                        "task_id": "flash-failed",
+                        "file_url": "https://assets.mineru.test/upload/flash-failed",
+                    },
+                },
+            )
+        if request.method == "PUT":
+            return httpx.Response(200)
+        return httpx.Response(
+            200,
+            json={
+                "code": 0,
+                "data": {
+                    "task_id": "flash-failed",
+                    "state": "failed",
+                    "err_code": -30003,
+                    "err_msg": "file page count exceeds API limit",
+                },
+            },
+        )
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = build_mineru_client(_official_settings(), http_client=http)
+
+    with pytest.raises(MinerUClientError) as failed:
+        await client.parse([_file(tmp_path)])
+
+    assert failed.value.code == "DOCUMENT_PAGE_LIMIT_EXCEEDED"
     await client.close()
