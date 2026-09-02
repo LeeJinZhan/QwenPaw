@@ -166,6 +166,7 @@ async def artifact_convert(
     source_generated_file_id: str,
     target_format: str,
     output_name: str = "",
+    explicit_pdf_request: bool = False,
 ) -> str:
     """Convert a Runtime-generated artifact through an admitted worker.
 
@@ -173,8 +174,9 @@ async def artifact_convert(
         source_generated_file_id: Runtime-generated source file identifier.
         target_format: Registered target format selected by Runtime.
         output_name: Optional safe output filename.
+        explicit_pdf_request: Must be true only when the user asked for PDF.
     """
-    del source_generated_file_id, target_format, output_name
+    del source_generated_file_id, target_format, output_name, explicit_pdf_request
     return _UNMEDIATED
 
 

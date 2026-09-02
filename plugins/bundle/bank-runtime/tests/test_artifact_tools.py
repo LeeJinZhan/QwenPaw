@@ -74,6 +74,12 @@ def test_artifact_tool_signatures_expose_no_execution_authority() -> None:
         assert not (forbidden & set(inspect.signature(tool).parameters))
 
 
+def test_artifact_convert_requires_explicit_pdf_request_marker() -> None:
+    parameter = inspect.signature(artifact_convert).parameters["explicit_pdf_request"]
+
+    assert parameter.default is False
+
+
 def test_artifact_delivery_intent_requires_structured_runtime_marker() -> None:
     intent = parse_artifact_delivery_intent(
         {
@@ -286,6 +292,7 @@ def test_skill_requires_structured_runtime_tools_and_no_shell_fallback() -> None
     ):
         assert tool_name in skill
     assert "不得改用 shell" in skill
+    assert "`explicit_pdf_request` 设为 `true`" in skill
 
 
 def test_request_security_overlay_makes_office_tool_choice_mandatory() -> None:
