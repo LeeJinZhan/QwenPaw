@@ -39,6 +39,8 @@ def _driver_tool(name: str, *, protocol: str = "mcp") -> DriverCapabilityTool:
 
 def _context(visibility):
     ordinary = SimpleNamespace(name="runtime_sandbox_files_search")
+    artifact = SimpleNamespace(name="artifact_generate")
+    unavailable_artifact = SimpleNamespace(name="artifact_revise")
     parse = _driver_tool("MinerU__parse_documents")
     chunks = _driver_tool("MinerU__read_document_chunks")
     request = SimpleNamespace(
@@ -54,7 +56,11 @@ def _context(visibility):
     )
     agent = SimpleNamespace(
         toolkit=SimpleNamespace(
-            tool_groups=[SimpleNamespace(tools=[ordinary, parse, chunks])]
+            tool_groups=[
+                SimpleNamespace(
+                    tools=[ordinary, artifact, unavailable_artifact, parse, chunks]
+                )
+            ]
         )
     )
     return SimpleNamespace(request=request, agent=agent), ordinary
@@ -64,14 +70,16 @@ def test_visibility_parser_accepts_only_non_authoritative_runtime_projection() -
     parsed = parse_runtime_tool_visibility(
         {
             "worker_type": "qwenpaw",
-            "worker_tool_names": ["MinerU__parse_documents"],
+            "worker_tool_names": ["artifact_generate", "MinerU__parse_documents"],
             "binding_snapshot_hash": f"sha256:{'a' * 64}",
             "authoritative": False,
         }
     )
 
     assert parsed is not None
-    assert parsed.worker_tool_names == frozenset({"MinerU__parse_documents"})
+    assert parsed.worker_tool_names == frozenset(
+        {"artifact_generate", "MinerU__parse_documents"}
+    )
     assert parse_runtime_tool_visibility({"authoritative": True}) is None
     assert parse_runtime_tool_visibility(None) is None
 

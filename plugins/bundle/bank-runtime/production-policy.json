@@ -10,6 +10,7 @@
       "append_file",
       "artifact_generate",
       "artifact_revise",
+      "artifact_convert",
       "ast_search",
       "bank_assistant",
       "browser",
@@ -45,6 +46,7 @@
       "activate_personal_skill",
       "artifact_generate",
       "artifact_revise",
+      "artifact_convert",
       "bank_assistant",
       "template_fill_docx"
     ],

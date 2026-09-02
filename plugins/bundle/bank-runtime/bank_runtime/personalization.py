@@ -104,6 +104,7 @@ class BankRuntimePersonalizationHook(LifecycleHook):
             )
             from .bank_assistant import bank_assistant
             from .artifact_tools import (
+                artifact_convert,
                 artifact_generate,
                 artifact_revise,
                 template_fill_docx,
@@ -113,6 +114,7 @@ class BankRuntimePersonalizationHook(LifecycleHook):
             for artifact_tool in (
                 artifact_generate,
                 artifact_revise,
+                artifact_convert,
                 template_fill_docx,
             ):
                 _ensure_request_tool(agent, artifact_tool)
@@ -281,7 +283,8 @@ def _security_boundary() -> str:
             "- Never create an Office deliverable as a Python, Node, shell, or macro script; "
             "do not substitute source code or Markdown instructions for the requested file.",
             "- Use artifact_revise for changes to an existing generated Office file, and "
-            "use template_fill_docx only when Runtime supplies an authorized template.",
+            "use artifact_convert for an explicit format conversion. Use "
+            "template_fill_docx only when Runtime supplies an authorized template.",
         ]
     )
 

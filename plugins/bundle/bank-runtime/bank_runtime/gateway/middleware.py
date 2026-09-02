@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import defaultdict, deque
 from collections.abc import AsyncGenerator, Callable
+from contextvars import ContextVar, Token
 from dataclasses import dataclass
 import asyncio
 import json
@@ -11,10 +12,11 @@ import time
 from typing import Any, Mapping
 import uuid
 
-from agentscope.message import TextBlock, ToolResultState
+from agentscope.message import SystemMsg, TextBlock, ToolCallBlock, ToolResultState
 from agentscope.middleware import MiddlewareBase
+from agentscope.model import ChatResponse
 from agentscope.permission import PermissionBehavior, PermissionDecision
-from agentscope.tool import ToolChunk, ToolResponse
+from agentscope.tool import ToolChoice, ToolChunk, ToolResponse
 
 from qwenpaw.hooks.base import LifecycleHook
 from qwenpaw.runtime.hooks import HookContext, HookResult
@@ -22,14 +24,55 @@ from qwenpaw.runtime.phases import Phase
 
 from .client import GatewayClient, GatewayConfig, GatewayError
 from .protocol import canonical_payload_hash
+from ..artifact_tools import (
+    ARTIFACT_WORKER_TOOL_NAMES,
+    ArtifactDeliveryIntent,
+    ArtifactToolNotInvokedError,
+    artifact_delivery_intent_from_request,
+)
 from ..sandbox.executor import RuntimeSandboxExecutor, is_physical_tool
 
 _BLOCKED_NESTED_TOOLS = frozenset({"run_tool_batch"})
 _SANDBOX_BROKER_TOOLS = frozenset(
     {"runtime_sandbox_files_search", "runtime_sandbox_files_select"}
 )
-_RUNTIME_EXECUTED_TOOLS = frozenset(
-    {"artifact_generate", "artifact_revise", "template_fill_docx"}
+_RUNTIME_EXECUTED_TOOLS = ARTIFACT_WORKER_TOOL_NAMES
+
+
+@dataclass
+class _ArtifactTurnState:
+    intent: ArtifactDeliveryIntent
+    replan_count: int = 0
+    invoked: bool = False
+    failed: bool = False
+
+
+@dataclass(frozen=True)
+class _CapturedModelOutput:
+    chunks: tuple[ChatResponse, ...]
+    streamed: bool
+
+    @property
+    def final(self) -> ChatResponse:
+        for chunk in reversed(self.chunks):
+            if chunk.is_last:
+                return chunk
+        return self.chunks[-1]
+
+    def replay(self) -> ChatResponse | AsyncGenerator[ChatResponse, None]:
+        if not self.streamed:
+            return self.final
+
+        async def generate() -> AsyncGenerator[ChatResponse, None]:
+            for chunk in self.chunks:
+                yield chunk
+
+        return generate()
+
+
+_artifact_turn_state: ContextVar[_ArtifactTurnState | None] = ContextVar(
+    "bank_runtime_artifact_turn_state",
+    default=None,
 )
 
 
@@ -50,14 +93,94 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
         *,
         sandbox_executor: Any | None = None,
         configuration_error: str = "",
+        artifact_intent: ArtifactDeliveryIntent | None = None,
     ) -> None:
         self.client = client
         self.sandbox_executor = sandbox_executor
         self.configuration_error = str(configuration_error or "")
+        self.artifact_intent = artifact_intent
         self._prepared: dict[tuple[str, str], deque[_PreparedExecution]] = defaultdict(
             deque
         )
         self._prepared_broker: dict[tuple[str, str], int] = defaultdict(int)
+
+    async def on_reply(
+        self,
+        agent: Any,
+        input_kwargs: dict[str, Any],
+        next_handler: Callable[..., AsyncGenerator[Any, None]],
+    ) -> AsyncGenerator[Any, None]:
+        if self.artifact_intent is None:
+            async for item in next_handler(**input_kwargs):
+                yield item
+            return
+        token: Token = _artifact_turn_state.set(
+            _ArtifactTurnState(intent=self.artifact_intent),
+        )
+        try:
+            async for item in next_handler(**input_kwargs):
+                yield item
+        finally:
+            _artifact_turn_state.reset(token)
+
+    async def on_model_call(
+        self,
+        agent: Any,
+        input_kwargs: dict[str, Any],
+        next_handler: Callable[..., Any],
+    ) -> Any:
+        del agent
+        state = _artifact_turn_state.get()
+        if state is None or state.invoked:
+            return await next_handler(**input_kwargs)
+        # AgentScope retries failed model middleware calls. Once this boundary
+        # has failed, reject retries without issuing additional model calls.
+        if state.failed:
+            raise ArtifactToolNotInvokedError()
+
+        response = await _capture_model_output(await next_handler(**input_kwargs))
+        tool_names = _tool_call_names(response.final)
+        if tool_names & ARTIFACT_WORKER_TOOL_NAMES:
+            state.invoked = True
+            return response.replay()
+        # A non-artifact tool can legitimately prepare source material. The
+        # next model round remains responsible for the required artifact call.
+        if tool_names:
+            return response.replay()
+        if state.replan_count:
+            state.failed = True
+            raise ArtifactToolNotInvokedError()
+
+        visible_tools = _visible_artifact_tool_schemas(input_kwargs.get("tools"))
+        if not visible_tools:
+            state.failed = True
+            raise ArtifactToolNotInvokedError()
+        state.replan_count = 1
+        retry = dict(input_kwargs)
+        retry["tools"] = visible_tools
+        allowed_names = [
+            str(schema.get("function", {}).get("name") or "")
+            for schema in visible_tools
+        ]
+        retry["tool_choice"] = ToolChoice(mode="required", tools=allowed_names)
+        retry["messages"] = [
+            *list(input_kwargs.get("messages") or []),
+            SystemMsg(
+                name="system",
+                content=(
+                    "This request requires an actual governed artifact delivery. "
+                    "Call exactly one available artifact tool now. Do not claim a "
+                    "file was created in text and do not emit scripts or tutorials."
+                ),
+            ),
+        ]
+        replacement = await _capture_model_output(await next_handler(**retry))
+        replacement_names = _tool_call_names(replacement.final)
+        if replacement_names & ARTIFACT_WORKER_TOOL_NAMES:
+            state.invoked = True
+            return replacement.replay()
+        state.failed = True
+        raise ArtifactToolNotInvokedError()
 
     def prepare(
         self,
@@ -381,9 +504,49 @@ def bank_runtime_middleware_factory(
         return BankRuntimeGatewayMiddleware(
             GatewayClient(config),
             sandbox_executor=sandbox_executor,
+            artifact_intent=artifact_delivery_intent_from_request(request),
         )
     except GatewayError as exc:
-        return BankRuntimeGatewayMiddleware(None, configuration_error=str(exc))
+        return BankRuntimeGatewayMiddleware(
+            None,
+            configuration_error=str(exc),
+            artifact_intent=artifact_delivery_intent_from_request(request),
+        )
+
+
+def _tool_call_names(response: Any) -> frozenset[str]:
+    if not isinstance(response, ChatResponse):
+        return frozenset()
+    return frozenset(
+        str(block.name or "")
+        for block in response.content
+        if isinstance(block, ToolCallBlock) and str(block.name or "")
+    )
+
+
+async def _capture_model_output(value: Any) -> _CapturedModelOutput:
+    if isinstance(value, ChatResponse):
+        return _CapturedModelOutput((value,), streamed=False)
+    if not hasattr(value, "__aiter__"):
+        raise TypeError("Model middleware returned an unsupported response")
+    chunks = tuple([chunk async for chunk in value])
+    if not chunks or any(not isinstance(chunk, ChatResponse) for chunk in chunks):
+        raise TypeError("Streaming model middleware returned an invalid response")
+    return _CapturedModelOutput(chunks, streamed=True)
+
+
+def _visible_artifact_tool_schemas(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    selected: list[dict[str, Any]] = []
+    for schema in value:
+        if not isinstance(schema, dict):
+            continue
+        function = schema.get("function")
+        name = str(function.get("name") or "") if isinstance(function, dict) else ""
+        if name in ARTIFACT_WORKER_TOOL_NAMES:
+            selected.append(schema)
+    return selected
 
 
 def _is_managed_tool(tool: Any) -> bool:

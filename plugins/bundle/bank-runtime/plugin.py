@@ -30,6 +30,8 @@ from bank_runtime.sandbox.hooks import (
 )
 from bank_runtime.bank_assistant import bank_assistant
 from bank_runtime.artifact_tools import (
+    ArtifactDeliveryErrorHook,
+    artifact_convert,
     artifact_generate,
     artifact_revise,
     template_fill_docx,
@@ -90,6 +92,7 @@ class BankRuntimePlugin:
         api.register_runtime_hook(BankRuntimePersonalizationRedactionHook())
         api.register_runtime_hook(ManagedSessionCommitHook())
         api.register_runtime_hook(ManagedSessionErrorHook())
+        api.register_runtime_hook(ArtifactDeliveryErrorHook())
         api.register_runtime_hook(BankRuntimePersonalizationCleanupHook())
         api.register_runtime_hook(BankRuntimeSandboxCleanupHook())
         api.register_runtime_hook(ManagedSessionCleanupHook())
@@ -134,6 +137,14 @@ class BankRuntimePlugin:
             tool_func=artifact_revise,
             description="Create a new version of a Runtime-generated artifact",
             icon="📝",
+            enabled=False,
+            tool_type="internal",
+        )
+        api.register_tool(
+            tool_name="artifact_convert",
+            tool_func=artifact_convert,
+            description="Convert a Runtime-generated artifact",
+            icon="🔄",
             enabled=False,
             tool_type="internal",
         )

@@ -8,6 +8,8 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from agentscope.permission import PermissionBehavior, PermissionDecision
+from agentscope.tool import Toolkit
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 if str(PLUGIN_ROOT) not in sys.path:
@@ -24,6 +26,12 @@ from bank_runtime.personalization import (
     BankRuntimePersonalizationHook,
     BankRuntimePersonalizationRedactionHook,
     current_personalization_context,
+)
+from bank_runtime.artifact_tools import ARTIFACT_RUNTIME_ACTION_BY_TOOL
+from bank_runtime.gateway.hooks import BankRuntimeToolVisibilityHook
+from bank_runtime.gateway.middleware import (
+    BankRuntimeGatewayInstallHook,
+    BankRuntimeGatewayMiddleware,
 )
 from bank_runtime.session import (
     ManagedSessionCleanupHook,
@@ -182,6 +190,10 @@ async def test_profile_and_catalog_cannot_override_security_or_user_message():
     assert ctx.input_msgs == original_input
     assert [tool.name for tool in ctx.agent.toolkit.tool_groups[0].tools] == [
         "bank_assistant",
+        "artifact_generate",
+        "artifact_revise",
+        "artifact_convert",
+        "template_fill_docx",
         "activate_personal_skill",
     ]
     await BankRuntimePersonalizationCleanupHook().run(ctx)
@@ -413,6 +425,72 @@ async def test_non_bank_channel_does_not_inject_profile_or_tools():
     assert ctx.agent._system_prompt == "BASE SECURITY PROMPT"
     assert ctx.agent.toolkit.tool_groups[0].tools == []
     assert current_personalization_context() is None
+
+
+class _AllowEngine:
+    context = object()
+
+    async def check_permission(self, _tool, _tool_input):
+        return PermissionDecision(behavior=PermissionBehavior.ALLOW)
+
+
+@pytest.mark.asyncio
+async def test_final_model_tool_schema_contains_only_authorized_artifact_actions():
+    snapshot = f"sha256:{'a' * 64}"
+    request = _request(
+        runtime_tool_visibility={
+            "worker_type": "qwenpaw",
+            "worker_tool_names": list(ARTIFACT_RUNTIME_ACTION_BY_TOOL),
+            "binding_snapshot_hash": snapshot,
+            "authoritative": False,
+        },
+        runtime_tool_gateway={
+            "capability_snapshot_hash": snapshot.removeprefix("sha256:")
+        },
+    )
+    middleware = BankRuntimeGatewayMiddleware(object())
+    agent = SimpleNamespace(
+        _system_prompt="BASE SECURITY PROMPT",
+        toolkit=Toolkit(),
+        _acting_middlewares=[middleware],
+        _engine=_AllowEngine(),
+    )
+    ctx = SimpleNamespace(
+        request=request,
+        agent=agent,
+        extras={},
+        input_msgs=[],
+        error=None,
+    )
+    registry = HookRegistry()
+    for hook in (
+        BankRuntimePersonalizationHook(),
+        BankRuntimeGatewayInstallHook(),
+        BankRuntimeToolVisibilityHook(),
+    ):
+        registry.register(hook)
+
+    await registry.run(Phase.PRE_AGENT_BUILD, ctx)
+    await registry.run(Phase.POST_AGENT_BUILD, ctx)
+    await registry.run(Phase.PRE_EXECUTE, ctx)
+    schemas = await agent.toolkit.get_tool_schemas()
+    final_names = {
+        str(schema.get("function", {}).get("name") or "") for schema in schemas
+    }
+    final_actions = {
+        ARTIFACT_RUNTIME_ACTION_BY_TOOL[name]
+        for name in final_names
+        if name in ARTIFACT_RUNTIME_ACTION_BY_TOOL
+    }
+
+    assert final_actions == {
+        "artifact.generate",
+        "artifact.revise",
+        "artifact.convert",
+        "template.fill",
+    }
+    assert "image_generate" not in final_names
+    await BankRuntimePersonalizationCleanupHook().run(ctx)
 
 
 def test_personalization_hooks_order_before_session_save_and_cleanup():

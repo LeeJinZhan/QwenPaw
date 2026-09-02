@@ -9,6 +9,8 @@ from typing import Any
 
 from qwenpaw.drivers.adapters.agentscope_tool import DriverCapabilityTool
 
+from ..artifact_tools import ARTIFACT_WORKER_TOOL_NAMES
+
 _WORKER_TOOL_NAME = re.compile(r"[A-Za-z][A-Za-z0-9_-]{0,127}")
 _SNAPSHOT_HASH = re.compile(r"sha256:[0-9a-f]{64}")
 
@@ -59,7 +61,11 @@ def filter_managed_driver_tools(toolkit: Any, allowed_names: frozenset[str]) -> 
         tools[:] = [
             tool
             for tool in tools
-            if not isinstance(tool, DriverCapabilityTool)
+            if (
+                not isinstance(tool, DriverCapabilityTool)
+                and str(getattr(tool, "name", "") or "")
+                not in ARTIFACT_WORKER_TOOL_NAMES
+            )
             or str(getattr(tool, "name", "") or "") in allowed_names
         ]
 

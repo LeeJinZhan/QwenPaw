@@ -17,6 +17,7 @@ _BANK_RUNTIME_REACHABLE_TOOLS = {
     "activate_personal_skill",
     "artifact_generate",
     "artifact_revise",
+    "artifact_convert",
     "bank_assistant",
     "template_fill_docx",
 }

@@ -52,6 +52,7 @@ def _approved_snapshot(**overrides: object) -> ProductionSnapshot:
             "append_file",
             "artifact_generate",
             "artifact_revise",
+            "artifact_convert",
             "ast_search",
             "bank_assistant",
             "browser",
@@ -88,6 +89,7 @@ def _approved_snapshot(**overrides: object) -> ProductionSnapshot:
             "activate_personal_skill",
             "artifact_generate",
             "artifact_revise",
+            "artifact_convert",
             "bank_assistant",
             "template_fill_docx",
         },
@@ -362,6 +364,7 @@ def test_delivery_examples_survive_native_qwenpaw_validation() -> None:
         name for name, item in root.tools.builtin_tools.items() if item.enabled
     } == {
         "activate_personal_skill",
+        "artifact_convert",
         "artifact_generate",
         "artifact_revise",
         "bank_assistant",

@@ -23,5 +23,6 @@ metadata:
 - 用户要求生成普通 DOCX、XLSX 或 PPTX 时，选择 `artifact_generate`，只提交结构化内容和 Runtime 已授权的来源引用。
 - 只有用户明确要求 PDF 时，才可将 `artifact_type` 设为 `pdf` 并将 `explicit_pdf_request` 设为 `true`。
 - 修改已有成果时使用 `artifact_revise`；它会创建新版本，不覆盖旧文件。
+- 用户明确要求把已有受控成果转换为另一种已登记格式时，使用 `artifact_convert`；不得把重新生成冒充为格式转换。
 - 仅当 Runtime 已提供已发布模板版本且字段齐全时使用 `template_fill_docx`；没有模板时改用普通 DOCX，不伪造正式公文要素。
 - 这些工具由 Runtime 执行；不得改用 shell、临时 Python/Node 脚本、任意路径、URL 或对象存储 key 生成文件。
