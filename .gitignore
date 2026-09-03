@@ -106,6 +106,9 @@ providers.json
 logs/
 *.log
 
+# Local runtime working data
+/data/
+
 # vibe coding
 AGENTS.md
 .claude
