@@ -5,11 +5,17 @@ from __future__ import annotations
 import json
 from collections.abc import AsyncIterable, AsyncIterator
 from typing import Any
+from .public_thinking import PublicThinkingStream
 
 _TERMINAL_EVENTS = {"answer.completed", "answer.failed"}
 _RECOVERABLE_SESSION_ERROR_CODES = {
     "RUNTIME_SESSION_NOT_FOUND",
     "RUNTIME_SESSION_SCOPE_MISMATCH",
+}
+_PUBLIC_ERROR_CODES = _RECOVERABLE_SESSION_ERROR_CODES | {
+    "WORKER_UNAVAILABLE", "WORKER_TIMEOUT", "ARTIFACT_TOOL_NOT_INVOKED",
+    "ARTIFACT_OUTPUT_MISSING", "ARTIFACT_PUBLISH_INCOMPLETE",
+    "QWENPAW_TASK_CANCELLED", "QWENPAW_DOOM_LOOP_STOP",
 }
 
 
@@ -43,8 +49,26 @@ class CompactEventProjector:
         self._snapshots: dict[tuple[str, str], str] = {}
         self._message_stream_types: dict[str, str] = {}
         self._terminal = False
+        self._active_message_id = ""
 
     def project(self, raw_event: dict[str, Any]) -> list[dict[str, Any]]:
+        phases = []
+        if not self._terminal and isinstance(raw_event, dict) and raw_event.get('object') == 'message':
+            message_id = str(raw_event.get('msg_id') or raw_event.get('message_id') or raw_event.get('id') or '')
+            kind = str(raw_event.get('type') or '').lower()
+            previous = self._active_message_id
+            if previous and kind in {'reasoning', 'thinking'} and message_id == previous:
+                self._active_message_id = ''
+            elif previous and message_id != previous and kind in {'message', 'plugin_call', 'plugin_call_output', 'reasoning', 'thinking'}:
+                text = self._snapshots.get(('answer.chunk', previous), '')
+                if text:
+                    phases.append({'event': 'answer.phase', 'message_id': previous, 'text': text})
+                self._active_message_id = ''
+            if kind == 'message' and message_id:
+                self._active_message_id = message_id
+        return phases + self._project(raw_event)
+
+    def _project(self, raw_event: dict[str, Any]) -> list[dict[str, Any]]:
         if self._terminal or not isinstance(raw_event, dict):
             return []
         event_name = str(
@@ -138,7 +162,12 @@ class CompactEventProjector:
         else:
             chunk = _delta(previous, current)
             self._snapshots[key] = current
-        return [{"event": event, "text": chunk}] if chunk else []
+        if not chunk:
+            return []
+        payload = {"event": event, "text": chunk}
+        if not is_thinking and self._active_message_id == message_id:
+            payload["message_id"] = message_id
+        return [payload]
 
     def finish(self) -> list[dict[str, Any]]:
         if self._terminal:
@@ -164,7 +193,11 @@ class CompactEventProjector:
             "status": "failed",
             "message": message,
         }
-        if error_code in _RECOVERABLE_SESSION_ERROR_CODES:
+        if raw_status == "cancelled":
+            error_code = "QWENPAW_TASK_CANCELLED"
+        elif raw_status == "timeout":
+            error_code = "WORKER_TIMEOUT"
+        if error_code in _PUBLIC_ERROR_CODES:
             failed["error_code"] = error_code
         return failed
 
@@ -189,6 +222,7 @@ async def project_sse_stream(
 ) -> AsyncIterator[str]:
     """Project an upstream SSE stream while preserving disconnect semantics."""
     projector = CompactEventProjector(runtime_task_id)
+    public_thinking = PublicThinkingStream()
     yield _encode(
         {
             "event": "status.changed",
@@ -203,13 +237,16 @@ async def project_sse_stream(
             block, buffer = buffer.split("\n\n", 1)
             for raw_event in _decode_sse_block(block):
                 for event in projector.project(raw_event):
-                    yield _encode(event)
+                    for public in public_thinking.project(event):
+                        yield _encode(public)
     if buffer.strip():
         for raw_event in _decode_sse_block(buffer):
             for event in projector.project(raw_event):
-                yield _encode(event)
+                for public in public_thinking.project(event):
+                    yield _encode(public)
     for event in projector.finish():
-        yield _encode(event)
+        for public in public_thinking.project(event):
+            yield _encode(public)
 
 
 def _encode(event: dict[str, Any]) -> str:

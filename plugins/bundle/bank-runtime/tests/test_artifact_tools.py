@@ -356,3 +356,18 @@ def test_request_security_overlay_makes_office_tool_choice_mandatory() -> None:
     assert "MUST call artifact_generate" in personalization
     assert "PNG, JPEG, WEBP, SVG" in personalization
     assert "Never create an Office deliverable as a Python, Node, shell, or macro script" in personalization
+
+@pytest.mark.parametrize('intent,tool,payload,expected', [
+    (ArtifactDeliveryIntent('convert', 'pdf'), 'artifact_convert', {'target_format': 'pdf'}, True),
+    (ArtifactDeliveryIntent('generate', 'pdf'), 'artifact_generate', {'artifact_type': 'pdf'}, True),
+    (None, 'artifact_convert', {'target_format': 'pdf'}, None),
+    (ArtifactDeliveryIntent('convert', 'docx'), 'artifact_convert', {'target_format': 'pdf'}, None),
+    (ArtifactDeliveryIntent('generate', 'pdf'), 'artifact_convert', {'target_format': 'pdf'}, None),
+    (ArtifactDeliveryIntent('convert', 'pdf'), 'artifact_convert', {'target_format': 'pdf', 'explicit_pdf_request': False}, False),
+])
+def test_pdf_confirmation_comes_only_from_matching_trusted_intent(intent, tool, payload, expected):
+    from bank_runtime.artifact_tools import complete_artifact_tool_input
+    original = dict(payload)
+    result = complete_artifact_tool_input(tool, payload, intent)
+    assert result.get('explicit_pdf_request') is expected
+    assert payload == original

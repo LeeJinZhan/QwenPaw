@@ -29,9 +29,10 @@ _RESULT_ATTEMPTS = 3
 class GatewayError(RuntimeError):
     """Gateway mediation failed safely."""
 
-    def __init__(self, message: str, *, code: str = "") -> None:
+    def __init__(self, message: str, *, code: str = "", violation: str = "") -> None:
         super().__init__(message)
         self.code = str(code or "")
+        self.violation = str(violation or "")
 
 
 @dataclass(frozen=True)
@@ -356,9 +357,12 @@ def _response_error(payload: Mapping[str, Any], fallback: str) -> GatewayError:
     detail = payload.get("detail")
     if not isinstance(detail, Mapping):
         detail = payload
+    details = detail.get("details")
+    details = details if isinstance(details, Mapping) else {}
     return GatewayError(
         str(detail.get("message") or fallback),
         code=str(detail.get("code") or ""),
+        violation=str(details.get("violation_type") or ""),
     )
 
 

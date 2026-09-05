@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections import defaultdict, deque
 from collections.abc import AsyncGenerator, Callable
 from dataclasses import dataclass
+from copy import copy
 import asyncio
 import json
 import logging
@@ -24,11 +25,15 @@ from qwenpaw.runtime.phases import Phase
 
 from .client import GatewayClient, GatewayConfig, GatewayError
 from .protocol import canonical_payload_hash
+from .native_skills import NativeSkillReader
+from ..presentation import artifact_model_result, failure_message
+from ..model_context import prepare_public_model_context
 from ..artifact_tools import (
     ARTIFACT_WORKER_TOOL_NAMES,
     ArtifactDeliveryIntent,
     ArtifactToolNotInvokedError,
     artifact_delivery_intent_from_request,
+    complete_artifact_tool_input,
 )
 from ..sandbox.executor import RuntimeSandboxExecutor, is_physical_tool
 
@@ -74,6 +79,7 @@ class _PreparedExecution:
     input_hash: str
     preflight: dict[str, Any]
     claimed: bool = False
+    native_skill: bool = False
 
 
 class BankRuntimeGatewayMiddleware(MiddlewareBase):
@@ -95,6 +101,11 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
             deque
         )
         self._artifact_turn_state: _ArtifactTurnState | None = None
+        self.native_skills: NativeSkillReader | None = None
+        self.allowed_tool_names: frozenset[str] | None = None
+
+    def bind_native_skills(self, agent: Any) -> None:
+        self.native_skills = NativeSkillReader(agent)
 
     async def on_reply(
         self,
@@ -120,7 +131,18 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
         input_kwargs: dict[str, Any],
         next_handler: Callable[..., Any],
     ) -> Any:
-        del agent
+        if self.allowed_tool_names is not None:
+            allowed = set(self.allowed_tool_names)
+            if self.native_skills is not None and await self.native_skills.visible():
+                allowed.add("Skill")
+            input_kwargs = dict(input_kwargs)
+            input_kwargs["tools"] = [
+                schema for schema in (input_kwargs.get("tools") or [])
+                if isinstance(schema, dict)
+                and str(schema.get("function", {}).get("name") or "") in allowed
+            ]
+        if input_kwargs.get("messages"):
+            input_kwargs = prepare_public_model_context(input_kwargs)
         state = self._artifact_turn_state
         if state is None or state.invoked:
             return await next_handler(**input_kwargs)
@@ -178,9 +200,11 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
         tool_name: str,
         tool_input: Mapping[str, Any],
         preflight: dict[str, Any],
+        *,
+        native_skill: bool = False,
     ) -> None:
         key = (str(tool_name), canonical_payload_hash(tool_input))
-        self._prepared[key].append(_PreparedExecution(key[0], key[1], dict(preflight)))
+        self._prepared[key].append(_PreparedExecution(key[0], key[1], dict(preflight), native_skill=native_skill))
 
     def claim(
         self,
@@ -205,7 +229,29 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
         input_kwargs: dict[str, Any],
         next_handler: Callable[..., AsyncGenerator[Any, None]],
     ) -> AsyncGenerator[Any, None]:
-        del agent
+        try:
+            async for item in self._act_admitted(agent, input_kwargs, next_handler):
+                if isinstance(item, (ToolChunk, ToolResponse)) and item.state in {
+                    ToolResultState.ERROR, ToolResultState.DENIED, ToolResultState.INTERRUPTED,
+                }:
+                    item = copy(item)
+                    message = ("处理已中断，已完成的操作不会自动撤销。"
+                               if item.state == ToolResultState.INTERRUPTED else failure_message())
+                    item.content = [TextBlock(type="text", text=message)]
+                yield item
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            _logger.warning("Managed operation failed: error_type=%s", type(exc).__name__)
+            raise GatewayError(failure_message(getattr(exc, "code", ""), getattr(exc, "violation", "")),
+                               code=getattr(exc, "code", "")) from exc
+
+    async def _act_admitted(
+        self,
+        agent: Any,
+        input_kwargs: dict[str, Any],
+        next_handler: Callable[..., AsyncGenerator[Any, None]],
+    ) -> AsyncGenerator[Any, None]:
         if self.configuration_error or self.client is None:
             raise GatewayError(
                 self.configuration_error or "Runtime Tool Gateway is unavailable"
@@ -218,7 +264,15 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
             raise GatewayError("Tool input is not valid JSON") from exc
         if not isinstance(tool_input, dict):
             raise GatewayError("Tool input must be an object")
+        tool_input = complete_artifact_tool_input(tool_name, tool_input, self.artifact_intent)
         prepared = self.claim(tool_name, tool_input)
+        if prepared.native_skill:
+            reader = self.native_skills
+            if reader is None or reader.agent is not agent or not await reader.available(tool_input):
+                raise GatewayError("Skill read scope changed")
+            async for item in next_handler():
+                yield item
+            return
         try:
             await self.client.report_guard(prepared.preflight, "allow")
         except Exception as exc:
@@ -335,8 +389,18 @@ class GatewayPermissionEngine:
         tool_input: dict[str, Any],
     ) -> PermissionDecision:
         if self.middleware.configuration_error or self.middleware.client is None:
-            return _deny("Runtime Tool Gateway is unavailable")
+            return _deny("此操作当前不可用，本次未执行。")
+        reader = self.middleware.native_skills
+        if reader is not None and reader.recognizes(tool):
+            if not await reader.available(tool_input):
+                return _deny("当前技能说明不可用。")
+            decision = await self.delegate.check_permission(tool, tool_input)
+            if decision.behavior != PermissionBehavior.ALLOW:
+                return _deny("当前技能说明不可用。")
+            self.middleware.prepare("Skill", tool_input, {}, native_skill=True)
+            return decision
         tool_name = str(getattr(tool, "name", "") or "")
+        tool_input = complete_artifact_tool_input(tool_name, tool_input, self.middleware.artifact_intent)
         call_id = f"call_{uuid.uuid4().hex}"
         try:
             preflight = await self.middleware.client.preflight(
@@ -351,7 +415,7 @@ class GatewayPermissionEngine:
                 tool_name,
                 type(exc).__name__,
             )
-            return _deny("Runtime Tool Gateway preflight denied this call")
+            return _deny(failure_message(getattr(exc, "code", ""), getattr(exc, "violation", "")))
 
         decision = await self.delegate.check_permission(tool, tool_input)
         blocked_boundary = tool_name in _BLOCKED_NESTED_TOOLS or bool(
@@ -360,13 +424,13 @@ class GatewayPermissionEngine:
         if blocked_boundary or decision.behavior == PermissionBehavior.DENY:
             await self._report_guard_safely(preflight, "block")
             return (
-                decision
+                _deny("当前不允许执行此操作，本次未执行。")
                 if not blocked_boundary
-                else _deny("This tool execution path is not managed by Bank Runtime")
+                else _deny("当前助手不支持此操作，本次未执行。")
             )
         if decision.behavior != PermissionBehavior.ALLOW:
             await self._report_guard_safely(preflight, "require_approval")
-            return _deny("Interactive tool approval is unavailable on bank-runtime")
+            return _deny("此操作需要审批，尚未执行。")
         self.middleware.prepare(tool_name, tool_input, preflight)
         return decision
 
@@ -406,6 +470,7 @@ class BankRuntimeGatewayInstallHook(LifecycleHook):
             raise GatewayError("Bank Runtime Gateway middleware is missing")
         if middleware.configuration_error:
             raise GatewayError(middleware.configuration_error)
+        middleware.bind_native_skills(agent)
         for group in getattr(getattr(agent, "toolkit", None), "tool_groups", ()):
             group.tools[:] = [tool for tool in group.tools if _is_managed_tool(tool)]
         engine = getattr(agent, "_engine", None)
@@ -566,19 +631,7 @@ def _runtime_tool_response(
 ) -> ToolResponse:
     status = str(result.get("status") or "")
     state = ToolResultState.SUCCESS if status == "success" else ToolResultState.ERROR
-    safe = {
-        key: value
-        for key, value in result.items()
-        if key
-        in {
-            "tool_call_id",
-            "decision",
-            "status",
-            "reason",
-            "error_code",
-            "result",
-        }
-    }
+    safe = artifact_model_result(result)
     return ToolResponse(
         id=response_id,
         content=[

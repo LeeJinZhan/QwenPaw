@@ -40,6 +40,33 @@ class ArtifactDeliveryIntent:
     source_refs: tuple[str, ...] = ()
 
 
+def complete_artifact_tool_input(
+    tool_name: str,
+    payload: Mapping[str, Any],
+    intent: ArtifactDeliveryIntent | None,
+) -> dict[str, Any]:
+    """Carry explicit PDF intent from the trusted request into both call phases.
+
+    Model tool arguments are not evidence of user consent. Only a matching
+    Runtime-authored delivery marker can supply an omitted confirmation.
+    Resource authorization and the original contract validation still apply.
+    """
+    result = dict(payload)
+    operation, format_field = {
+        'artifact_convert': ('convert', 'target_format'),
+        'artifact_generate': ('generate', 'artifact_type'),
+    }.get(tool_name, ('', ''))
+    if (
+        intent is not None
+        and operation == intent.operation
+        and intent.target_format == 'pdf'
+        and str(payload.get(format_field) or '').strip().lower() == 'pdf'
+        and 'explicit_pdf_request' not in payload
+    ):
+        result['explicit_pdf_request'] = True
+    return result
+
+
 class ArtifactToolNotInvokedError(AgentRuntimeErrorException):
     """The model answered in text instead of invoking an admitted tool."""
 

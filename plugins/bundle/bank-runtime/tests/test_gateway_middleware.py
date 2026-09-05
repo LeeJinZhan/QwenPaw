@@ -268,7 +268,8 @@ async def test_artifact_tool_executes_in_runtime_and_never_calls_local_function(
 
     assert len(output) == 1
     assert output[0].state == ToolResultState.SUCCESS
-    assert "artifact_job_001" in output[0].content[0].text
+    assert "artifact_job_001" not in output[0].content[0].text
+    assert "generated_file_001" in output[0].content[0].text
     assert [event[0] for event in client.events] == [
         "preflight",
         "tool_guard",
@@ -656,3 +657,23 @@ async def test_preflight_failure_denies_without_logging_exception_payload(caplog
     assert "secret-token" not in caplog.text
     assert "private-document-content" not in caplog.text
     assert "private-query" not in caplog.text
+
+@pytest.mark.asyncio
+async def test_pdf_confirmation_is_identical_for_preflight_guard_and_execution():
+    from bank_runtime.artifact_tools import ArtifactDeliveryIntent
+    client = _Client()
+    middleware = BankRuntimeGatewayMiddleware(client, artifact_intent=ArtifactDeliveryIntent('convert', 'pdf'))
+    engine = GatewayPermissionEngine(_DelegateEngine(PermissionBehavior.ALLOW, client.events), middleware)
+    raw = {'source_generated_file_id': 'source1', 'target_format': 'pdf'}
+    decision = await engine.check_permission(SimpleNamespace(name='artifact_convert'), raw)
+    assert decision.behavior == PermissionBehavior.ALLOW
+    async def forbidden(**kwargs):
+        pytest.fail('conversion must execute through Runtime')
+        yield
+    call = ToolCallBlock(id='c1', name='artifact_convert', input=json.dumps(raw))
+    results = [item async for item in middleware.on_acting(SimpleNamespace(), {'tool_call': call}, forbidden)]
+    assert results
+    assert client.events[0][2]['explicit_pdf_request'] is True
+    assert client.events[1][2]['explicit_pdf_request'] is True
+    assert client.events[-1][3] == client.events[0][2]
+    assert 'explicit_pdf_request' not in raw

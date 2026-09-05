@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from agentscope.tool import FunctionTool
+from .presentation import PUBLIC_RESPONSE_GUIDANCE
 
 from qwenpaw.hooks.base import LifecycleHook
 from qwenpaw.runtime.hooks import HookContext, HookResult
@@ -100,7 +101,7 @@ class BankRuntimePersonalizationHook(LifecycleHook):
         if agent is not None:
             base_prompt = str(getattr(agent, "_system_prompt", "") or "")
             agent._system_prompt = "\n\n".join(
-                section for section in (base_prompt, *sections, security) if section
+                section for section in (base_prompt, *sections, security, PUBLIC_RESPONSE_GUIDANCE) if section
             )
             from .bank_assistant import bank_assistant
             from .artifact_tools import (
@@ -280,8 +281,11 @@ def _security_boundary() -> str:
             "Gateway, MCP admission, risk controls, or audit.",
             "- When the user asks to create any supported deliverable, including "
             "DOCX, XLSX, PPTX, CSV, Markdown, TXT, HTML, PNG, JPEG, WEBP, SVG, "
-            "or an explicitly requested PDF, "
+            "or an explicitly requested PDF, and artifact_generate is available in the current tool schemas, "
             "you MUST call artifact_generate and return the Runtime-generated file.",
+            "- If an external operation is unavailable or denied, do not invent its execution or "
+            "bypass authorization. This restricts that operation only: continue helping with "
+            "model knowledge, reasoning, writing and user-provided material where appropriate.",
             "- Never create an Office deliverable as a Python, Node, shell, or macro script; "
             "do not substitute source code or Markdown instructions for the requested file.",
             "- Use artifact_revise for changes to an existing generated Office file, and "

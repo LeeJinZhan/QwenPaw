@@ -62,6 +62,11 @@ class BankRuntimeToolVisibilityHook(LifecycleHook):
             sorted(allowed_names),
         )
         filter_managed_driver_tools(agent.toolkit, allowed_names)
+        from .middleware import BankRuntimeGatewayMiddleware
+
+        for middleware in getattr(agent, "_acting_middlewares", ()):
+            if isinstance(middleware, BankRuntimeGatewayMiddleware):
+                middleware.allowed_tool_names = allowed_names
         return HookResult()
 
 

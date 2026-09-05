@@ -297,14 +297,12 @@ def test_stream_projects_incremental_thinking_and_answer_with_one_terminal(
     assert [event["event"] for event in events] == [
         "status.changed",
         "answer.thinking",
-        "answer.thinking",
         "answer.chunk",
         "answer.chunk",
         "answer.completed",
     ]
-    assert [event.get("text") for event in events[1:5]] == [
-        "思",
-        "考",
+    assert [event.get("text") for event in events[1:4]] == [
+        "思考",
         "答",
         "案",
     ]
@@ -411,10 +409,9 @@ def test_stream_keeps_reasoning_content_deltas_out_of_answer_chunks(monkeypatch)
     assert [event["event"] for event in events] == [
         "status.changed",
         "answer.thinking",
-        "answer.thinking",
         "answer.completed",
     ]
-    assert [event.get("text") for event in events[1:3]] == ["思", "考"]
+    assert [event.get("text") for event in events[1:2]] == ["思考"]
     assert not any(event["event"] == "answer.chunk" for event in events)
 
 
@@ -516,7 +513,7 @@ def test_projector_flushes_final_snapshot_and_suppresses_duplicate_terminal():
     projected += projector.finish()
 
     assert projected == [
-        {"event": "answer.chunk", "text": "最终正文"},
+        {"event": "answer.chunk", "text": "最终正文", "message_id": "answer-1"},
         {
             "event": "answer.completed",
             "status": "completed",
