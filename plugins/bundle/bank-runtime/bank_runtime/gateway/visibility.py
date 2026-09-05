@@ -7,10 +7,6 @@ from dataclasses import dataclass
 import re
 from typing import Any
 
-from qwenpaw.drivers.adapters.agentscope_tool import DriverCapabilityTool
-
-from ..artifact_tools import ARTIFACT_WORKER_TOOL_NAMES
-
 _WORKER_TOOL_NAME = re.compile(r"[A-Za-z][A-Za-z0-9_-]{0,127}")
 _SNAPSHOT_HASH = re.compile(r"sha256:[0-9a-f]{64}")
 
@@ -20,7 +16,7 @@ class RuntimeToolVisibilityProjection:
     worker_type: str
     worker_tool_names: frozenset[str]
     binding_snapshot_hash: str
-    authoritative: bool = False
+    authoritative: bool = True
 
 
 def parse_runtime_tool_visibility(
@@ -34,7 +30,7 @@ def parse_runtime_tool_visibility(
     if (
         not worker_type
         or not isinstance(names_value, list)
-        or value.get("authoritative") is not False
+        or value.get("authoritative") is not True
         or not _SNAPSHOT_HASH.fullmatch(snapshot_hash)
     ):
         return None
@@ -61,12 +57,7 @@ def filter_managed_driver_tools(toolkit: Any, allowed_names: frozenset[str]) -> 
         tools[:] = [
             tool
             for tool in tools
-            if (
-                not isinstance(tool, DriverCapabilityTool)
-                and str(getattr(tool, "name", "") or "")
-                not in ARTIFACT_WORKER_TOOL_NAMES
-            )
-            or str(getattr(tool, "name", "") or "") in allowed_names
+            if str(getattr(tool, "name", "") or "") in allowed_names
         ]
 
 

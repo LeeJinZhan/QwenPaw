@@ -4,10 +4,10 @@ from __future__ import annotations
 
 from collections import defaultdict, deque
 from collections.abc import AsyncGenerator, Callable
-from contextvars import ContextVar, Token
 from dataclasses import dataclass
 import asyncio
 import json
+import logging
 import time
 from typing import Any, Mapping
 import uuid
@@ -33,10 +33,8 @@ from ..artifact_tools import (
 from ..sandbox.executor import RuntimeSandboxExecutor, is_physical_tool
 
 _BLOCKED_NESTED_TOOLS = frozenset({"run_tool_batch"})
-_SANDBOX_BROKER_TOOLS = frozenset(
-    {"runtime_sandbox_files_search", "runtime_sandbox_files_select"}
-)
 _RUNTIME_EXECUTED_TOOLS = ARTIFACT_WORKER_TOOL_NAMES
+_logger = logging.getLogger("qwenpaw.plugins.bank_runtime.gateway.middleware")
 
 
 @dataclass
@@ -70,12 +68,6 @@ class _CapturedModelOutput:
         return generate()
 
 
-_artifact_turn_state: ContextVar[_ArtifactTurnState | None] = ContextVar(
-    "bank_runtime_artifact_turn_state",
-    default=None,
-)
-
-
 @dataclass
 class _PreparedExecution:
     tool_name: str
@@ -102,7 +94,7 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
         self._prepared: dict[tuple[str, str], deque[_PreparedExecution]] = defaultdict(
             deque
         )
-        self._prepared_broker: dict[tuple[str, str], int] = defaultdict(int)
+        self._artifact_turn_state: _ArtifactTurnState | None = None
 
     async def on_reply(
         self,
@@ -114,14 +106,13 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
             async for item in next_handler(**input_kwargs):
                 yield item
             return
-        token: Token = _artifact_turn_state.set(
-            _ArtifactTurnState(intent=self.artifact_intent),
-        )
+        previous_state = self._artifact_turn_state
+        self._artifact_turn_state = _ArtifactTurnState(intent=self.artifact_intent)
         try:
             async for item in next_handler(**input_kwargs):
                 yield item
         finally:
-            _artifact_turn_state.reset(token)
+            self._artifact_turn_state = previous_state
 
     async def on_model_call(
         self,
@@ -130,7 +121,7 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
         next_handler: Callable[..., Any],
     ) -> Any:
         del agent
-        state = _artifact_turn_state.get()
+        state = self._artifact_turn_state
         if state is None or state.invoked:
             return await next_handler(**input_kwargs)
         # AgentScope retries failed model middleware calls. Once this boundary
@@ -208,30 +199,6 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
         prepared.claimed = True
         return prepared
 
-    def prepare_broker(
-        self,
-        tool_name: str,
-        tool_input: Mapping[str, Any],
-    ) -> None:
-        key = (str(tool_name), canonical_payload_hash(tool_input))
-        self._prepared_broker[key] += 1
-
-    def claim_broker(
-        self,
-        tool_name: str,
-        tool_input: Mapping[str, Any],
-    ) -> None:
-        key = (str(tool_name), canonical_payload_hash(tool_input))
-        remaining = self._prepared_broker.get(key, 0)
-        if remaining < 1:
-            raise GatewayError(
-                "Sandbox broker execution has no trusted permission claim"
-            )
-        if remaining == 1:
-            self._prepared_broker.pop(key, None)
-        else:
-            self._prepared_broker[key] = remaining - 1
-
     async def on_acting(
         self,
         agent: Any,
@@ -251,11 +218,6 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
             raise GatewayError("Tool input is not valid JSON") from exc
         if not isinstance(tool_input, dict):
             raise GatewayError("Tool input must be an object")
-        if tool_name in _SANDBOX_BROKER_TOOLS:
-            self.claim_broker(tool_name, tool_input)
-            async for item in next_handler():
-                yield item
-            return
         prepared = self.claim(tool_name, tool_input)
         try:
             await self.client.report_guard(prepared.preflight, "allow")
@@ -363,19 +325,9 @@ class GatewayPermissionEngine:
         self.delegate = delegate
         self.middleware = middleware
         self.context = getattr(delegate, "context", None)
-        self._trusted_sandbox_broker_tools: dict[int, tuple[Any, Any]] = {}
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self.delegate, name)
-
-    def trust_sandbox_broker_tools(self, tools: list[Any]) -> None:
-        for tool in tools:
-            if str(getattr(tool, "name", "") or "") not in _SANDBOX_BROKER_TOOLS:
-                raise GatewayError("Unexpected sandbox broker tool registration")
-            self._trusted_sandbox_broker_tools[id(tool)] = (
-                tool,
-                getattr(tool, "_func", None),
-            )
 
     async def check_permission(
         self,
@@ -385,21 +337,6 @@ class GatewayPermissionEngine:
         if self.middleware.configuration_error or self.middleware.client is None:
             return _deny("Runtime Tool Gateway is unavailable")
         tool_name = str(getattr(tool, "name", "") or "")
-        trusted = self._trusted_sandbox_broker_tools.get(id(tool))
-        is_trusted_broker = bool(
-            tool_name in _SANDBOX_BROKER_TOOLS
-            and trusted is not None
-            and trusted[0] is tool
-            and trusted[1] is getattr(tool, "_func", None)
-        )
-        if is_trusted_broker:
-            decision = await self.delegate.check_permission(tool, tool_input)
-            if decision.behavior == PermissionBehavior.ALLOW:
-                self.middleware.prepare_broker(tool_name, tool_input)
-                return decision
-            if decision.behavior == PermissionBehavior.DENY:
-                return decision
-            return _deny("Interactive tool approval is unavailable on bank-runtime")
         call_id = f"call_{uuid.uuid4().hex}"
         try:
             preflight = await self.middleware.client.preflight(
@@ -407,7 +344,13 @@ class GatewayPermissionEngine:
                 tool_input,
                 call_id=call_id,
             )
-        except Exception:
+        except Exception as exc:
+            _logger.warning(
+                "Runtime tool preflight failed: task_id=%s tool=%s error_type=%s",
+                getattr(getattr(self.middleware.client, "config", None), "task_id", ""),
+                tool_name,
+                type(exc).__name__,
+            )
             return _deny("Runtime Tool Gateway preflight denied this call")
 
         decision = await self.delegate.check_permission(tool, tool_input)

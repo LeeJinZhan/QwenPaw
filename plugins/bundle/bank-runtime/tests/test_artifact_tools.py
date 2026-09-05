@@ -7,6 +7,8 @@ import sys
 import pytest
 from agentscope.message import TextBlock, ThinkingBlock, ToolCallBlock
 from agentscope.model import ChatResponse
+from agentscope.tool import FunctionTool
+from qwenpaw.runtime.heartbeat import _iter_with_heartbeat
 
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
@@ -72,6 +74,32 @@ def test_artifact_tool_signatures_expose_no_execution_authority() -> None:
         template_fill_docx,
     ):
         assert not (forbidden & set(inspect.signature(tool).parameters))
+
+
+def test_artifact_generate_schema_explains_canonical_artifact_content() -> None:
+    description = FunctionTool(artifact_generate).input_schema["properties"]["content"][
+        "description"
+    ]
+
+    assert '"sections"' in description
+    assert '"paragraphs"' in description
+    assert '"item"' in description
+    assert "do not JSON-encode" in description
+    assert '"slides"' in description
+    assert '"speaker_notes"' in description
+    assert '"sheets"' in description
+    assert '"headers"' in description
+    assert '"kind": "chart"' in description
+    assert "PNG/JPEG/WEBP/SVG" in description
+    assert "style_profile: executive" in description
+    assert "Never add" in description
+    assert "bar_colors" in description
+
+    artifact_type = FunctionTool(artifact_generate).input_schema["properties"][
+        "artifact_type"
+    ]["description"]
+    assert "png" in artifact_type
+    assert "svg" in artifact_type
 
 
 def test_artifact_convert_requires_explicit_pdf_request_marker() -> None:
@@ -250,6 +278,31 @@ async def test_explicit_artifact_delivery_supports_streaming_model_output() -> N
 
 
 @pytest.mark.asyncio
+async def test_artifact_reply_state_survives_heartbeat_task_boundaries() -> None:
+    middleware = BankRuntimeGatewayMiddleware(
+        None,
+        artifact_intent=ArtifactDeliveryIntent(
+            operation="generate",
+            target_format="docx",
+        ),
+    )
+
+    async def reply(**_kwargs):
+        yield "first"
+        yield "second"
+
+    output = [
+        item
+        async for item in _iter_with_heartbeat(
+            middleware.on_reply(object(), {"inputs": None}, reply).__aiter__(),
+            1.0,
+        )
+    ]
+
+    assert output == ["first", "second"]
+
+
+@pytest.mark.asyncio
 async def test_second_zero_artifact_call_returns_stable_error() -> None:
     middleware = BankRuntimeGatewayMiddleware(
         None,
@@ -301,4 +354,5 @@ def test_request_security_overlay_makes_office_tool_choice_mandatory() -> None:
     )
 
     assert "MUST call artifact_generate" in personalization
+    assert "PNG, JPEG, WEBP, SVG" in personalization
     assert "Never create an Office deliverable as a Python, Node, shell, or macro script" in personalization

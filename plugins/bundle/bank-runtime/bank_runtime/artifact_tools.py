@@ -121,12 +121,37 @@ async def artifact_generate(
     output_name: str = "",
     explicit_pdf_request: bool = False,
 ) -> str:
-    """Generate one controlled DOCX, XLSX, PPTX, or explicitly requested PDF.
+    """Generate one controlled office, text, or fixed-graphic artifact.
 
     Args:
-        artifact_type: One of ``docx``, ``xlsx``, ``pptx`` or ``pdf``.
+        artifact_type: One of ``docx``, ``xlsx``, ``pptx``, ``csv``,
+            ``markdown``, ``txt``, ``html``, ``png``, ``jpeg``, ``webp``,
+            ``svg`` or explicitly requested ``pdf``.
         title: User-visible artifact title.
-        content: Structured document, workbook, or presentation content.
+        content: Complete artifact body. For DOCX, use a non-empty plain string
+            or exactly ``{"paragraphs": ["正文"]}`` / ``{"sections":
+            [{"heading": "标题", "paragraphs": ["正文"]}]}``. Arrays must be
+            JSON arrays; never wrap them in an ``{"item": ...}`` object. Pass
+            structured content as an object; do not JSON-encode it as a string.
+            For PPTX, use ``{"slides": [{"layout": "title", "title":
+            "封面", "subtitle": "副标题"}, {"title": "内容页",
+            "bullets": ["要点"], "speaker_notes": "讲稿"}]}``.
+            For XLSX, use ``{"sheets": [{"name": "数据", "rows":
+            [["表头1", "表头2"], ["内容", 1]]}]}``; ``{"headers":
+            ["表头1", "表头2"]}`` may be supplied separately inside a sheet
+            and is prepended to ``rows``.
+            For PNG/JPEG/WEBP/SVG, provide a deterministic fixed graphic such
+            as ``{"kind": "chart", "chart_type": "bar", "title": "趋势",
+            "categories": ["一月"], "series": [{"name": "数量", "values":
+            [1]}], "style_profile": "executive"}``. This schema is strict:
+            a chart may contain only ``kind``, ``chart_type``, ``title``,
+            ``categories``, ``series`` and optional ``style_profile``. Use
+            ``style_profile: executive`` for a formal/business look. Never add
+            guessed fields such as ``x_axis``, ``y_axis``, ``bar_colors``,
+            ``style``, ``width``, ``height``, ``show_values`` or
+            ``show_legend``. Fixed graphics also support registered ``table``,
+            ``flowchart`` and ``cover`` structures; they are not free-form
+            image-generation prompts.
         instructions: Optional bounded formatting or revision guidance.
         source_refs: Runtime-authorized source identifiers only.
         output_name: Optional safe output filename.

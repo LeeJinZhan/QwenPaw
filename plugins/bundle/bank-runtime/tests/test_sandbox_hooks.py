@@ -85,11 +85,22 @@ def _ctx(tmp_path):
                 "content_hash": "sha256:" + hashlib.sha256(b"x").hexdigest(),
             }
         ],
-        runtime_tool_gateway={"base_url": "http://127.0.0.1:8765"},
+        runtime_tool_gateway={
+            "base_url": "http://127.0.0.1:8765",
+            "capability_snapshot_hash": "a" * 64,
+        },
+        runtime_tool_visibility={
+            "worker_type": "qwenpaw",
+            "worker_tool_names": [
+                "runtime_sandbox_files_search",
+                "runtime_sandbox_files_select",
+            ],
+            "binding_snapshot_hash": f"sha256:{'a' * 64}",
+            "authoritative": True,
+        },
     )
     group = SimpleNamespace(tools=[])
-    engine = SimpleNamespace(trusted=[])
-    engine.trust_sandbox_broker_tools = engine.trusted.extend
+    engine = SimpleNamespace()
     agent = SimpleNamespace(
         toolkit=SimpleNamespace(tool_groups=[group]),
         _system_prompt="base",
@@ -125,7 +136,6 @@ async def test_current_attachments_are_prepared_before_execute_and_cleaned(
     await BankRuntimeSandboxInstallHook().run(ctx)
     names = [tool.name for tool in ctx.agent.toolkit.tool_groups[0].tools]
     assert names == ["runtime_sandbox_files_search", "runtime_sandbox_files_select"]
-    assert ctx.agent._engine.trusted == ctx.agent.toolkit.tool_groups[0].tools
     assert "BANK RUNTIME FILE BOUNDARY" in ctx.agent._system_prompt
 
     await BankRuntimeAttachmentPrepareHook().run(ctx)
@@ -144,15 +154,29 @@ async def test_current_attachments_are_prepared_before_execute_and_cleaned(
 
 
 @pytest.mark.asyncio
-async def test_sandbox_install_failure_leaves_no_request_state_or_tools(
+async def test_sandbox_install_does_not_expose_unbound_file_broker_tools(
     tmp_path,
     monkeypatch,
 ) -> None:
     monkeypatch.setenv("QWENPAW_SERVICE_TOKEN", "service-secret")
     ctx = _ctx(tmp_path)
-    ctx.agent._engine = SimpleNamespace()
+    ctx.request.runtime_tool_visibility["worker_tool_names"] = []
 
-    with pytest.raises(RuntimeError, match="Gateway boundary"):
+    await BankRuntimeSandboxInstallHook().run(ctx)
+
+    assert ctx.agent.toolkit.tool_groups[0].tools == []
+
+
+@pytest.mark.asyncio
+async def test_sandbox_install_missing_gateway_leaves_no_request_state_or_tools(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("QWENPAW_SERVICE_TOKEN", "service-secret")
+    ctx = _ctx(tmp_path)
+    ctx.request.runtime_tool_gateway = None
+
+    with pytest.raises(RuntimeError, match="gateway is unavailable"):
         await BankRuntimeSandboxInstallHook().run(ctx)
 
     assert ctx.extras == {}

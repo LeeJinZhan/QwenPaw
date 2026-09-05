@@ -176,7 +176,7 @@ class TestBuildAgentRequestFromNative:
                 "worker_type": "qwenpaw",
                 "worker_tool_names": ["MinerU__parse_documents"],
                 "binding_snapshot_hash": f"sha256:{'a' * 64}",
-                "authoritative": False,
+                "authoritative": True,
             },
             session_mode="managed",
             session_contract_version="2.0",
@@ -199,7 +199,7 @@ class TestBuildAgentRequestFromNative:
             "worker_type": "qwenpaw",
             "worker_tool_names": ["MinerU__parse_documents"],
             "binding_snapshot_hash": f"sha256:{'a' * 64}",
-            "authoritative": False,
+            "authoritative": True,
         }
         assert rebuilt.session_mode == "managed"
         assert rebuilt.session_contract_version == "2.0"

@@ -66,13 +66,13 @@ def _context(visibility):
     return SimpleNamespace(request=request, agent=agent), ordinary
 
 
-def test_visibility_parser_accepts_only_non_authoritative_runtime_projection() -> None:
+def test_visibility_parser_accepts_only_authoritative_runtime_projection() -> None:
     parsed = parse_runtime_tool_visibility(
         {
             "worker_type": "qwenpaw",
             "worker_tool_names": ["artifact_generate", "MinerU__parse_documents"],
             "binding_snapshot_hash": f"sha256:{'a' * 64}",
-            "authoritative": False,
+            "authoritative": True,
         }
     )
 
@@ -80,12 +80,12 @@ def test_visibility_parser_accepts_only_non_authoritative_runtime_projection() -
     assert parsed.worker_tool_names == frozenset(
         {"artifact_generate", "MinerU__parse_documents"}
     )
-    assert parse_runtime_tool_visibility({"authoritative": True}) is None
+    assert parse_runtime_tool_visibility({"authoritative": False}) is None
     assert parse_runtime_tool_visibility(None) is None
 
 
 @pytest.mark.asyncio
-async def test_visibility_hook_keeps_only_snapshot_driver_tools_and_trusted_tools() -> (
+async def test_visibility_hook_keeps_only_authorized_snapshot_tools() -> (
     None
 ):
     ctx, ordinary = _context(
@@ -93,15 +93,13 @@ async def test_visibility_hook_keeps_only_snapshot_driver_tools_and_trusted_tool
             "worker_type": "qwenpaw",
             "worker_tool_names": ["MinerU__parse_documents"],
             "binding_snapshot_hash": f"sha256:{'b' * 64}",
-            "authoritative": False,
+            "authoritative": True,
         }
     )
 
     await BankRuntimeToolVisibilityHook().run(ctx)
 
-    assert ctx.agent.toolkit.tool_groups[0].tools[0] is ordinary
     assert [tool.name for tool in ctx.agent.toolkit.tool_groups[0].tools] == [
-        "runtime_sandbox_files_search",
         "MinerU__parse_documents",
     ]
 
@@ -116,13 +114,13 @@ async def test_visibility_hook_keeps_only_snapshot_driver_tools_and_trusted_tool
             "worker_type": "qwenpaw",
             "worker_tool_names": ["MinerU__parse_documents"],
             "binding_snapshot_hash": "invalid",
-            "authoritative": False,
+            "authoritative": True,
         },
         {
             "worker_type": "qwenpaw",
             "worker_tool_names": ["MinerU__parse_documents"],
             "binding_snapshot_hash": f"sha256:{'c' * 64}",
-            "authoritative": False,
+            "authoritative": True,
             "gateway_snapshot_hash": "mismatch",
         },
     ],
@@ -144,7 +142,7 @@ async def test_visibility_hook_fails_closed_for_missing_or_invalid_projection(
 
     await BankRuntimeToolVisibilityHook().run(ctx)
 
-    assert ctx.agent.toolkit.tool_groups[0].tools == [ordinary]
+    assert ctx.agent.toolkit.tool_groups[0].tools == []
 
 
 @pytest.mark.asyncio

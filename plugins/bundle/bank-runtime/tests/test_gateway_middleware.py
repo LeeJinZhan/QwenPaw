@@ -320,7 +320,7 @@ async def test_nonzero_physical_shell_result_is_reported_as_failed() -> None:
 
 
 @pytest.mark.asyncio
-async def test_only_registered_sandbox_broker_tool_can_bypass_generic_gateway() -> None:
+async def test_sandbox_broker_tool_uses_standard_gateway_permit_chain() -> None:
     client = _Client()
     middleware = BankRuntimeGatewayMiddleware(client)
     engine = GatewayPermissionEngine(
@@ -331,7 +331,6 @@ async def test_only_registered_sandbox_broker_tool_can_bypass_generic_gateway() 
         name="runtime_sandbox_files_search",
         is_external_tool=False,
     )
-    engine.trust_sandbox_broker_tools([trusted])
 
     decision = await engine.check_permission(trusted, {"query": "制度"})
     assert decision.behavior == PermissionBehavior.ALLOW
@@ -357,19 +356,17 @@ async def test_only_registered_sandbox_broker_tool_can_bypass_generic_gateway() 
             execute,
         )
     ]
-    assert [event[0] for event in client.events] == ["tool_guard", "execute"]
-
-    spoofed = SimpleNamespace(
-        name="runtime_sandbox_files_search",
-        is_external_tool=False,
-    )
-    decision = await engine.check_permission(spoofed, {"query": "伪装"})
-    assert decision.behavior == PermissionBehavior.ALLOW
-    assert [event[0] for event in client.events][-2:] == ["preflight", "tool_guard"]
+    assert [event[0] for event in client.events] == [
+        "preflight",
+        "tool_guard",
+        "guard",
+        "execute",
+        "result",
+    ]
 
 
 @pytest.mark.asyncio
-async def test_sandbox_broker_execution_requires_exact_permission_claim() -> None:
+async def test_sandbox_broker_execution_requires_gateway_permit_claim() -> None:
     middleware = BankRuntimeGatewayMiddleware(_Client())
 
     async def forbidden(**_kwargs):
@@ -633,3 +630,29 @@ def _blocked_tool_names() -> set[str]:
         if tool.name != "run_tool_batch" and not tool.is_external_tool
     }
     return original - managed
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("with_config", [False, True])
+async def test_preflight_failure_denies_without_logging_exception_payload(caplog, with_config):
+    class FailingClient(_Client):
+        async def preflight(self, *args, **kwargs):
+            raise GatewayError("secret-token private-document-content")
+
+    client = FailingClient()
+    if with_config:
+        client.config = SimpleNamespace(task_id="task-preflight-failed")
+    middleware = BankRuntimeGatewayMiddleware(client)
+    engine = GatewayPermissionEngine(
+        _DelegateEngine(PermissionBehavior.ALLOW, client.events), middleware,
+    )
+    tool = SimpleNamespace(name="runtime_sandbox_files_search", is_external_tool=False)
+
+    decision = await engine.check_permission(tool, {"query": "private-query"})
+
+    assert decision.behavior == PermissionBehavior.DENY
+    assert client.events == []
+    assert "GatewayError" in caplog.text
+    assert "secret-token" not in caplog.text
+    assert "private-document-content" not in caplog.text
+    assert "private-query" not in caplog.text

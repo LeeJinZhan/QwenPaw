@@ -442,7 +442,7 @@ async def test_final_model_tool_schema_contains_only_authorized_artifact_actions
             "worker_type": "qwenpaw",
             "worker_tool_names": list(ARTIFACT_RUNTIME_ACTION_BY_TOOL),
             "binding_snapshot_hash": snapshot,
-            "authoritative": False,
+            "authoritative": True,
         },
         runtime_tool_gateway={
             "capability_snapshot_hash": snapshot.removeprefix("sha256:")
