@@ -1,10 +1,21 @@
 {
   "schema_version": "bank-runtime-production-policy/v1",
   "approved_registry": {
-    "required_plugins": ["bank-runtime"],
-    "required_plugin_channels": ["bank-runtime"],
-    "agents": ["bank-assistant"],
-    "required_registered_modes": ["default", "coding", "goal", "mission"],
+    "required_plugins": [
+      "bank-runtime"
+    ],
+    "required_plugin_channels": [
+      "bank-runtime"
+    ],
+    "agents": [
+      "bank-assistant"
+    ],
+    "required_registered_modes": [
+      "default",
+      "coding",
+      "goal",
+      "mission"
+    ],
     "required_registered_tools": [
       "activate_personal_skill",
       "append_file",
@@ -50,10 +61,140 @@
       "bank_assistant",
       "template_fill_docx"
     ],
-    "enabled_channels": ["bank-runtime"]
+    "enabled_channels": [
+      "bank-runtime"
+    ]
   },
   "http": {
-    "allowed_prefixes": ["/api/bank-runtime/"]
+    "allowed_prefixes": [
+      "/api/bank-runtime/"
+    ],
+    "allowed_routes": {
+      "/": [
+        "GET"
+      ],
+      "/assets": [],
+      "/console": [
+        "GET"
+      ],
+      "/console/": [
+        "GET"
+      ],
+      "/console/{full_path:path}": [
+        "GET"
+      ],
+      "/{full_path:path}": [
+        "GET"
+      ],
+      "/api/version": [
+        "GET"
+      ],
+      "/api/auth/login": [
+        "POST"
+      ],
+      "/api/auth/status": [
+        "GET"
+      ],
+      "/api/auth/verify": [
+        "GET"
+      ],
+      "/api/auth/update-profile": [
+        "POST"
+      ],
+      "/api/auth/revoke-token": [
+        "POST"
+      ],
+      "/api/auth/revoke-all-tokens": [
+        "POST"
+      ],
+      "/api/agents": [
+        "GET"
+      ],
+      "/api/agents/{agentId}": [
+        "GET"
+      ],
+      "/api/settings/language": [
+        "GET",
+        "PUT"
+      ],
+      "/api/models": [
+        "GET"
+      ],
+      "/api/models/{provider_id}/config": [
+        "PUT"
+      ],
+      "/api/models/custom-providers": [
+        "POST"
+      ],
+      "/api/models/custom-providers/{provider_id}": [
+        "DELETE"
+      ],
+      "/api/models/{provider_id}/test": [
+        "POST"
+      ],
+      "/api/models/{provider_id}/discover": [
+        "POST"
+      ],
+      "/api/models/{provider_id}/models/test": [
+        "POST"
+      ],
+      "/api/models/{provider_id}/models": [
+        "POST"
+      ],
+      "/api/models/{provider_id}/models/{model_id:path}": [
+        "DELETE"
+      ],
+      "/api/models/{provider_id}/models/{model_id:path}/config": [
+        "PUT"
+      ],
+      "/api/models/{provider_id}/models/{model_id:path}/probe-multimodal": [
+        "POST"
+      ],
+      "/api/models/active": [
+        "GET",
+        "PUT"
+      ],
+      "/api/agents/{agentId}/models": [
+        "GET"
+      ],
+      "/api/agents/{agentId}/models/{provider_id}/config": [
+        "PUT"
+      ],
+      "/api/agents/{agentId}/models/custom-providers": [
+        "POST"
+      ],
+      "/api/agents/{agentId}/models/custom-providers/{provider_id}": [
+        "DELETE"
+      ],
+      "/api/agents/{agentId}/models/{provider_id}/test": [
+        "POST"
+      ],
+      "/api/agents/{agentId}/models/{provider_id}/discover": [
+        "POST"
+      ],
+      "/api/agents/{agentId}/models/{provider_id}/models/test": [
+        "POST"
+      ],
+      "/api/agents/{agentId}/models/{provider_id}/models": [
+        "POST"
+      ],
+      "/api/agents/{agentId}/models/{provider_id}/models/{model_id:path}": [
+        "DELETE"
+      ],
+      "/api/agents/{agentId}/models/{provider_id}/models/{model_id:path}/config": [
+        "PUT"
+      ],
+      "/api/agents/{agentId}/models/{provider_id}/models/{model_id:path}/probe-multimodal": [
+        "POST"
+      ],
+      "/api/agents/{agentId}/models/active": [
+        "GET",
+        "PUT"
+      ],
+      "/api/settings/upload-limit": [
+        "GET"
+      ]
+    }
   },
   "denied": {
     "tools": [
@@ -80,9 +221,19 @@
     ]
   },
   "delivery_authority": {
-    "network_egress": ["runtime", "tool-gateway", "sandbox", "oss"],
+    "network_egress": [
+      "runtime",
+      "tool-gateway",
+      "sandbox",
+      "oss"
+    ],
     "mcp_clients": "runtime_tool_gateway_governed",
-    "host_mounts": ["working", "secret", "backup", "task-files"],
+    "host_mounts": [
+      "working",
+      "secret",
+      "backup",
+      "task-files"
+    ],
     "host_system_permissions": [],
     "optional_pawapps": []
   }

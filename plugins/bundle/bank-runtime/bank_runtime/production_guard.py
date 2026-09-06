@@ -33,6 +33,7 @@ class ProductionPolicy:
     allowed_reachable_tools: frozenset[str]
     allowed_enabled_channels: frozenset[str]
     allowed_route_prefixes: tuple[str, ...]
+    allowed_routes: dict[str, frozenset[str]]
     forbidden_tools: frozenset[str]
     forbidden_features: frozenset[str]
     forbidden_harnesses: frozenset[str]
@@ -142,6 +143,10 @@ def load_production_policy(path: Path | None = None) -> ProductionPolicy:
         allowed_reachable_tools=_strings(approved["reachable_tools"]),
         allowed_enabled_channels=_strings(approved["enabled_channels"]),
         allowed_route_prefixes=tuple(payload["http"]["allowed_prefixes"]),
+        allowed_routes={
+            path: _strings(methods)
+            for path, methods in payload["http"].get("allowed_routes", {}).items()
+        },
         forbidden_tools=_strings(payload["denied"]["tools"]),
         forbidden_features=_strings(payload["denied"]["features"]),
         forbidden_harnesses=_strings(payload["denied"]["harnesses"]),
@@ -149,7 +154,7 @@ def load_production_policy(path: Path | None = None) -> ProductionPolicy:
 
 
 def _route_is_allowed(path: str, policy: ProductionPolicy) -> bool:
-    return any(
+    return path in policy.allowed_routes or any(
         path == prefix.rstrip("/") or path.startswith(prefix)
         for prefix in policy.allowed_route_prefixes
     )
@@ -210,17 +215,18 @@ def apply_production_route_allowlist(
     routes = getattr(getattr(app, "router", None), "routes", None)
     if routes is None:
         raise RuntimeError("production_route_registry_unavailable")
-    explicit_route_ids = {id(route) for route in explicit_allowed_routes}
-    kept = []
-    removed = 0
-    for route in routes:
-        path = str(getattr(route, "path", ""))
-        if id(route) in explicit_route_ids or (
-            path and _route_is_allowed(path, policy)
-        ):
-            kept.append(route)
-        else:
-            removed += 1
+    from .production_routes import prune_routes
+
+    def allowed(path, methods):
+        exact_allowed = policy.allowed_routes.get(path)
+        if exact_allowed is not None:
+            return methods <= exact_allowed
+        return _route_is_allowed(path, policy)
+
+    kept, removed = prune_routes(
+        routes, allowed=allowed,
+        explicit_ids={id(route) for route in explicit_allowed_routes},
+    )
     routes[:] = kept
     if hasattr(app, "openapi_schema"):
         app.openapi_schema = None
@@ -364,6 +370,8 @@ def collect_registry_snapshot(registry: Any) -> ProductionSnapshot:
             enabled_harnesses=enabled_harnesses,
             active_features=active_features,
         )
+    from .production_routes import route_paths
+
     app = getattr(registry, "_plugin_http_app", None)
     routes = getattr(getattr(app, "router", None), "routes", ())
     return ProductionSnapshot(
@@ -377,11 +385,7 @@ def collect_registry_snapshot(registry: Any) -> ProductionSnapshot:
         enabled_mcp_clients=enabled_mcp_clients,
         enabled_harnesses=enabled_harnesses,
         active_features=active_features,
-        route_paths={
-            str(getattr(route, "path", ""))
-            for route in routes
-            if getattr(route, "path", "")
-        },
+        route_paths=route_paths(routes),
     )
 
 
@@ -400,6 +404,9 @@ def execute_production_guard(
             registry = PluginRegistry()
         policy = load_production_policy()
         app = getattr(registry, "_plugin_http_app", None)
+        from .management_auth import install_native_auth_bridge
+
+        install_native_auth_bridge(app)
         get_http_registrations = getattr(
             registry,
             "get_http_router_registrations",

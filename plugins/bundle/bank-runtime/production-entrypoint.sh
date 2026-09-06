@@ -42,6 +42,16 @@ if [ ! -f "$root_config" ] || [ ! -f "$agent_config" ]; then
     exit 1
 fi
 
+case "${QWENPAW_AUTH_ENABLED:-}" in
+    1|true|TRUE|yes|YES) ;;
+    *) echo "native_auth_required" >&2; exit 1;;
+esac
+if [ -n "${QWENPAW_AUTH_PASSWORD:-}" ]; then
+    echo "native_auth_password_environment_forbidden" >&2
+    exit 1
+fi
+python -m bank_runtime.admin_bootstrap verify --secret-dir "$secret_dir"
+
 python -m bank_runtime.delivery_probe \
     --root-config "$root_config" \
     --agent-config "$agent_config"

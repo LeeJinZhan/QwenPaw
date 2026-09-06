@@ -1,15 +1,29 @@
 ARG PYTHON_IMAGE=python:3.11-slim-bookworm@sha256:2e32f7d302adc1c37428355c1e646897c0c53f4fd60b6a551245fb90ee129f91
 
+ARG NODE_IMAGE=node:24.15.0-bookworm-slim
+
+FROM ${NODE_IMAGE} AS console-builder
+WORKDIR /build/console
+COPY console/package.json console/package-lock.json ./
+RUN npm ci --include=dev
+COPY console ./
+RUN npm run build
+
 FROM ${PYTHON_IMAGE}
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 \
     QWENPAW_PORT=8088 \
+    QWENPAW_CONSOLE_STATIC_DIR=/opt/qwenpaw-console \
     QWENPAW_WORKING_DIR=/app/working \
     QWENPAW_BACKUP_DIR=/app/working.backups \
     QWENPAW_ENABLED_CHANNELS=bank-runtime \
-    BANK_RUNTIME_PRODUCTION_GUARD=1
+    BANK_RUNTIME_PRODUCTION_GUARD=1 \
+    QWENPAW_AUTH_ENABLED=true \
+    QWENPAW_DISABLE_KEYRING=true \
+    QWENPAW_RUNNING_IN_CONTAINER=true \
+    HOME=/tmp
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends build-essential ca-certificates \
@@ -31,6 +45,7 @@ RUN python -m pip install --no-cache-dir --no-deps --no-build-isolation . \
 RUN python -m pip uninstall -y pip wheel setuptools \
     && python -c 'import importlib.util; assert importlib.util.find_spec("pip") is None; assert importlib.util.find_spec("setuptools") is None; assert importlib.util.find_spec("pkg_resources") is None; from qwenpaw.app.channels.registry import get_channel_registry; assert "console" in get_channel_registry()'
 
+COPY --from=console-builder /build/console/dist /opt/qwenpaw-console
 COPY plugins/bundle/bank-runtime /opt/bank-runtime-plugin
 COPY plugins/bundle/bank-mineru-mcp /opt/bank-mineru-mcp-plugin
 RUN useradd --create-home --uid 10001 --shell /usr/sbin/nologin qwenpaw \

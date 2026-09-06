@@ -691,8 +691,26 @@ class AuthMiddleware(BaseHTTPMiddleware):
     """Middleware that checks Bearer token on protected routes."""
 
     async def dispatch(self, request: Request, call_next):
+        strict = getattr(request.app.state, "require_registered_auth", False) is True
+        if strict and (not is_auth_enabled() or not has_registered_users()):
+            return Response(
+                content='{"detail":"Authentication is not initialized"}',
+                status_code=503,
+                media_type="application/json",
+            )
         if self._should_skip_auth(request):
             return await call_next(request)
+
+        # A trusted application may authenticate a narrowly scoped service
+        # ingress independently of the native administrator's session token.
+        verifier = getattr(request.app.state, "service_authenticator", None)
+        if callable(verifier):
+            try:
+                verified = verifier(request) is True
+            except Exception:  # A verifier failure never becomes an auth bypass.
+                verified = False
+            if verified:
+                return await call_next(request)
 
         token = self._extract_token(request)
         if not token:
@@ -721,6 +739,13 @@ class AuthMiddleware(BaseHTTPMiddleware):
             return True
 
         path = request.url.path
+        if getattr(request.app.state, "require_registered_auth", False) is True:
+            public_routes = getattr(request.app.state, "public_auth_routes", {})
+            return (
+                request.method == "OPTIONS"
+                or request.method in public_routes.get(path, ())
+                or (request.method in {"GET", "HEAD"} and not path.startswith("/api/"))
+            )
         if (
             request.method == "OPTIONS"
             or path in _PUBLIC_PATHS

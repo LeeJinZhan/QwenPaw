@@ -32,8 +32,8 @@ pytest.ini
 .stylelintrc
 
 # Frontend: exclude build artifacts and local console remnants. The regular
-# deploy image builds Console in its own stage; the production bank image does
-# not expose or ship Console routes.
+# deploy image and bank production image build Console in a separate stage;
+# locally built assets must never enter the delivery image.
 website
 !website/
 !website/public/

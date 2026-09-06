@@ -424,9 +424,15 @@ def test_production_image_omits_browser_desktop_and_market_plugin_payloads() -> 
     assert "plugins/bundle/bank-runtime" in dockerfile
     assert "production-python311-linux-amd64.lock" in dockerfile
     assert "/app/task-files" in dockerfile
-    assert "node:" not in dockerfile
-    assert "npm " not in dockerfile
-    assert "console-builder" not in dockerfile
+    # Build the native management UI, while the final Python stage contains
+    # only static assets and does not ship Node/npm or a desktop runtime.
+    assert "as console-builder" in dockerfile
+    assert "npm ci --include=dev" in dockerfile
+    assert "copy --from=console-builder /build/console/dist /opt/qwenpaw-console" in dockerfile
+    assert "qwenpaw_console_static_dir=/opt/qwenpaw-console" in dockerfile
+    final_stage = dockerfile.split("from ${python_image}", 1)[1]
+    assert "npm " not in final_stage
+    assert "node:" not in final_stage
     assert "qwenpaw_secret_dir" not in dockerfile
     assert "src/qwenpaw/console" in DOCKERIGNORE_PATH.read_text(encoding="utf-8")
 
