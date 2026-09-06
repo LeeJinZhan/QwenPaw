@@ -110,3 +110,8 @@ async def test_physical_executor_uses_fixed_endpoint_and_exact_arguments(
     assert kwargs["json"]["arguments"] == {"command": "pwd"}
     assert client_kwargs["follow_redirects"] is False
     assert client_kwargs["trust_env"] is False
+
+
+def test_current_browser_is_a_physical_tool():
+    assert executor_module.is_physical_tool("browser")
+    assert executor_module._operation_for("browser") == "browser.execute"

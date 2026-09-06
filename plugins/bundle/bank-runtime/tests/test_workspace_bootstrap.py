@@ -164,3 +164,34 @@ def test_missing_native_admin_and_unrestricted_proxy_rejected(installation):
     with pytest.raises(ValueError):
         initialize(installation)
     assert not work.exists()
+
+
+def test_native_import_lock_does_not_block_empty_workspace(installation):
+    work, _ = installation
+    work.mkdir(mode=0o700)
+    lock = work / ".qwenpaw_restore.lock"
+    lock.touch()
+    before = lock.stat().st_ino
+    assert initialize(installation) == "created"
+    assert lock.stat().st_ino == before
+
+
+@pytest.mark.parametrize("kind", ["content", "directory", "symlink", "hardlink"])
+def test_native_lock_exception_does_not_accept_other_state(installation, kind):
+    work, _ = installation
+    work.mkdir(mode=0o700)
+    lock = work / ".qwenpaw_restore.lock"
+    if kind == "content":
+        lock.write_text("existing state")
+    elif kind == "directory":
+        lock.mkdir()
+    else:
+        target = work.parent / "unrelated"
+        target.touch()
+        if kind == "symlink":
+            lock.symlink_to(target)
+        else:
+            lock.hardlink_to(target)
+    with pytest.raises(ValueError, match="existing_workspace_requires_review"):
+        initialize(installation)
+    assert not (work / "config.json").exists()

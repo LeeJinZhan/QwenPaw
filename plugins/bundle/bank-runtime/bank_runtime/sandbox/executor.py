@@ -99,6 +99,7 @@ def _operation_for(tool_name: str) -> str:
         "glob_search": "file.glob",
         "grep_search": "file.grep",
         "browser_use": "browser.execute",
+        "browser": "browser.execute",
     }.get(str(tool_name), "")
 
 

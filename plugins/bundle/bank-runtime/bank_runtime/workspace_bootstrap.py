@@ -6,6 +6,8 @@ import argparse
 import hashlib
 import ipaddress
 import json
+import os
+import stat
 from pathlib import Path
 import sys
 
@@ -88,7 +90,16 @@ def initialize_workspace(
                 _mineru_token(secret_dir, mineru_token)
                 return "already_exists"
         else:
-            if any(path.name != ".admin-bootstrap.lock" for path in working.iterdir()):
+            for path in working.iterdir():
+                if path.name == ".admin-bootstrap.lock":
+                    continue
+                info = path.lstat()
+                # Native package import creates this empty process lock before
+                # bootstrap. Preserve it; it is not a prior user workspace.
+                if (path.name == ".qwenpaw_restore.lock"
+                        and stat.S_ISREG(info.st_mode) and info.st_size == 0
+                        and info.st_uid == os.geteuid() and info.st_nlink == 1):
+                    continue
                 raise ValueError("existing_workspace_requires_review")
             record = {
                 "schema": _SCHEMA,
