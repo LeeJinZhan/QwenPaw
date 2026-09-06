@@ -13,7 +13,6 @@ secret_dir="${QWENPAW_SECRET_DIR:-/app/working.secret}"
 backup_dir="${QWENPAW_BACKUP_DIR:-/app/working.backups}"
 task_file_dir="${QWENPAW_TASK_FILE_ROOT:-/app/task-files}"
 plugins_dir="${working_dir}/plugins"
-bank_plugin_dir="${plugins_dir}/bank-runtime"
 root_config="${working_dir}/config.json"
 agent_config="${QWENPAW_RUNTIME_AGENT_CONFIG:-${working_dir}/workspaces/bank-assistant/agent.json}"
 
@@ -25,17 +24,21 @@ for required_dir in "$working_dir" "$secret_dir" "$backup_dir" "$task_file_dir";
 done
 
 mkdir -p "$plugins_dir"
-if [ -e "$bank_plugin_dir" ] && [ ! -L "$bank_plugin_dir" ]; then
-    echo "bank_runtime_plugin_not_immutable" >&2
-    exit 1
-fi
-if [ ! -L "$bank_plugin_dir" ]; then
-    ln -s /opt/bank-runtime-plugin "$bank_plugin_dir"
-fi
-if [ "$(readlink "$bank_plugin_dir")" != "/opt/bank-runtime-plugin" ]; then
-    echo "bank_runtime_plugin_source_mismatch" >&2
-    exit 1
-fi
+for plugin_id in bank-runtime bank-mineru-mcp; do
+    plugin_dir="${plugins_dir}/${plugin_id}"
+    plugin_source="/opt/${plugin_id}-plugin"
+    if [ -e "$plugin_dir" ] && [ ! -L "$plugin_dir" ]; then
+        echo "bank_plugin_not_immutable" >&2
+        exit 1
+    fi
+    if [ ! -L "$plugin_dir" ]; then
+        ln -s "$plugin_source" "$plugin_dir"
+    fi
+    if [ "$(readlink "$plugin_dir")" != "$plugin_source" ]; then
+        echo "bank_plugin_source_mismatch" >&2
+        exit 1
+    fi
+done
 
 if [ ! -f "$root_config" ] || [ ! -f "$agent_config" ]; then
     echo "production_config_missing" >&2

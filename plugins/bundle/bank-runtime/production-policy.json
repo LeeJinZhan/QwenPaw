@@ -2,7 +2,8 @@
   "schema_version": "bank-runtime-production-policy/v1",
   "approved_registry": {
     "required_plugins": [
-      "bank-runtime"
+      "bank-runtime",
+      "bank-mineru-mcp"
     ],
     "required_plugin_channels": [
       "bank-runtime"

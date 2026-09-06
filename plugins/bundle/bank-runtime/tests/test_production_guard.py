@@ -44,7 +44,7 @@ DOCKERIGNORE_PATH = PLUGIN_ROOT.parents[2] / ".dockerignore"
 
 def _approved_snapshot(**overrides: object) -> ProductionSnapshot:
     data: dict[str, object] = {
-        "plugins": {"bank-runtime"},
+        "plugins": {"bank-runtime", "bank-mineru-mcp"},
         "loaded_agents": {"bank-assistant"},
         "plugin_channels": {"bank-runtime"},
         "registered_modes": {"default", "coding", "goal", "mission"},
@@ -367,8 +367,6 @@ def test_delivery_examples_survive_native_qwenpaw_validation() -> None:
         "artifact_convert",
         "artifact_generate",
         "artifact_revise",
-        "bank_assistant",
-        "template_fill_docx",
     }
     assert agent.running.reme_light_memory_config.memory_search_enabled is False
     assert agent.running.reme_light_memory_config.dream_cron_enabled is False
@@ -626,7 +624,7 @@ def _strict_registry(app: FastAPI, profile: dict) -> SimpleNamespace:
         return agents[agent_id]
 
     return SimpleNamespace(
-        get_all_plugin_manifests=lambda: {"bank-runtime": {}},
+        get_all_plugin_manifests=lambda: {name: {} for name in policy.required_plugins},
         get_registered_channels=lambda: {"bank-runtime": object()},
         get_workspace_manager=lambda: SimpleNamespace(
             agents=agents,

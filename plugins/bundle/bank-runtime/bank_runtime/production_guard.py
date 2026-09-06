@@ -508,8 +508,11 @@ def validate_production_root_config(config: dict[str, Any]) -> GuardResult:
     plugins = config.get("plugins") or {}
     if (
         not isinstance(plugins, dict)
-        or not isinstance(plugins.get("bank-runtime"), dict)
-        or plugins["bank-runtime"].get("enabled") is not True
+        or any(
+            not isinstance(plugins.get(name), dict)
+            or plugins[name].get("enabled") is not True
+            for name in ("bank-runtime", "bank-mineru-mcp")
+        )
     ):
         reasons.add("missing_required_plugin")
     if _enabled_names(_mapping(config.get("channels"))) != {"bank-runtime"}:
