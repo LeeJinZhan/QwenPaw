@@ -477,6 +477,7 @@ def test_stop_resolves_only_the_bank_runtime_session(monkeypatch):
     assert response.json() == {
         "runtime_task_id": "task-001",
         "stopped": True,
+        "stop_status": "stopped",
     }
     assert tracker.stopped == ["chat:session-001"]
 
@@ -625,3 +626,28 @@ def test_projector_preserves_only_recoverable_session_codes():
             "error_code": "RUNTIME_SESSION_SCOPE_MISMATCH",
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_cancelled_native_stream_cannot_report_completed():
+    entered = asyncio.Event()
+    output = []
+    async def source():
+        entered.set()
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            # Native cleanup may finish the stream with a response envelope.
+            yield 'data: {"object":"response","status":"completed"}\n\n'
+    async def collect():
+        async for item in project_sse_stream(source(), "cancel-task"):
+            output.extend(json.loads(line[6:]) for line in item.splitlines() if line.startswith("data: "))
+    task = asyncio.create_task(collect())
+    await entered.wait()
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+    assert not any(e["event"] == "answer.completed" for e in output)
+    assert any(e.get("error_code") == "QWENPAW_TASK_CANCELLED" for e in output)

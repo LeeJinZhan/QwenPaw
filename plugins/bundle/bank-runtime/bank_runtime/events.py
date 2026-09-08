@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import AsyncIterable, AsyncIterator
 from typing import Any
@@ -15,7 +16,7 @@ _RECOVERABLE_SESSION_ERROR_CODES = {
 _PUBLIC_ERROR_CODES = _RECOVERABLE_SESSION_ERROR_CODES | {
     "WORKER_UNAVAILABLE", "WORKER_TIMEOUT", "ARTIFACT_TOOL_NOT_INVOKED",
     "ARTIFACT_OUTPUT_MISSING", "ARTIFACT_PUBLISH_INCOMPLETE",
-    "QWENPAW_TASK_CANCELLED", "QWENPAW_DOOM_LOOP_STOP",
+    "QWENPAW_TASK_CANCELLED", "QWENPAW_DOOM_LOOP_STOP", "ARTIFACT_VALIDATION_FAILED",
 }
 
 
@@ -169,6 +170,9 @@ class CompactEventProjector:
             payload["message_id"] = message_id
         return [payload]
 
+    def cancel(self) -> dict[str, Any]:
+        return self._terminal_event("answer.failed", "cancelled")
+
     def finish(self) -> list[dict[str, Any]]:
         if self._terminal:
             return []
@@ -230,23 +234,35 @@ async def project_sse_stream(
             "message": "已收到问题",
         }
     )
-    buffer = ""
-    async for item in source:
-        buffer += str(item)
-        while "\n\n" in buffer:
-            block, buffer = buffer.split("\n\n", 1)
-            for raw_event in _decode_sse_block(block):
+    iterator = source.__aiter__()
+    try:
+        buffer = ""
+        async for item in iterator:
+            # Native cleanup can swallow cancellation and yield a completed envelope.
+            # Cancellation belongs to this producer task, not the SSE subscriber.
+            task = asyncio.current_task()
+            if task is not None and task.cancelling():
+                yield _encode(projector.cancel())
+                return
+            buffer += str(item)
+            while "\n\n" in buffer:
+                block, buffer = buffer.split("\n\n", 1)
+                for raw_event in _decode_sse_block(block):
+                    for event in projector.project(raw_event):
+                        for public in public_thinking.project(event):
+                            yield _encode(public)
+        if buffer.strip():
+            for raw_event in _decode_sse_block(buffer):
                 for event in projector.project(raw_event):
                     for public in public_thinking.project(event):
                         yield _encode(public)
-    if buffer.strip():
-        for raw_event in _decode_sse_block(buffer):
-            for event in projector.project(raw_event):
-                for public in public_thinking.project(event):
-                    yield _encode(public)
-    for event in projector.finish():
-        for public in public_thinking.project(event):
-            yield _encode(public)
+        for event in projector.finish():
+            for public in public_thinking.project(event):
+                yield _encode(public)
+    finally:
+        close = getattr(iterator, "aclose", None)
+        if close is not None:
+            await close()
 
 
 def _encode(event: dict[str, Any]) -> str:

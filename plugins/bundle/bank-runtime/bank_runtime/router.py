@@ -204,6 +204,7 @@ def build_ingress_router() -> APIRouter:
         return {
             "runtime_task_id": payload["runtime_task_id"],
             "stopped": stopped,
+            "stop_status": "stopped" if stopped else "already_stopped",
         }
 
     return router

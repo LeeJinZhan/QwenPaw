@@ -677,3 +677,50 @@ async def test_pdf_confirmation_is_identical_for_preflight_guard_and_execution()
     assert client.events[1][2]['explicit_pdf_request'] is True
     assert client.events[-1][3] == client.events[0][2]
     assert 'explicit_pdf_request' not in raw
+
+
+@pytest.mark.asyncio
+async def test_repeated_artifact_input_rejections_stop_before_next_model_call():
+    class InvalidClient(_Client):
+        async def preflight(self, *args, **kwargs):
+            raise GatewayError("invalid", code="INVALID_REQUEST", violation="tool_input_field_not_allowed")
+    client = InvalidClient()
+    middleware = BankRuntimeGatewayMiddleware(client)
+    engine = GatewayPermissionEngine(_DelegateEngine(PermissionBehavior.ALLOW, client.events), middleware)
+    tool = SimpleNamespace(name="artifact_generate")
+    for _ in range(3):
+        decision = await engine.check_permission(tool, {"artifact_type": "docx"})
+        assert decision.behavior == PermissionBehavior.DENY
+    called = False
+    async def model(**kwargs):
+        nonlocal called
+        called = True
+    with pytest.raises(Exception) as caught:
+        await middleware.on_model_call(None, {}, model)
+    assert getattr(caught.value, "error_code", "") == "ARTIFACT_VALIDATION_FAILED"
+    assert not called
+
+
+@pytest.mark.asyncio
+async def test_admitted_artifact_resets_parameter_failure_streak():
+    client = _Client()
+    middleware = BankRuntimeGatewayMiddleware(client)
+    middleware.artifact_input_failures = 2
+    engine = GatewayPermissionEngine(_DelegateEngine(PermissionBehavior.ALLOW, client.events), middleware)
+    decision = await engine.check_permission(SimpleNamespace(name="artifact_generate"), {"artifact_type": "docx"})
+    assert decision.behavior == PermissionBehavior.ALLOW
+    assert middleware.artifact_input_failures == 0
+
+
+@pytest.mark.asyncio
+async def test_permission_failure_is_not_misreported_as_invalid_artifact_input():
+    class DeniedClient(_Client):
+        async def preflight(self, *args, **kwargs):
+            raise GatewayError("denied", code="FORBIDDEN")
+    client = DeniedClient()
+    middleware = BankRuntimeGatewayMiddleware(client)
+    engine = GatewayPermissionEngine(_DelegateEngine(PermissionBehavior.ALLOW, client.events), middleware)
+    for _ in range(3):
+        decision = await engine.check_permission(SimpleNamespace(name="artifact_generate"), {"artifact_type": "docx"})
+        assert decision.behavior == PermissionBehavior.DENY
+    assert middleware.artifact_input_failures == 0

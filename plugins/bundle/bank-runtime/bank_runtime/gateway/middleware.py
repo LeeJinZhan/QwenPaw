@@ -32,6 +32,7 @@ from ..artifact_tools import (
     ARTIFACT_WORKER_TOOL_NAMES,
     ArtifactDeliveryIntent,
     ArtifactToolNotInvokedError,
+    ArtifactInputRetryExhaustedError,
     artifact_delivery_intent_from_request,
     complete_artifact_tool_input,
 )
@@ -101,6 +102,7 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
             deque
         )
         self._artifact_turn_state: _ArtifactTurnState | None = None
+        self.artifact_input_failures = 0
         self.native_skills: NativeSkillReader | None = None
         self.allowed_tool_names: frozenset[str] | None = None
 
@@ -113,6 +115,7 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
         input_kwargs: dict[str, Any],
         next_handler: Callable[..., AsyncGenerator[Any, None]],
     ) -> AsyncGenerator[Any, None]:
+        self.artifact_input_failures = 0
         if self.artifact_intent is None:
             async for item in next_handler(**input_kwargs):
                 yield item
@@ -131,6 +134,8 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
         input_kwargs: dict[str, Any],
         next_handler: Callable[..., Any],
     ) -> Any:
+        if self.artifact_input_failures >= 3:
+            raise ArtifactInputRetryExhaustedError()
         if self.allowed_tool_names is not None:
             allowed = set(self.allowed_tool_names)
             if self.native_skills is not None and await self.native_skills.visible():
@@ -473,6 +478,10 @@ class GatewayPermissionEngine:
                 call_id=call_id,
             )
         except Exception as exc:
+            if tool_name in _RUNTIME_EXECUTED_TOOLS and getattr(exc, "code", "") in {
+                "INVALID_REQUEST", "BAD_REQUEST", "ARTIFACT_VALIDATION_FAILED",
+            }:
+                self.middleware.artifact_input_failures += 1
             _logger.warning(
                 "Runtime tool preflight failed: task_id=%s tool=%s error_type=%s",
                 getattr(getattr(self.middleware.client, "config", None), "task_id", ""),
@@ -483,6 +492,8 @@ class GatewayPermissionEngine:
                 failure_message(getattr(exc, "code", ""), getattr(exc, "violation", ""))
             )
 
+        if tool_name in _RUNTIME_EXECUTED_TOOLS:
+            self.middleware.artifact_input_failures = 0
         decision = await self.delegate.check_permission(tool, tool_input)
         blocked_boundary = tool_name in _BLOCKED_NESTED_TOOLS or bool(
             getattr(tool, "is_external_tool", False)

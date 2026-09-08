@@ -80,6 +80,18 @@ class ArtifactToolNotInvokedError(AgentRuntimeErrorException):
         )
 
 
+class ArtifactInputRetryExhaustedError(ArtifactToolNotInvokedError):
+    """Stop this turn after repeated rejected input, before another model call."""
+
+    def __init__(self) -> None:
+        AgentRuntimeErrorException.__init__(
+            self,
+            error_code="ARTIFACT_VALIDATION_FAILED",
+            message="文件参数连续校验失败，本轮已停止，未生成文件。",
+            details={},
+        )
+
+
 class ArtifactDeliveryErrorHook(LifecycleHook):
     """Expose the stable artifact error without leaking candidate model text."""
 
