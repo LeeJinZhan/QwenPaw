@@ -190,7 +190,9 @@ async def artifact_generate(
             A requested institution template still requires template_fill_docx
             and its published, authorized version. Never silently substitute
             this fixed layout when that template is unavailable.
-            For PPTX, use ``{"slides": [{"layout": "title", "title":
+            For PPTX, first read bank-presentation for eight themes, layouts, and
+            authorized image source_index (1-based source_refs). Use
+            ``{"theme": "steady_business", "slides": [{"layout": "title", "title":
             "封面", "subtitle": "副标题"}, {"title": "内容页",
             "bullets": ["要点"], "speaker_notes": "讲稿"}]}``.
             For XLSX, use ``{"sheets": [{"name": "数据", "rows":

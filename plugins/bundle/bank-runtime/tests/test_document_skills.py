@@ -97,3 +97,21 @@ def test_real_native_viewer_returns_complete_document_rules_without_reference_re
     assert "template_fill_docx" in writing and "15000" in writing
     for name in ("bank-document-review", "bank-document-qa"):
         assert "材料" in asyncio.run(_read_native_skill(name))
+
+
+def test_presentation_skill_is_readable_via_native_skill_viewer():
+    import asyncio
+    content = asyncio.run(_read_native_skill("bank-presentation"))
+    assert "artifact_generate" in content and "artifact_revise" in content
+    assert "source_index" in content and "不授予" in content
+    assert "bank-presentation" in (ROOT / "bank-assistant-zh/SKILL.md").read_text()
+    for theme in ("steady_business", "modern_operations", "inclusive_local", "customer_value", "wealth_elegance", "digital_technology", "clear_classroom", "red_culture"):
+        assert theme in content
+
+
+def test_presentation_image_policy_guidance_is_available_via_native_skill_viewer():
+    import asyncio
+
+    content = asyncio.run(_read_native_skill("bank-presentation"))
+    for required in ("image_policy", "uploaded_only", "source_index", "内置素材", "不传素材路径", "不对上传图片做视觉语义识别"):
+        assert required in content
