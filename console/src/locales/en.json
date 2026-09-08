@@ -116,6 +116,7 @@
     "files": "Files",
     "control": "Control",
     "channels": "Channels",
+    "channelsEmptyHint": "Leaving this empty applies the skill to all channels. Select bank-runtime to limit it to platform requests.",
     "sessions": "Sessions",
     "inbox": "Inbox",
     "apps": "Apps",

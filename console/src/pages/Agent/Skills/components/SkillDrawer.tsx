@@ -6,6 +6,7 @@ import { ThunderboltOutlined, StopOutlined } from "@ant-design/icons";
 import type { FormInstance } from "antd";
 import type { SkillDetail } from "../../../../api/types";
 import { MarkdownCopy } from "../../../../components/MarkdownCopy/MarkdownCopy";
+import { useRetainedChannelValues } from "../../../../hooks/useRetainedChannelValues";
 import { api } from "../../../../api";
 import { deriveInstalledFromLabel } from "../../../../utils/skill";
 
@@ -36,6 +37,7 @@ export function parseFrontmatter(
 }
 
 const CHANNEL_OPTIONS = [
+  { label: "bank-runtime", value: "bank-runtime" },
   { label: "all", value: "all" },
   { label: "console", value: "console" },
   { label: "discord", value: "discord" },
@@ -89,6 +91,10 @@ export function SkillDrawer({
   onContentChange,
 }: SkillDrawerProps) {
   const { t, i18n } = useTranslation();
+  const channelValues = useRetainedChannelValues([
+    ...CHANNEL_OPTIONS.map((option) => option.value),
+    ...(editingSkill?.channels || []),
+  ]);
   const [showMarkdown, setShowMarkdown] = useState(true);
   const [contentValue, setContentValue] = useState("");
   const [optimizing, setOptimizing] = useState(false);
@@ -319,8 +325,18 @@ export function SkillDrawer({
             />
           </Form.Item>
 
-          <Form.Item name="channels" label={t("skills.channels")}>
-            <Select mode="multiple" options={CHANNEL_OPTIONS} />
+          <Form.Item
+            name="channels"
+            label={t("skills.channels")}
+            extra={t("skills.channelsEmptyHint", {
+              defaultValue:
+                "Leaving this empty applies the skill to all channels. Select bank-runtime to limit it to platform requests.",
+            })}
+          >
+            <Select
+              mode="multiple"
+              options={channelValues.map((value) => ({ label: value, value }))}
+            />
           </Form.Item>
 
           <Form.Item

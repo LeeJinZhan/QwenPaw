@@ -798,6 +798,7 @@
     "zipOnly": "仅支持上传 .zip 文件",
     "fileSizeExceeded": "文件大小超过 {{limit}}MB 限制。当前文件：{{size}}MB",
     "channels": "适用频道",
+    "channelsEmptyHint": "留空保存后适用于所有频道。如仅供平台调用，请选择 bank-runtime。",
     "allChannels": "所有",
     "lastUpdated": "更新时间",
     "searchPlaceholder": "按名称筛选",

@@ -16,6 +16,7 @@ import {
   ruleHasAmbiguousUserSource,
   ruleHasUnknownUserValue,
 } from "../accessPolicy";
+import { useRetainedChannelValues } from "../../../../hooks/useRetainedChannelValues";
 import styles from "../index.module.less";
 
 interface RuleTextInputProps {
@@ -121,16 +122,19 @@ const CHANNEL_SOURCE_FALLBACK_LABELS: Record<string, string> = {
 function channelSourceOptions(
   allChannelsLabel: string,
   channelLabel: (value: string) => string,
+  channelValues: readonly string[],
 ): { label: string; value: string }[] {
   return [
     {
       label: allChannelsLabel,
       value: "*",
     },
-    ...MCP_CHANNEL_SOURCE_VALUES.map((value) => ({
-      label: channelLabel(value),
-      value,
-    })),
+    ...channelValues
+      .filter((value) => value !== "*")
+      .map((value) => ({
+        label: channelLabel(value),
+        value,
+      })),
   ];
 }
 
@@ -183,9 +187,16 @@ export function MCPAccessRuleRows<Rule extends MCPAccessRule>({
     t(`channels.channelNames.${value}`, {
       defaultValue: CHANNEL_SOURCE_FALLBACK_LABELS[value] || value,
     });
+  const channelValues = useRetainedChannelValues([
+    ...MCP_CHANNEL_SOURCE_VALUES,
+    ...rules
+      .filter((rule) => rule.source_type === "channel")
+      .map((rule) => rule.source_value),
+  ]);
   const sourceValueOptions = channelSourceOptions(
     t("mcp.access.sourceValueAllChannels"),
     channelLabel,
+    channelValues,
   );
   const channelSourceTypeLabel = t("mcp.access.source.channel");
   const subjectTypeOptions = [
