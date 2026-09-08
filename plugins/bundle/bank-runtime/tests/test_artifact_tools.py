@@ -130,24 +130,30 @@ def test_artifact_delivery_intent_requires_structured_runtime_marker() -> None:
         source_refs=("generated_file_001",),
     )
     assert parse_artifact_delivery_intent("请生成一个 DOCX") is None
-    assert parse_artifact_delivery_intent(
-        {
-            "schema_version": "1.0",
-            "kind": "artifact",
-            "required": False,
-            "operation": "generate",
-            "target_format": "docx",
-        }
-    ) is None
-    assert parse_artifact_delivery_intent(
-        {
-            "schema_version": "1.0",
-            "kind": "artifact",
-            "required": True,
-            "operation": "chat",
-            "target_format": "docx",
-        }
-    ) is None
+    assert (
+        parse_artifact_delivery_intent(
+            {
+                "schema_version": "1.0",
+                "kind": "artifact",
+                "required": False,
+                "operation": "generate",
+                "target_format": "docx",
+            }
+        )
+        is None
+    )
+    assert (
+        parse_artifact_delivery_intent(
+            {
+                "schema_version": "1.0",
+                "kind": "artifact",
+                "required": True,
+                "operation": "chat",
+                "target_format": "docx",
+            }
+        )
+        is None
+    )
 
 
 async def _run_model_call_in_reply(
@@ -359,19 +365,121 @@ def test_request_security_overlay_makes_office_tool_choice_mandatory() -> None:
 
     assert "MUST call artifact_generate" in personalization
     assert "PNG, JPEG, WEBP, SVG" in personalization
-    assert "Never create an Office deliverable as a Python, Node, shell, or macro script" in personalization
+    assert (
+        "Never create an Office deliverable as a Python, Node, shell, or macro script"
+        in personalization
+    )
 
-@pytest.mark.parametrize('intent,tool,payload,expected', [
-    (ArtifactDeliveryIntent('convert', 'pdf'), 'artifact_convert', {'target_format': 'pdf'}, True),
-    (ArtifactDeliveryIntent('generate', 'pdf'), 'artifact_generate', {'artifact_type': 'pdf'}, True),
-    (None, 'artifact_convert', {'target_format': 'pdf'}, None),
-    (ArtifactDeliveryIntent('convert', 'docx'), 'artifact_convert', {'target_format': 'pdf'}, None),
-    (ArtifactDeliveryIntent('generate', 'pdf'), 'artifact_convert', {'target_format': 'pdf'}, None),
-    (ArtifactDeliveryIntent('convert', 'pdf'), 'artifact_convert', {'target_format': 'pdf', 'explicit_pdf_request': False}, False),
-])
-def test_pdf_confirmation_comes_only_from_matching_trusted_intent(intent, tool, payload, expected):
+
+@pytest.mark.parametrize(
+    "intent,tool,payload,expected",
+    [
+        (
+            ArtifactDeliveryIntent("convert", "pdf"),
+            "artifact_convert",
+            {"target_format": "pdf"},
+            True,
+        ),
+        (
+            ArtifactDeliveryIntent("generate", "pdf"),
+            "artifact_generate",
+            {"artifact_type": "pdf"},
+            True,
+        ),
+        (None, "artifact_convert", {"target_format": "pdf"}, None),
+        (
+            ArtifactDeliveryIntent("convert", "docx"),
+            "artifact_convert",
+            {"target_format": "pdf"},
+            None,
+        ),
+        (
+            ArtifactDeliveryIntent("generate", "pdf"),
+            "artifact_convert",
+            {"target_format": "pdf"},
+            None,
+        ),
+        (
+            ArtifactDeliveryIntent("convert", "pdf"),
+            "artifact_convert",
+            {"target_format": "pdf", "explicit_pdf_request": False},
+            False,
+        ),
+    ],
+)
+def test_pdf_confirmation_comes_only_from_matching_trusted_intent(
+    intent, tool, payload, expected
+):
     from bank_runtime.artifact_tools import complete_artifact_tool_input
+
     original = dict(payload)
     result = complete_artifact_tool_input(tool, payload, intent)
-    assert result.get('explicit_pdf_request') is expected
+    assert result.get("explicit_pdf_request") is expected
     assert payload == original
+
+
+@pytest.mark.asyncio
+async def test_official_layout_marker_is_preserved_and_guides_each_model_call():
+    marker = {
+        "schema_version": "1.0",
+        "kind": "artifact",
+        "required": True,
+        "operation": "generate",
+        "target_format": "docx",
+        "layout_kind": "official_document",
+    }
+    intent = parse_artifact_delivery_intent(marker)
+    assert getattr(intent, "layout_kind", None) == "official_document"
+    middleware = BankRuntimeGatewayMiddleware(None, artifact_intent=intent)
+    original = []
+
+    async def model(**kwargs):
+        return kwargs
+
+    result = await middleware.on_model_call(
+        object(), {"messages": original, "tools": []}, model
+    )
+    assert original == []
+    assert "official_document" in str(result["messages"])
+    assert "bank-official-docx-v1" in str(result["messages"])
+    assert parse_artifact_delivery_intent({**marker, "layout_kind": "unknown"}) is None
+    assert parse_artifact_delivery_intent({**marker, "target_format": "pdf"}) is None
+
+
+@pytest.mark.asyncio
+async def test_semantic_delivery_marker_guides_each_round_without_mutating_input():
+    marker = {
+        "schema_version": "1.0",
+        "kind": "artifact",
+        "required": True,
+        "operation": "generate",
+        "target_format": "docx",
+        "layout_resolution": "skill",
+    }
+    intent = parse_artifact_delivery_intent(marker)
+    assert intent.layout_resolution == "skill"
+    middleware = BankRuntimeGatewayMiddleware(None, artifact_intent=intent)
+    original = []
+
+    async def model(**kwargs):
+        return kwargs
+
+    for _ in range(2):
+        result = await middleware.on_model_call(
+            object(), {"messages": original, "tools": []}, model
+        )
+        assert "delivery_plan" in str(result["messages"])
+        assert "task_list" in str(result["messages"])
+        assert "bank-document-writing" in str(result["messages"])
+    assert original == []
+    assert (
+        parse_artifact_delivery_intent({**marker, "layout_resolution": "anything"})
+        is None
+    )
+    assert parse_artifact_delivery_intent({**marker, "target_format": "pdf"}) is None
+    assert (
+        parse_artifact_delivery_intent(
+            {**marker, "layout_kind": "standard_document"}
+        ).layout_kind
+        == "standard_document"
+    )

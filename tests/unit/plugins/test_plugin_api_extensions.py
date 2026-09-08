@@ -410,9 +410,7 @@ class TestPluginValidatorImports:
 
             # Verify sys.modules was cleaned up (no leaking)
             leaked = [
-                k
-                for k in sys.modules
-                if k.startswith("_plugin_validation_my_datapaw")
+                k for k in sys.modules if k.startswith("_plugin_validation_my_datapaw")
             ]
             assert leaked == [], f"Leaked modules: {leaked}"
 
@@ -439,9 +437,7 @@ class TestPluginValidatorImports:
 
             # Verify cleanup still happened
             leaked = [
-                k
-                for k in sys.modules
-                if k.startswith("_plugin_validation_bad_plugin")
+                k for k in sys.modules if k.startswith("_plugin_validation_bad_plugin")
             ]
             assert leaked == [], f"Leaked modules: {leaked}"
 
@@ -778,3 +774,48 @@ class TestFireWorkspaceCreatedHooks:
         )
 
         assert "ws-1" in second_called
+
+
+def test_skill_provider_preserves_console_edits(plugin_api, fresh_registry, tmp_path):
+    from qwenpaw.agents.skill_system.workspace_service import SkillService
+    from qwenpaw.agents.skill_system.store import (
+        read_json,
+        get_workspace_skill_manifest_path,
+    )
+
+    source = tmp_path / "bundled"
+    skill = source / "editable-skill"
+    skill.mkdir(parents=True)
+    initial = "---\nname: editable-skill\ndescription: Writing guidance\n---\nOriginal guidance.\n"
+    (skill / "SKILL.md").write_text(initial)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    plugin_api.register_skill_provider(
+        source, channels=["bank-runtime"], preserve_workspace_edits=True
+    )
+    hook = fresh_registry.get_workspace_created_hooks()[0]
+    hook.callback({"agent_id": "a", "workspace_dir": str(workspace)})
+    service = SkillService(workspace)
+    edited = initial.replace("Original guidance.", "Manually maintained guidance.")
+    assert service.save_skill(skill_name="editable-skill", content=edited)["success"]
+    service.disable_skill("editable-skill")
+    (skill / "SKILL.md").write_text(initial.replace("Original", "Upgraded"))
+    hook.callback({"agent_id": "a", "workspace_dir": str(workspace)})
+    assert (workspace / "skills/editable-skill/SKILL.md").read_text() == edited
+    entry = read_json(get_workspace_skill_manifest_path(workspace), {})["skills"][
+        "editable-skill"
+    ]
+    assert entry["source"] == "customized"
+    assert entry["enabled"] is False
+    assert entry["channels"] == ["bank-runtime"]
+    fresh = tmp_path / "fresh"
+    fresh.mkdir()
+    hook.callback({"agent_id": "b", "workspace_dir": str(fresh)})
+    assert (fresh / "skills/editable-skill/SKILL.md").read_text() == (
+        skill / "SKILL.md"
+    ).read_text()
+    (skill / "SKILL.md").write_text(initial.replace("Original", "Latest"))
+    hook.callback({"agent_id": "b", "workspace_dir": str(fresh)})
+    assert (fresh / "skills/editable-skill/SKILL.md").read_text() == (
+        skill / "SKILL.md"
+    ).read_text()

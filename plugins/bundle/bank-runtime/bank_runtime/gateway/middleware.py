@@ -137,12 +137,53 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
                 allowed.add("Skill")
             input_kwargs = dict(input_kwargs)
             input_kwargs["tools"] = [
-                schema for schema in (input_kwargs.get("tools") or [])
+                schema
+                for schema in (input_kwargs.get("tools") or [])
                 if isinstance(schema, dict)
                 and str(schema.get("function", {}).get("name") or "") in allowed
             ]
         if input_kwargs.get("messages"):
             input_kwargs = prepare_public_model_context(input_kwargs)
+        if (
+            self.artifact_intent is not None
+            and self.artifact_intent.layout_kind == "official_document"
+        ):
+            input_kwargs = dict(input_kwargs)
+            input_kwargs["messages"] = [
+                *list(input_kwargs.get("messages") or []),
+                SystemMsg(
+                    name="system",
+                    content=(
+                        "本轮已明确要求公文 DOCX。生成或修订必须提交完整公文 content："
+                        "kind=official_document、layout_version=bank-official-docx-v1、"
+                        "document={title,recipients,blocks,...}。按 bank-document-writing 技能组织内容。"
+                        "普通字符串或 sections/paragraphs 的 Word 不能满足本轮要求。"
+                        "若工具指出版式不符，修正结构后通过同一受控工具重试；不得改写用户事实或声称已经完成。"
+                    ),
+                ),
+            ]
+        if (
+            self.artifact_intent is not None
+            and self.artifact_intent.layout_resolution == "skill"
+        ):
+            input_kwargs = dict(input_kwargs)
+            input_kwargs["messages"] = [
+                *list(input_kwargs.get("messages") or []),
+                SystemMsg(
+                    name="system",
+                    content=(
+                        "本轮要求交付 DOCX。先按 bank-document-writing 判断沟通用途、文种和版式，"
+                        "在 artifact_generate/artifact_revise 同时提交 delivery_plan，且仅含 "
+                        "document_type（letter/request/notice/report/work_plan/task_list/article/other）、"
+                        "target_format=docx、layout_kind（official_document/standard_document）。"
+                        "向单位商洽的函、报批请示、下发执行的任务通知通常用公文；任务清单、"
+                        "研究文章、教学示例通常用普通文档。不要只看关键词；用户明确普通版式时遵从。"
+                        "正文结构须与登记版式一致；机构模板走已授权已发布模板版本。"
+                        "若缺少或不一致，按工具提示修正后重试；不得只在最终回答中宣称判断或生成完成。"
+                        f"本轮明确版式约束：{self.artifact_intent.layout_kind or '按用途判断'}。"
+                    ),
+                ),
+            ]
         state = self._artifact_turn_state
         if state is None or state.invoked:
             return await next_handler(**input_kwargs)
@@ -204,7 +245,11 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
         native_skill: bool = False,
     ) -> None:
         key = (str(tool_name), canonical_payload_hash(tool_input))
-        self._prepared[key].append(_PreparedExecution(key[0], key[1], dict(preflight), native_skill=native_skill))
+        self._prepared[key].append(
+            _PreparedExecution(
+                key[0], key[1], dict(preflight), native_skill=native_skill
+            )
+        )
 
     def claim(
         self,
@@ -232,19 +277,30 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
         try:
             async for item in self._act_admitted(agent, input_kwargs, next_handler):
                 if isinstance(item, (ToolChunk, ToolResponse)) and item.state in {
-                    ToolResultState.ERROR, ToolResultState.DENIED, ToolResultState.INTERRUPTED,
+                    ToolResultState.ERROR,
+                    ToolResultState.DENIED,
+                    ToolResultState.INTERRUPTED,
                 }:
                     item = copy(item)
-                    message = ("处理已中断，已完成的操作不会自动撤销。"
-                               if item.state == ToolResultState.INTERRUPTED else failure_message())
+                    message = (
+                        "处理已中断，已完成的操作不会自动撤销。"
+                        if item.state == ToolResultState.INTERRUPTED
+                        else failure_message()
+                    )
                     item.content = [TextBlock(type="text", text=message)]
                 yield item
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            _logger.warning("Managed operation failed: error_type=%s", type(exc).__name__)
-            raise GatewayError(failure_message(getattr(exc, "code", ""), getattr(exc, "violation", "")),
-                               code=getattr(exc, "code", "")) from exc
+            _logger.warning(
+                "Managed operation failed: error_type=%s", type(exc).__name__
+            )
+            raise GatewayError(
+                failure_message(
+                    getattr(exc, "code", ""), getattr(exc, "violation", "")
+                ),
+                code=getattr(exc, "code", ""),
+            ) from exc
 
     async def _act_admitted(
         self,
@@ -264,11 +320,17 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
             raise GatewayError("Tool input is not valid JSON") from exc
         if not isinstance(tool_input, dict):
             raise GatewayError("Tool input must be an object")
-        tool_input = complete_artifact_tool_input(tool_name, tool_input, self.artifact_intent)
+        tool_input = complete_artifact_tool_input(
+            tool_name, tool_input, self.artifact_intent
+        )
         prepared = self.claim(tool_name, tool_input)
         if prepared.native_skill:
             reader = self.native_skills
-            if reader is None or reader.agent is not agent or not await reader.available(tool_input):
+            if (
+                reader is None
+                or reader.agent is not agent
+                or not await reader.available(tool_input)
+            ):
                 raise GatewayError("Skill read scope changed")
             async for item in next_handler():
                 yield item
@@ -400,7 +462,9 @@ class GatewayPermissionEngine:
             self.middleware.prepare("Skill", tool_input, {}, native_skill=True)
             return decision
         tool_name = str(getattr(tool, "name", "") or "")
-        tool_input = complete_artifact_tool_input(tool_name, tool_input, self.middleware.artifact_intent)
+        tool_input = complete_artifact_tool_input(
+            tool_name, tool_input, self.middleware.artifact_intent
+        )
         call_id = f"call_{uuid.uuid4().hex}"
         try:
             preflight = await self.middleware.client.preflight(
@@ -415,7 +479,9 @@ class GatewayPermissionEngine:
                 tool_name,
                 type(exc).__name__,
             )
-            return _deny(failure_message(getattr(exc, "code", ""), getattr(exc, "violation", "")))
+            return _deny(
+                failure_message(getattr(exc, "code", ""), getattr(exc, "violation", ""))
+            )
 
         decision = await self.delegate.check_permission(tool, tool_input)
         blocked_boundary = tool_name in _BLOCKED_NESTED_TOOLS or bool(

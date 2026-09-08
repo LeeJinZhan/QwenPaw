@@ -38,6 +38,8 @@ class ArtifactDeliveryIntent:
     operation: str
     target_format: str
     source_refs: tuple[str, ...] = ()
+    layout_kind: str = ""
+    layout_resolution: str = ""
 
 
 def complete_artifact_tool_input(
@@ -53,17 +55,17 @@ def complete_artifact_tool_input(
     """
     result = dict(payload)
     operation, format_field = {
-        'artifact_convert': ('convert', 'target_format'),
-        'artifact_generate': ('generate', 'artifact_type'),
-    }.get(tool_name, ('', ''))
+        "artifact_convert": ("convert", "target_format"),
+        "artifact_generate": ("generate", "artifact_type"),
+    }.get(tool_name, ("", ""))
     if (
         intent is not None
         and operation == intent.operation
-        and intent.target_format == 'pdf'
-        and str(payload.get(format_field) or '').strip().lower() == 'pdf'
-        and 'explicit_pdf_request' not in payload
+        and intent.target_format == "pdf"
+        and str(payload.get(format_field) or "").strip().lower() == "pdf"
+        and "explicit_pdf_request" not in payload
     ):
-        result['explicit_pdf_request'] = True
+        result["explicit_pdf_request"] = True
     return result
 
 
@@ -113,14 +115,33 @@ def parse_artifact_delivery_intent(value: Any) -> ArtifactDeliveryIntent | None:
     refs = tuple(str(item).strip() for item in raw_refs)
     if any(not item for item in refs) or len(set(refs)) != len(refs):
         return None
+    layout_kind = value.get("layout_kind", "")
+    if "layout_kind" in value and (
+        not isinstance(layout_kind, str)
+        or layout_kind not in {"official_document", "standard_document"}
+        or target_format != "docx"
+        or operation not in {"generate", "revise"}
+    ):
+        return None
+    layout_resolution = value.get("layout_resolution", "")
+    if "layout_resolution" in value and (
+        layout_resolution != "skill"
+        or target_format != "docx"
+        or operation not in {"generate", "revise"}
+    ):
+        return None
     return ArtifactDeliveryIntent(
         operation=operation,
         target_format=target_format,
         source_refs=refs,
+        layout_kind=layout_kind,
+        layout_resolution=layout_resolution,
     )
 
 
-def artifact_delivery_intent_from_request(request: Any) -> ArtifactDeliveryIntent | None:
+def artifact_delivery_intent_from_request(
+    request: Any,
+) -> ArtifactDeliveryIntent | None:
     """Read the same marker from the supported Runtime request envelopes."""
 
     direct = parse_artifact_delivery_intent(
@@ -147,6 +168,7 @@ async def artifact_generate(
     source_refs: list[dict[str, str]] | None = None,
     output_name: str = "",
     explicit_pdf_request: bool = False,
+    delivery_plan: dict[str, str] | None = None,
 ) -> str:
     """Generate one controlled office, text, or fixed-graphic artifact.
 
@@ -160,6 +182,14 @@ async def artifact_generate(
             [{"heading": "标题", "paragraphs": ["正文"]}]}``. Arrays must be
             JSON arrays; never wrap them in an ``{"item": ...}`` object. Pass
             structured content as an object; do not JSON-encode it as a string.
+            For an official document draft, use ``{"kind": "official_document",
+            "layout_version": "bank-official-docx-v1", "document": {"title":
+            "标题", "recipients": [], "blocks": [{"type": "paragraph",
+            "text": "正文"}]}}``. Read bank-document-writing for heading/table
+            and optional fields. Keep document.title independent of filenames.
+            A requested institution template still requires template_fill_docx
+            and its published, authorized version. Never silently substitute
+            this fixed layout when that template is unavailable.
             For PPTX, use ``{"slides": [{"layout": "title", "title":
             "封面", "subtitle": "副标题"}, {"title": "内容页",
             "bullets": ["要点"], "speaker_notes": "讲稿"}]}``.
@@ -190,6 +220,14 @@ async def artifact_generate(
         instructions: Optional bounded formatting or revision guidance.
         source_refs: Runtime-authorized source identifiers only.
         output_name: Optional safe output filename.
+        delivery_plan: For DOCX generation/revision, register the writing skill's
+            semantic decision as exactly {"document_type": "letter", "target_format":
+            "docx", "layout_kind": "official_document"}. document_type is letter,
+            request, notice, report, work_plan, task_list, article or other;
+            layout_kind is official_document or standard_document. Infer from
+            communicative purpose and user instructions, not title keywords.
+            Match content to this decision; never downgrade explicit official
+            requirements. Institution templates use template_fill_docx instead.
         explicit_pdf_request: Must be true only when the user asked for PDF.
     """
     del (
@@ -200,6 +238,7 @@ async def artifact_generate(
         source_refs,
         output_name,
         explicit_pdf_request,
+        delivery_plan,
     )
     return _UNMEDIATED
 
@@ -209,16 +248,22 @@ async def artifact_revise(
     instructions: str,
     content: dict[str, Any] | list[Any] | str,
     output_name: str = "",
+    delivery_plan: dict[str, str] | None = None,
 ) -> str:
     """Create a new version of an existing Runtime-generated Office file.
 
     Args:
         source_generated_file_id: Runtime-generated source file identifier.
         instructions: Requested changes.
-        content: Complete structured content for the new version.
+        content: Complete structured content for the new version. Official
+            documents retain kind, layout_version and document.title, including
+            every unchanged block; do not pass only a patch or revised section.
         output_name: Optional safe output filename.
+        delivery_plan: DOCX semantic decision using the same strict three fields
+            and enums as artifact_generate. Preserve the original purpose/layout
+            unless the user requests a change; send complete revised content.
     """
-    del source_generated_file_id, instructions, content, output_name
+    del source_generated_file_id, instructions, content, output_name, delivery_plan
     return _UNMEDIATED
 
 

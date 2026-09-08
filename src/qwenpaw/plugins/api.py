@@ -1303,6 +1303,7 @@ class PluginApi:  # pylint: disable=too-many-public-methods
         *,
         enabled_by_default: bool = True,
         channels: Optional[List[str]] = None,
+        preserve_workspace_edits: bool = False,
     ) -> None:
         """Register a plugin as a skill provider.
 
@@ -1325,6 +1326,8 @@ class PluginApi:  # pylint: disable=too-many-public-methods
                 skill sub-directories (each with a ``SKILL.md``).
             enabled_by_default: Whether the skills should be enabled
                 immediately after installation. Default: True.
+            preserve_workspace_edits: Preserve skills customized in the workspace
+                UI instead of replacing them on startup. Default: False.
             channels: List of channel names the skills apply to, or
                 ``["all"]`` for all channels. Default: ``["all"]``.
 
@@ -1347,6 +1350,7 @@ class PluginApi:  # pylint: disable=too-many-public-methods
                 source_tag,
                 enabled_by_default,
                 resolved_channels,
+                preserve_workspace_edits=preserve_workspace_edits,
             )
 
         def _uninstall_skills(plugin_id: str, delete_files: bool = False):
@@ -1362,6 +1366,7 @@ class PluginApi:  # pylint: disable=too-many-public-methods
                 source_tag,
                 enabled_by_default,
                 resolved_channels,
+                preserve_workspace_edits=preserve_workspace_edits,
             )
 
         # Register skill installation on startup
@@ -1423,8 +1428,7 @@ class PluginApi:  # pylint: disable=too-many-public-methods
         """Return sub-directory names that contain a SKILL.md file."""
         if not skills_dir.exists() or not skills_dir.is_dir():
             logger.warning(
-                f"Plugin '{self.plugin_id}' skills_dir "
-                f"does not exist: {skills_dir}",
+                f"Plugin '{self.plugin_id}' skills_dir does not exist: {skills_dir}",
             )
             return []
         return [
@@ -1440,6 +1444,7 @@ class PluginApi:  # pylint: disable=too-many-public-methods
         source_tag: str,
         enabled_by_default: bool,
         resolved_channels: List[str],
+        preserve_workspace_edits: bool = False,
     ) -> None:
         """Copy plugin skills into a single workspace and update its manifest.
 
@@ -1454,6 +1459,7 @@ class PluginApi:  # pylint: disable=too-many-public-methods
                 get_workspace_skill_manifest_path,
                 default_workspace_manifest,
                 mutate_json,
+                read_json,
             )
             from ..agents.skill_system.registry import (
                 reconcile_workspace_manifest,
@@ -1467,7 +1473,19 @@ class PluginApi:  # pylint: disable=too-many-public-methods
             ws_skills_dir = get_workspace_skills_dir(workspace_dir)
             ws_skills_dir.mkdir(parents=True, exist_ok=True)
 
+            manifest_path = get_workspace_skill_manifest_path(workspace_dir)
+            previous = read_json(manifest_path, default_workspace_manifest())
+            installed_names = []
             for skill_name in skill_names:
+                existing = previous.get("skills", {}).get(skill_name, {})
+                target = ws_skills_dir / skill_name
+                if (
+                    preserve_workspace_edits
+                    and target.exists()
+                    and existing.get("source") != source_tag
+                ):
+                    continue
+                installed_names.append(skill_name)
                 copy_skill_dir(
                     skills_dir / skill_name,
                     ws_skills_dir / skill_name,
@@ -1481,7 +1499,7 @@ class PluginApi:  # pylint: disable=too-many-public-methods
 
             def _apply_defaults(
                 payload,
-                _names=tuple(skill_names),
+                _names=tuple(installed_names),
                 _src=source_tag,
                 _enabled=enabled_by_default,
                 _channels=tuple(resolved_channels),
@@ -1522,6 +1540,7 @@ class PluginApi:  # pylint: disable=too-many-public-methods
         source_tag: str,
         enabled_by_default: bool,
         resolved_channels: List[str],
+        preserve_workspace_edits: bool = False,
     ) -> None:
         """Copy plugin skills into all existing workspaces."""
         try:
@@ -1539,6 +1558,7 @@ class PluginApi:  # pylint: disable=too-many-public-methods
                     source_tag,
                     enabled_by_default,
                     resolved_channels,
+                    preserve_workspace_edits=preserve_workspace_edits,
                 )
 
             logger.info(
@@ -1548,8 +1568,7 @@ class PluginApi:  # pylint: disable=too-many-public-methods
             )
         except Exception as exc:
             logger.error(
-                f"Failed to install skills for plugin "
-                f"'{self.plugin_id}': {exc}",
+                f"Failed to install skills for plugin '{self.plugin_id}': {exc}",
                 exc_info=True,
             )
 

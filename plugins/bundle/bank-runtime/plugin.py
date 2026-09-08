@@ -158,6 +158,7 @@ class BankRuntimePlugin:
         )
         api.register_skill_provider(
             skills_dir=Path(__file__).parent / "skills",
+            preserve_workspace_edits=True,
             enabled_by_default=True,
             channels=["bank-runtime"],
         )
