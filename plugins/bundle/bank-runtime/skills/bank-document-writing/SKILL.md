@@ -1,6 +1,6 @@
 ---
 name: bank-document-writing
-description: 起草、整合、润色、提炼中文材料与公文，处理大纲、长文和多轮修订，并通过现有文件工作区交付公文 DOCX 初稿。
+description: 起草、整合、润色、提炼中文材料与公文，处理大纲、长文和多轮修订，支持普通文档与公文 DOCX 交付。
 ---
 # 银行文档写作
 
@@ -11,6 +11,10 @@ description: 起草、整合、润色、提炼中文材料与公文，处理大�
 ## 确定交付与材料
 
 识别起草、润色、提炼、大纲、续写及复合需求；“先写作再摘要”应交付用户要求的全文和摘要。确定主题、文种、读者、事实、篇幅和有效材料。信息足够直接执行，不为一般写作机械追问。仅有附件不能证明已读：使用当前授权附件读取能力；未授权、读取失败、空文本、缺页分别说明，只据实际读取的范围写作。同名文件按引用和版本区分。
+
+用户要求依据本行制度起草，或正文需要引用具体内部规定时，先读取 `bank-document-qa`，按用户指定范围取得依据，再组织正文；可复用会话中实际取得且仍适用的依据。纯润色、结构调整和不依赖内部规定的起草不强制检索，不因用户提到“通知”就检索制度。
+
+制度依据不足时，可完成不依赖该依据的草稿部分并标明待核实事项，不将其声称为完整满足要求的定稿；不得虚构制度名称、条款或办理条件。用户明确要求审核时再读取 `bank-document-review`，普通写作自检不必循环调用其他技能。
 
 多份大纲按指定顺序整合，未指定时采用提交顺序并说明。关联每章参考材料，检查机构、时间、金额和口径冲突；影响结论的冲突要澄清，不静默择一。不能虚构法规、会议精神、领导指示或客户事实。专业报告可以整理，不额外形成无依据的法律、金融责任判断。
 
@@ -53,7 +57,7 @@ DOCX 的 artifact_generate / artifact_revise 调用必须同时提交严格三�
 {"document_type":"notice","target_format":"docx","layout_kind":"official_document"}
 ```
 
-document_type 仅支持 letter、request、notice、report、work_plan、task_list、article、other；layout_kind 仅支持 official_document、standard_document。这三个字段是工具参数，不作为正文或内部推理展示。公文 content 必须使用下文固定版式，普通文档用 sections/paragraphs。后端在工具准入、生成及完成时核对，作业将判断与正文一起冻结；重试不得偷偷降级。修订同样提交完整判断与完整正文，改变版式需要用户意图支持。
+document_type 仅支持 letter、request、notice、report、work_plan、task_list、article、other；layout_kind 仅支持 official_document、standard_document。这三个字段是工具参数，不作为正文或内部推理展示。公文 content 必须使用下文固定版式，普通文档可用完整正文字符串或 sections/paragraphs 对象；对象不再次序列化为 JSON 字符串。后端在工具准入、生成及完成时核对，作业将判断与正文一起冻结；重试不得偷偷降级。修订同样提交完整判断与完整正文，改变版式需要用户意图支持。
 
 模板优先级高于上述默认版式：用户明确选择机构模板时走 template_fill_docx，使用真实已发布且当前授权的 template_version_id；不虚构版本、不自动选择未知模板。固定公文版式的 layout_version 为 bank-official-docx-v1，模板版本为空；不能将它冒充机构模板。
 
@@ -71,6 +75,6 @@ document_type 仅支持 letter、request、notice、report、work_plan、task_li
 
 用户明确指定机构模板时，仅用已获授权的真实已发布版本调用 `template_fill_docx`，使用实际字段 schema。模板未发布、停用或无权时说明限制，不以固定版式规避；用户未指定机构模板时才使用上述固定版式。
 
-后续修改使用 `artifact_revise`，携带已有受控文件引用及完整修订结构。外层文件名可变化，`document.title` 保持用户确认的正文标题；不得覆盖旧文件。要求普通 Word 而非公文时继续使用普通 DOCX sections/paragraphs 格式。
+后续修改使用 `artifact_revise`，携带已有受控文件引用及完整修订结构。外层文件名可变化，`document.title` 保持用户确认的正文标题；不得覆盖旧文件。要求普通 Word 而非公文时使用完整正文字符串或普通 DOCX sections/paragraphs 对象。
 
 生成成功且实际返回当前文件引用后，才说明文件已生成，由原文件卡片和工作区交付。缺字体、未知版式或校验失败时保留可用正文，准确说明尚未交付文件，不静默降级或改用 shell、write_file 等绕过。结构输入错误可据工具给出的安全提示修正后通过同一工具重试；权限拒绝不得规避。已发布文件和后续回答失败分别说明。
