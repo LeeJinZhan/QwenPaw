@@ -139,6 +139,11 @@ class MinerUHttpClient:
                 "response_format_zip": "false",
                 "return_original_file": "false",
             }
+            # Deployment settings only: tool arguments cannot choose an egress target.
+            if self.settings.backend:
+                data["backend"] = self.settings.backend
+                if self.settings.server_url:
+                    data["server_url"] = self.settings.server_url
             try:
                 async with self._client.stream(
                     "POST",

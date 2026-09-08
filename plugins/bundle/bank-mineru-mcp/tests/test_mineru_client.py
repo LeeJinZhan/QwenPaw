@@ -376,3 +376,38 @@ async def test_official_flash_preserves_failed_task_error_code(tmp_path) -> None
 
     assert failed.value.code == "DOCUMENT_PAGE_LIMIT_EXCEEDED"
     await client.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["tasks", "file_parse"])
+@pytest.mark.parametrize("remote_url", ["", "http://mineru-vlm.internal:30000/v1"])
+async def test_remote_backend_is_sent_to_api_not_used_as_upload_endpoint(tmp_path, mode, remote_url):
+    from email.parser import BytesParser
+    from email.policy import default
+    calls = []
+    async def handler(request):
+        calls.append((request.method, request.url.path))
+        assert request.url.host == "mineru.test"
+        if request.method == "POST":
+            raw = ("Content-Type: " + request.headers["content-type"] + "\r\n\r\n").encode()
+            message = BytesParser(policy=default).parsebytes(raw + await request.aread())
+            fields = {part.get_param("name", header="content-disposition"): part.get_payload(decode=True)
+                      for part in message.iter_parts()}
+            # A lightweight API rejects the old request's default local backend.
+            assert fields.get("backend") == b"vlm-http-client"
+            if remote_url:
+                assert fields.get("server_url") == remote_url.encode()
+            else:
+                assert "server_url" not in fields
+            assert b"%PDF" in fields["files"]
+            if mode == "tasks":
+                return httpx.Response(202, json={"task_id": "remote-001"})
+        if request.url.path == "/tasks/remote-001":
+            return httpx.Response(200, json={"status": "completed"})
+        return httpx.Response(200, json={"results": {"file_file_001": {"md_content": "done"}}})
+    settings = replace(_settings(mode), backend="vlm-http-client", server_url=remote_url)
+    client = MinerUHttpClient(settings, http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    result, _ = await client.parse([_file(tmp_path)])
+    assert result["results"]["file_file_001"]["md_content"] == "done"
+    assert sum(method == "POST" for method, _ in calls) == 1
+    await client.close()

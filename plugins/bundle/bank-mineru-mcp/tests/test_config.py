@@ -106,3 +106,36 @@ def test_settings_reject_missing_or_writable_token_file(monkeypatch, tmp_path) -
     token_file.unlink()
     with pytest.raises(MinerUConfigError, match="token"):
         MinerUSettings.from_environment()
+
+
+def test_remote_backend_settings(monkeypatch, tmp_path):
+    _environment(monkeypatch, tmp_path)
+    monkeypatch.setenv("BANK_MINERU_BACKEND", "vlm-http-client")
+    monkeypatch.setenv("BANK_MINERU_SERVER_URL", "http://mineru-vlm.internal:30000/v1")
+    settings = MinerUSettings.from_environment()
+    assert settings.backend == "vlm-http-client"
+    assert settings.server_url == "http://mineru-vlm.internal:30000/v1"
+
+
+@pytest.mark.parametrize("backend,url", [
+    ("", "http://mineru-vlm:30000"),
+    ("automatic", "http://mineru-vlm:30000"),
+    ("vlm-http-client", "file:///tmp/model"),
+    ("vlm-http-client", "http://user:secret@mineru-vlm:30000"),
+    ("vlm-http-client", "http://mineru-vlm:30000/?token=secret"),
+])
+def test_invalid_remote_backend_settings(monkeypatch, tmp_path, backend, url):
+    _environment(monkeypatch, tmp_path)
+    monkeypatch.setenv("BANK_MINERU_BACKEND", backend)
+    monkeypatch.setenv("BANK_MINERU_SERVER_URL", url)
+    with pytest.raises(MinerUConfigError):
+        MinerUSettings.from_environment()
+
+
+def test_remote_backend_uses_server_side_model_address_when_omitted(monkeypatch, tmp_path):
+    _environment(monkeypatch, tmp_path)
+    monkeypatch.setenv("BANK_MINERU_BACKEND", "vlm-http-client")
+    monkeypatch.delenv("BANK_MINERU_SERVER_URL", raising=False)
+    settings = MinerUSettings.from_environment()
+    assert settings.backend == "vlm-http-client"
+    assert settings.server_url == ""

@@ -30,6 +30,8 @@ class MinerUSettings:
     result_max_bytes: int = 32 * 1024 * 1024
     task_result_max_bytes: int = 64 * 1024 * 1024
     temp_ttl_seconds: int = 604_800
+    backend: str = ""
+    server_url: str = ""
 
     @classmethod
     def from_environment(cls) -> "MinerUSettings":
@@ -49,6 +51,23 @@ class MinerUSettings:
         submit_mode = str(os.environ.get("BANK_MINERU_SUBMIT_MODE", "tasks")).strip()
         if provider == "self_hosted" and submit_mode not in {"tasks", "file_parse"}:
             raise MinerUConfigError("MinerU submit mode must be tasks or file_parse")
+        backend = os.environ.get("BANK_MINERU_BACKEND", "").strip()
+        server_url = os.environ.get("BANK_MINERU_SERVER_URL", "").strip()
+        if backend not in {"", "vlm-http-client"}:
+            raise MinerUConfigError("MinerU backend must be empty or vlm-http-client")
+        if (server_url and not backend) or (backend and provider != "self_hosted"):
+            raise MinerUConfigError("MinerU remote settings require self_hosted and vlm-http-client")
+        if server_url:
+            server_url = _base_url(server_url)
+            try:
+                parsed_server = urlsplit(server_url)
+                port = parsed_server.port
+            except ValueError as exc:
+                raise MinerUConfigError("MinerU server URL port is invalid") from exc
+            if (port is not None and not 1 <= port <= 65535) or any(
+                c.isspace() or ord(c) < 32 or c == "\\" for c in server_url
+            ):
+                raise MinerUConfigError("MinerU server URL is invalid")
         host = str(os.environ.get("BANK_MINERU_MCP_HOST", "127.0.0.1")).strip()
         if host not in {"127.0.0.1", "::1", "localhost"}:
             raise MinerUConfigError("MinerU MCP host must be loopback")
@@ -83,6 +102,8 @@ class MinerUSettings:
         )
         return cls(
             base_url=base_url,
+            backend=backend,
+            server_url=server_url,
             submit_mode=(
                 submit_mode if provider == "self_hosted" else "official_flash"
             ),
