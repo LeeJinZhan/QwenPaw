@@ -34,6 +34,7 @@ metadata:
 ## 办公成果工具
 
 - 用户要求生成 DOCX、XLSX、PPTX、CSV、Markdown、TXT、HTML 或 PNG/JPEG/WEBP/SVG 固定图形时，选择 `artifact_generate`，只提交结构化内容和 Runtime 已授权的来源引用。
+- HTML 仅交付静态阅读页面：可以提交完整页面外壳、标题、段落、表格、布局与静态样式，不加入 JavaScript、筛选按钮、输入框、表单、事件属性或外链资源。遇到校验失败，移除不支持的交互内容后通过同一受控成果工具重试；不要改用 write_file、shell 或脚本冒充成果交付成功。文件已发布但整轮未完成时，分别说明已有文件和未完成部分。
 - 生成 DOCX 时，`content` 优先传完整正文字符串；需要分节时只使用 `{"sections":[{"heading":"标题","paragraphs":["正文"]}]}`，所有集合直接使用 JSON 数组，禁止添加 `item` 包装层；结构化内容必须直接作为对象传递，不得再次序列化成 JSON 字符串。
 - 生成 PPTX 时，使用 `{"slides":[...]}`，每页提供简洁标题与低密度 `bullets`；封面使用 `layout: "title"`，章节分隔可使用 `layout: "section"`，需要讲稿时使用 `speaker_notes`。不要用长段落填满页面，不要添加 `item` 包装层。
 - 生成 XLSX 时，使用 `{"sheets":[{"name":"工作表名","rows":[["表头1","表头2"],["内容",1]]}]}`；表头也可在工作表内单独使用 `headers` 提供。工作表、表头、行和单元格集合都直接使用 JSON 数组，不要添加 `item` 包装层。

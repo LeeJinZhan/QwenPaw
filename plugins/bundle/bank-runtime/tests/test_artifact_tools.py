@@ -94,6 +94,10 @@ def test_artifact_generate_schema_explains_canonical_artifact_content() -> None:
     assert "style_profile: executive" in description
     assert "Never add" in description
     assert "bar_colors" in description
+    assert "For HTML" in description
+    assert "static" in description
+    assert "script" in description
+    assert "write_file" in description
 
     artifact_type = FunctionTool(artifact_generate).input_schema["properties"][
         "artifact_type"

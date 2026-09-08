@@ -8,6 +8,15 @@ from agentscope.permission import PermissionBehavior
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from bank_runtime.gateway.middleware import BankRuntimeGatewayMiddleware, GatewayPermissionEngine, _runtime_tool_response
 from bank_runtime.gateway.client import GatewayError
+from bank_runtime.presentation import failure_message
+
+
+def test_artifact_validation_failure_explains_content_correction_without_diagnostics():
+    message = failure_message("ARTIFACT_VALIDATION_FAILED")
+    assert "校验" in message
+    assert "调整内容" in message
+    assert "ARTIFACT" not in message
+    assert "未能完成生成" in failure_message("ARTIFACT_RENDER_FAILED")
 
 
 @pytest.mark.asyncio

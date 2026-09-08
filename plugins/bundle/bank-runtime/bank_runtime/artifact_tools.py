@@ -167,6 +167,14 @@ async def artifact_generate(
             [["表头1", "表头2"], ["内容", 1]]}]}``; ``{"headers":
             ["表头1", "表头2"]}`` may be supplied separately inside a sheet
             and is prepended to ``rows``.
+            For HTML, pass a static HTML string or ``{"text": "<h2>标题</h2><p>正文</p>"}``.
+            Full html/head/body wrappers and static layout/CSS are supported.
+            Do not include script, button, input, forms, event attributes,
+            links, external resources, CSS url/import or JavaScript filters.
+            Use headings, sections and tables for a static reading experience.
+            If validation fails, simplify to static content and retry this
+            controlled artifact tool; never fall back to write_file or shell
+            to claim that the requested artifact was delivered.
             For PNG/JPEG/WEBP/SVG, provide a deterministic fixed graphic such
             as ``{"kind": "chart", "chart_type": "bar", "title": "趋势",
             "categories": ["一月"], "series": [{"name": "数量", "values":

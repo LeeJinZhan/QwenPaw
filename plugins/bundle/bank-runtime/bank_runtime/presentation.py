@@ -53,6 +53,10 @@ def failure_message(code: str = "", violation: str = "") -> str:
         return "当前连接已失效，请重新进入助手。"
     if code in {"INVALID_REQUEST", "BAD_REQUEST"}:
         return "操作所需信息不完整或格式不正确，本次未执行。"
+    if code == "ARTIFACT_VALIDATION_FAILED":
+        return "文件内容或格式未通过校验，请先按该格式要求调整内容，再重新生成。"
+    if code == "ARTIFACT_RENDER_FAILED":
+        return "文件未能完成生成，请查看处理状态后再决定是否重试。"
     if code in {"TOOL_DENIED", "TOOL_NOT_FOUND"}:
         return "当前助手无法执行此操作，本次未执行。"
     return "本次操作暂时无法完成。请根据已确认的结果说明情况，不要重复提交结果未知的操作。"
