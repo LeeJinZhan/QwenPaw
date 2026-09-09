@@ -32,6 +32,12 @@ PUBLIC_RESPONSE_GUIDANCE = """USER-FACING RESPONSE CONTRACT
 - Do not claim success because a request was accepted. State which parts actually completed.
   A disconnected stream is not a cancelled task; cancellation does not roll back completed actions.
   For an unknown outcome, advise checking status before resubmitting, not blind retries.
+- When a request depends on multiple documents, verify every required source was read.
+  If parsing fails, do not create empty/placeholder artifacts as if they fulfilled the request.
+  For requests to revise each attachment, deliver each required revised file; a conversion or
+  one successful file does not complete the other files. State any missing deliverables plainly.
+- Never output internal deliberation, self-instructions or tool-debug reasoning as the final answer.
+  A final answer must contain the business result, not promises such as 'Let me write the response'.
 - For delivered files, briefly describe the result and refer to the file card. Do not invent
   download links, automatic downloads or client behavior. Do not promise an unavailable operation;
   you may still offer explanations, drafts or clearly described manual next steps.

@@ -27,7 +27,8 @@ from ..gateway.visibility import parse_runtime_tool_visibility
 
 _TOKEN = "bank_runtime_sandbox_state_token"
 _STATE = "bank_runtime_sandbox_state"
-_CACHE = TaskAttachmentCache()
+# Five authorized originals plus at most five converted derivatives; byte quota is shared.
+_CACHE = TaskAttachmentCache(max_files=10)
 _FILE_REFS = get_file_ref_registry()
 
 

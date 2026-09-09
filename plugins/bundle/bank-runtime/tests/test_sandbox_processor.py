@@ -155,3 +155,15 @@ def test_image_keeps_native_block_and_exposes_optional_opaque_tool_ref(
     assert isinstance(blocks[1], TextBlock)
     assert 'processing="native_or_tool"' in blocks[1].text
     assert 'file_ref="fr1_image"' in blocks[1].text
+
+@pytest.mark.parametrize("extension,mime,target", [("doc", "application/msword", "docx"), ("xls", "application/vnd.ms-excel", "xlsx")])
+def test_legacy_office_is_routed_to_governed_conversion(tmp_path, extension, mime, target):
+    path = tmp_path / f"legacy.{extension}"
+    path.write_bytes(bytes.fromhex("d0cf11e0a1b11ae1") + b"\0" * 512)
+    block = AttachmentProcessor().process([_prepared(path, content_type=mime)], file_refs={"file_001": "fr1_old"})[0]
+    assert 'processing="conversion_required"' in block.text
+    assert "artifact_convert" in block.text and target in block.text
+    assert "approved Worker Skill" not in block.text
+    path.write_bytes(b"not an OLE document")
+    with pytest.raises(SandboxCacheError):
+        AttachmentProcessor().process([_prepared(path, content_type=mime)], file_refs={"file_001": "fr1_old"})

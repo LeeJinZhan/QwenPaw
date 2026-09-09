@@ -5,6 +5,8 @@ from __future__ import annotations
 from contextvars import ContextVar
 from dataclasses import dataclass
 import json
+from datetime import datetime
+from .file_refs import get_file_ref_registry
 import re
 from typing import Any
 
@@ -93,7 +95,7 @@ async def runtime_sandbox_files_select(file_ids: list[str]) -> ToolResponse:
             state.broker,
             selection_records=records,
         )
-        blocks = state.processor.process(prepared)
+        blocks = _prepared_blocks(state, prepared)
         state.scope.mark_selected(list(file_ids))
         selected = [
             {
@@ -118,6 +120,32 @@ async def runtime_sandbox_files_select(file_ids: list[str]) -> ToolResponse:
         )
     except (RuntimeError, TypeError, ValueError):
         return _text("Runtime file selection failed.")
+
+
+def _prepared_blocks(state, prepared):
+    if not prepared:
+        return []
+    expiry = datetime.fromisoformat(str(state.scope.sandbox_context["expires_at"]).replace("Z", "+00:00"))
+    registry = get_file_ref_registry()
+    refs = {item.file_id: registry.issue(item, expires_at=expiry) for item in prepared}
+    return state.processor.process(prepared, file_refs=refs)
+
+
+async def converted_attachment_blocks(payload, result):
+    """Continue an admitted legacy conversion through the same file authorization."""
+    state = _STATE.get()
+    if (state is None or payload.get("source_type") not in {"session_file", "workspace_file"}
+            or payload.get("target_format") not in {"docx", "xlsx"}
+            or result.get("artifact_status") != "succeeded"):
+        return []
+    ids = result.get("generated_file_ids") or []
+    if len(ids) != 1:
+        return []
+    try:
+        prepared = await state.cache.prepare_files(state.scope, ids, state.broker)
+        return _prepared_blocks(state, prepared)
+    except (RuntimeError, ValueError):
+        return [TextBlock(type="text", text="格式转换已完成，但转换后的正文尚未读取，请勿声称已经完成文档分析。")]
 
 
 def _validated_list(value: Any, pattern: re.Pattern[str], limit: int) -> list[str]:

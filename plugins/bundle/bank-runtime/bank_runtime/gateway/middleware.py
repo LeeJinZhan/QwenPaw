@@ -26,6 +26,8 @@ from qwenpaw.runtime.phases import Phase
 from .client import GatewayClient, GatewayConfig, GatewayError
 from .protocol import canonical_payload_hash
 from .native_skills import NativeSkillReader
+from .completion import operation_keys, parse_outcomes
+from ..artifact_tools import FileOperationsIncompleteError
 from ..presentation import artifact_model_result, failure_message
 from ..model_context import prepare_public_model_context
 from ..artifact_tools import (
@@ -103,6 +105,8 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
         )
         self._artifact_turn_state: _ArtifactTurnState | None = None
         self.artifact_input_failures = 0
+        self.unresolved_file_operations: set[str] = set()
+        self.converted_sources: dict[str, str] = {}
         self.native_skills: NativeSkillReader | None = None
         self.allowed_tool_names: frozenset[str] | None = None
 
@@ -116,15 +120,21 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
         next_handler: Callable[..., AsyncGenerator[Any, None]],
     ) -> AsyncGenerator[Any, None]:
         self.artifact_input_failures = 0
+        self.unresolved_file_operations.clear()
+        self.converted_sources.clear()
         if self.artifact_intent is None:
             async for item in next_handler(**input_kwargs):
                 yield item
+            if self.unresolved_file_operations:
+                raise FileOperationsIncompleteError()
             return
         previous_state = self._artifact_turn_state
         self._artifact_turn_state = _ArtifactTurnState(intent=self.artifact_intent)
         try:
             async for item in next_handler(**input_kwargs):
                 yield item
+            if self.unresolved_file_operations:
+                raise FileOperationsIncompleteError()
         finally:
             self._artifact_turn_state = previous_state
 
@@ -281,7 +291,9 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
     ) -> AsyncGenerator[Any, None]:
         try:
             async for item in self._act_admitted(agent, input_kwargs, next_handler):
-                if isinstance(item, (ToolChunk, ToolResponse)) and item.state in {
+                tool_call = input_kwargs.get("tool_call")
+                name = str(getattr(tool_call, "name", "") or "")
+                if isinstance(item, (ToolChunk, ToolResponse)) and name not in _RUNTIME_EXECUTED_TOOLS and item.state in {
                     ToolResultState.ERROR,
                     ToolResultState.DENIED,
                     ToolResultState.INTERRUPTED,
@@ -301,10 +313,11 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
                 "Managed operation failed: error_type=%s", type(exc).__name__
             )
             raise GatewayError(
-                failure_message(
+                getattr(exc, "validation_hint", "") or failure_message(
                     getattr(exc, "code", ""), getattr(exc, "violation", "")
                 ),
                 code=getattr(exc, "code", ""),
+                validation_hint=getattr(exc, "validation_hint", ""),
             ) from exc
 
     async def _act_admitted(
@@ -329,6 +342,7 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
             tool_name, tool_input, self.artifact_intent
         )
         prepared = self.claim(tool_name, tool_input)
+        self.unresolved_file_operations.update(operation_keys(tool_name, tool_input))
         if prepared.native_skill:
             reader = self.native_skills
             if (
@@ -354,10 +368,29 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
                     tool_name,
                     tool_input,
                 )
-                yield _runtime_tool_response(
+                code = str(result.get("error_code") or "")
+                if code in {"INVALID_REQUEST", "BAD_REQUEST", "ARTIFACT_VALIDATION_FAILED"}:
+                    self.artifact_input_failures += 1
+                delivered = result.get("result") or {}
+                keys = operation_keys(tool_name, tool_input)
+                if result.get("status") == "success" and delivered.get("artifact_status") == "succeeded" and delivered.get("generated_file_ids"):
+                    self.unresolved_file_operations.difference_update(keys)
+                    if not self.unresolved_file_operations:
+                        self.artifact_input_failures = 0
+                else:
+                    self.unresolved_file_operations.update(keys)
+                response = _runtime_tool_response(
                     str(getattr(tool_call, "id", "") or tool_call_id),
                     result,
                 )
+                if tool_name == "artifact_convert" and result.get("status") == "success":
+                    from ..sandbox.tools import converted_attachment_blocks
+                    response.content.extend(await converted_attachment_blocks(tool_input, delivered))
+                    if tool_input.get("source_type") in {"session_file", "workspace_file"} and tool_input.get("target_format") in {"docx", "xlsx"} and not (self.artifact_intent and self.artifact_intent.operation == "convert"):
+                        for file_id in delivered.get("generated_file_ids") or []:
+                            self.converted_sources[str(file_id)] = str(tool_input.get("source_id") or "")
+                            self.unresolved_file_operations.add("parse:" + str(file_id))
+                yield response
                 return
             if is_physical_tool(tool_name):
                 if self.sandbox_executor is None:
@@ -384,6 +417,15 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
                 return
             async for item in next_handler():
                 if isinstance(item, ToolResponse) and not result_reported:
+                    keys = operation_keys(tool_name, tool_input)
+                    if keys:
+                        self.unresolved_file_operations.update(keys)
+                        for key, complete in parse_outcomes(item.content):
+                            if complete:
+                                self.unresolved_file_operations.discard(key)
+                                source = self.converted_sources.get(key.removeprefix("parse:"))
+                                if source:
+                                    self.unresolved_file_operations.discard("parse:" + source)
                     status, error_code = _result_status(item)
                     await self.client.report_result(
                         tool_call_id,
@@ -420,7 +462,10 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
                     "TOOL_EXECUTION_CANCELLED",
                 )
             raise
-        except Exception:
+        except Exception as exc:
+            self.unresolved_file_operations.update(operation_keys(tool_name, tool_input))
+            if tool_name in _RUNTIME_EXECUTED_TOOLS and getattr(exc, "code", "") in {"INVALID_REQUEST", "BAD_REQUEST", "ARTIFACT_VALIDATION_FAILED"}:
+                self.artifact_input_failures += 1
             if not result_reported:
                 await self.client.report_result(
                     tool_call_id,
@@ -467,6 +512,8 @@ class GatewayPermissionEngine:
             self.middleware.prepare("Skill", tool_input, {}, native_skill=True)
             return decision
         tool_name = str(getattr(tool, "name", "") or "")
+        if tool_name in _RUNTIME_EXECUTED_TOOLS and self.middleware.artifact_input_failures >= 3:
+            return _deny("文件连续校验失败，已停止本轮重试。")
         tool_input = complete_artifact_tool_input(
             tool_name, tool_input, self.middleware.artifact_intent
         )
@@ -478,6 +525,7 @@ class GatewayPermissionEngine:
                 call_id=call_id,
             )
         except Exception as exc:
+            self.middleware.unresolved_file_operations.update(operation_keys(tool_name, tool_input))
             if tool_name in _RUNTIME_EXECUTED_TOOLS and getattr(exc, "code", "") in {
                 "INVALID_REQUEST", "BAD_REQUEST", "ARTIFACT_VALIDATION_FAILED",
             }:
@@ -489,11 +537,9 @@ class GatewayPermissionEngine:
                 type(exc).__name__,
             )
             return _deny(
-                failure_message(getattr(exc, "code", ""), getattr(exc, "violation", ""))
+                getattr(exc, "validation_hint", "") or failure_message(getattr(exc, "code", ""), getattr(exc, "violation", ""))
             )
 
-        if tool_name in _RUNTIME_EXECUTED_TOOLS:
-            self.middleware.artifact_input_failures = 0
         decision = await self.delegate.check_permission(tool, tool_input)
         blocked_boundary = tool_name in _BLOCKED_NESTED_TOOLS or bool(
             getattr(tool, "is_external_tool", False)

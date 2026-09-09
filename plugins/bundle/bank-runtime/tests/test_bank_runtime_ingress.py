@@ -298,14 +298,9 @@ def test_stream_projects_incremental_thinking_and_answer_with_one_terminal(
         "status.changed",
         "answer.thinking",
         "answer.chunk",
-        "answer.chunk",
         "answer.completed",
     ]
-    assert [event.get("text") for event in events[1:4]] == [
-        "思考",
-        "答",
-        "案",
-    ]
+    assert [event.get("text") for event in events[1:3]] == ["思考", "答案"]
     assert (
         sum(event["event"] in {"answer.completed", "answer.failed"} for event in events)
         == 1
@@ -356,10 +351,9 @@ def test_stream_projects_qwenpaw_21_boolean_delta_text_chunks(monkeypatch):
     assert [event["event"] for event in events] == [
         "status.changed",
         "answer.chunk",
-        "answer.chunk",
         "answer.completed",
     ]
-    assert [event.get("text") for event in events[1:3]] == ["你", "好"]
+    assert events[1]["text"] == "你好"
 
 
 def test_stream_keeps_reasoning_content_deltas_out_of_answer_chunks(monkeypatch):

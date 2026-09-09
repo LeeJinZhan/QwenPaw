@@ -29,10 +29,11 @@ _RESULT_ATTEMPTS = 3
 class GatewayError(RuntimeError):
     """Gateway mediation failed safely."""
 
-    def __init__(self, message: str, *, code: str = "", violation: str = "") -> None:
+    def __init__(self, message: str, *, code: str = "", violation: str = "", validation_hint: str = "") -> None:
         super().__init__(message)
         self.code = str(code or "")
         self.violation = str(violation or "")
+        self.validation_hint = str(validation_hint or "")[:500] if code == "ARTIFACT_VALIDATION_FAILED" else ""
 
 
 @dataclass(frozen=True)
@@ -363,6 +364,7 @@ def _response_error(payload: Mapping[str, Any], fallback: str) -> GatewayError:
         str(detail.get("message") or fallback),
         code=str(detail.get("code") or ""),
         violation=str(details.get("violation_type") or ""),
+        validation_hint=str(details.get("validation_hint") or ""),
     )
 
 

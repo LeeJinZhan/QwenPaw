@@ -702,14 +702,14 @@ async def test_repeated_artifact_input_rejections_stop_before_next_model_call():
 
 
 @pytest.mark.asyncio
-async def test_admitted_artifact_resets_parameter_failure_streak():
+async def test_admission_does_not_reset_parameter_failure_streak():
     client = _Client()
     middleware = BankRuntimeGatewayMiddleware(client)
     middleware.artifact_input_failures = 2
     engine = GatewayPermissionEngine(_DelegateEngine(PermissionBehavior.ALLOW, client.events), middleware)
     decision = await engine.check_permission(SimpleNamespace(name="artifact_generate"), {"artifact_type": "docx"})
     assert decision.behavior == PermissionBehavior.ALLOW
-    assert middleware.artifact_input_failures == 0
+    assert middleware.artifact_input_failures == 2
 
 
 @pytest.mark.asyncio
@@ -724,3 +724,25 @@ async def test_permission_failure_is_not_misreported_as_invalid_artifact_input()
         decision = await engine.check_permission(SimpleNamespace(name="artifact_generate"), {"artifact_type": "docx"})
         assert decision.behavior == PermissionBehavior.DENY
     assert middleware.artifact_input_failures == 0
+
+
+@pytest.mark.asyncio
+async def test_execution_validation_failures_share_the_preflight_budget():
+    class Client(_Client):
+        async def execute_runtime_tool(self, *args):
+            return {"status": "failed", "error_code": "ARTIFACT_VALIDATION_FAILED", "result": {"artifact_status": "failed"}}
+    client = Client()
+    middleware = BankRuntimeGatewayMiddleware(client)
+    engine = GatewayPermissionEngine(_DelegateEngine(PermissionBehavior.ALLOW, client.events), middleware)
+    async def forbidden(**kwargs):
+        raise AssertionError("local execution forbidden")
+        yield
+    for i in range(3):
+        payload = {"artifact_type": "docx"}
+        await engine.check_permission(SimpleNamespace(name="artifact_generate"), payload)
+        call = ToolCallBlock(id=f"call-{i}", name="artifact_generate", input=json.dumps(payload))
+        _ = [item async for item in middleware.on_acting(SimpleNamespace(), {"tool_call": call}, forbidden)]
+    assert middleware.artifact_input_failures == 3
+    with pytest.raises(Exception) as error:
+        await middleware.on_model_call(None, {}, None)
+    assert getattr(error.value, "error_code", "") == "ARTIFACT_VALIDATION_FAILED"

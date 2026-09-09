@@ -87,8 +87,16 @@ class ArtifactInputRetryExhaustedError(ArtifactToolNotInvokedError):
         AgentRuntimeErrorException.__init__(
             self,
             error_code="ARTIFACT_VALIDATION_FAILED",
-            message="文件参数连续校验失败，本轮已停止，未生成文件。",
+            message="文件参数多次校验失败，本轮已停止，请核对已交付文件和未完成项。",
             details={},
+        )
+
+
+class FileOperationsIncompleteError(ArtifactToolNotInvokedError):
+    def __init__(self) -> None:
+        AgentRuntimeErrorException.__init__(
+            self, error_code="ARTIFACT_OUTPUT_MISSING",
+            message="部分文件处理或交付尚未完成，请查看已交付文件和失败步骤。", details={},
         )
 
 
@@ -282,20 +290,29 @@ async def artifact_revise(
 
 
 async def artifact_convert(
-    source_generated_file_id: str,
-    target_format: str,
+    source_generated_file_id: str = "",
+    target_format: str = "",
     output_name: str = "",
     explicit_pdf_request: bool = False,
+    source_type: str = "",
+    source_id: str = "",
 ) -> str:
-    """Convert a Runtime-generated artifact through an admitted worker.
+    """Convert an authorized source through an admitted worker.
+
+    For uploaded .doc/.xls, set source_type=session_file, source_id to its file_id,
+    target_format=docx/xlsx, and omit source_generated_file_id. For personal files
+    use workspace_file. Read the returned converted attachment before analysis.
+    A converted file alone is not a completed analysis or a revised deliverable.
 
     Args:
-        source_generated_file_id: Runtime-generated source file identifier.
+        source_generated_file_id: Existing generated source; omit for uploaded files.
+        source_type: session_file or workspace_file for uploaded sources.
+        source_id: Authorized uploaded source file identifier.
         target_format: Registered target format selected by Runtime.
         output_name: Optional safe output filename.
         explicit_pdf_request: Must be true only when the user asked for PDF.
     """
-    del source_generated_file_id, target_format, output_name, explicit_pdf_request
+    del source_generated_file_id, target_format, output_name, explicit_pdf_request, source_type, source_id
     return _UNMEDIATED
 
 

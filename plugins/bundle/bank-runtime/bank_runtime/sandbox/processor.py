@@ -24,7 +24,8 @@ _TEXT_EXTENSIONS = {
     ".log",
 }
 _OOXML = {".docx", ".xlsx", ".pptx"}
-_TOOL_REQUIRED = {"pdf", "docx", "xlsx", "pptx"}
+_TOOL_REQUIRED = {"pdf", "docx", "xlsx", "pptx", "doc", "xls"}
+_LEGACY_MIME = {".doc": "application/msword", ".xls": "application/vnd.ms-excel"}
 _OOXML_MIME = {
     ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -89,10 +90,12 @@ class AttachmentProcessor:
                     raise SandboxCacheError("Attachment file reference is required")
                 blocks.append(
                     self._reference_block(
-                        prepared,
-                        file_ref,
-                        processing="tool_required",
+                        prepared, file_ref, processing="conversion_required" if kind in {"doc", "xls"} else "tool_required",
                         message=(
+                            f"这是旧版 {kind} 文件，正文尚未读取。先通过已授权的 artifact_convert，"
+                            f"用 source_type=session_file、source_id=本文件 file_id 转换为 {dict(doc='docx', xls='xlsx')[kind]}，"
+                            "然后用返回的附件引用解析正文。个人资料来源使用 workspace_file。不要把转换成功当作分析完成。"
+                            if kind in {"doc", "xls"} else
                             "该文件正文尚未读取。如当前问题依赖其内容，请选择已授权且支持该类型的文件处理工具。"
                         ),
                     )
@@ -102,7 +105,7 @@ class AttachmentProcessor:
                 blocks.append(
                     self._status(
                         prepared,
-                        "The file requires an approved Worker Skill and was not inlined.",
+                        "当前文件类型尚不支持读取，正文未读取；不能据此生成基于原文的成果。",
                     )
                 )
                 continue
@@ -137,6 +140,11 @@ class AttachmentProcessor:
             ):
                 raise SandboxCacheError("Attachment type mismatch")
             return "pdf"
+        if suffix in _LEGACY_MIME or mime in _LEGACY_MIME.values():
+            if (suffix not in _LEGACY_MIME or mime not in {_LEGACY_MIME[suffix], "application/octet-stream"}
+                    or not prefix.startswith(bytes.fromhex("d0cf11e0a1b11ae1"))):
+                raise SandboxCacheError("Attachment type mismatch")
+            return suffix.removeprefix(".")
         if suffix in _OOXML or mime.startswith("application/vnd.openxmlformats"):
             expected_mime = _OOXML_MIME.get(suffix)
             if (

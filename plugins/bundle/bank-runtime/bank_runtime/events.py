@@ -67,7 +67,14 @@ class CompactEventProjector:
                 self._active_message_id = ''
             if kind == 'message' and message_id:
                 self._active_message_id = message_id
-        return phases + self._project(raw_event)
+        projected = self._project(raw_event)
+        if any(item.get("event") == "answer.completed" for item in projected):
+            message_id = self._active_message_id
+            text = self._snapshots.get(("answer.chunk", message_id), "")
+            if text:
+                projected.insert(0, {"event": "answer.chunk", "message_id": message_id, "text": text})
+            self._active_message_id = ""
+        return phases + projected
 
     def _project(self, raw_event: dict[str, Any]) -> list[dict[str, Any]]:
         if self._terminal or not isinstance(raw_event, dict):
@@ -164,6 +171,14 @@ class CompactEventProjector:
             chunk = _delta(previous, current)
             self._snapshots[key] = current
         if not chunk:
+            return []
+        if not is_thinking and obj in {"message", "content"}:
+            # Native text is provisional until the next tool/message or terminal boundary.
+            # Never publish a preamble in the final-answer channel, then retract it later.
+            self._active_message_id = message_id
+            if len(self._snapshots[key]) > 1_000_000:
+                self._active_message_id = ""
+                return [self._terminal_event("answer.failed", error_code="WORKER_UNAVAILABLE")]
             return []
         payload = {"event": event, "text": chunk}
         if not is_thinking and self._active_message_id == message_id:
