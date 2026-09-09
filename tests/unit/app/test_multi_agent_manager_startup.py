@@ -184,6 +184,63 @@ async def test_reload_marks_rejected_reusable_service_for_cleanup(
 
 
 @pytest.mark.asyncio
+async def test_reload_registers_plugin_hooks_before_publishing_workspace(
+    monkeypatch,
+) -> None:
+    from qwenpaw.plugins.api import PluginApi
+    from qwenpaw.plugins.registry import PluginRegistry
+    from qwenpaw.runtime.hooks import HookBase, HookRegistry, HookResult
+    from qwenpaw.runtime.phases import Phase
+
+    monkeypatch.setattr(PluginRegistry, "_instance", None)
+    registry = PluginRegistry()
+    manager = MultiAgentManager()
+    registry.set_workspace_manager(manager)
+    monkeypatch.setattr(
+        multi_agent_manager_module, "load_config", lambda: _config("agent-1"),
+    )
+    old_workspace = _ReloadWorkspace("agent-1")
+    new_workspace = _ReloadWorkspace("agent-1")
+    for workspace in (old_workspace, new_workspace):
+        workspace.plugins = SimpleNamespace(hook_registry=HookRegistry())
+    manager.agents["agent-1"] = old_workspace
+    manager._create_workspace = MagicMock(return_value=new_workspace)
+    calls = []
+
+    class RequiredGatewayHook(HookBase):
+        phase = Phase.POST_AGENT_BUILD
+        name = "required_gateway"
+
+        async def run(self, ctx):
+            calls.append(ctx)
+            return HookResult()
+
+    api = PluginApi(
+        "reload-test", config={}, manifest={"id": "reload-test"},
+    )
+    api.set_registry(registry)
+    api.register_runtime_hook(RequiredGatewayHook())
+    original_start = new_workspace.start
+
+    async def start_after_registration():
+        assert manager.agents["agent-1"] is old_workspace
+        await new_workspace.plugins.hook_registry.run(
+            Phase.POST_AGENT_BUILD, "probe",
+        )
+        assert calls == ["probe"], "replacement lost the plugin runtime hook"
+        await original_start()
+
+    new_workspace.start = start_after_registration
+    assert await manager.reload_agent("agent-1") is True
+    assert manager.agents["agent-1"] is new_workspace
+    assert old_workspace.stopped is True
+    await old_workspace.plugins.hook_registry.run(
+        Phase.POST_AGENT_BUILD, "old",
+    )
+    assert calls == ["probe"], "registration must target the replacement"
+
+
+@pytest.mark.asyncio
 async def test_reload_reuses_tracker_for_active_stream_reconnect(
     monkeypatch,
 ) -> None:

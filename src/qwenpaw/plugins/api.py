@@ -1180,6 +1180,13 @@ class PluginApi:  # pylint: disable=too-many-public-methods
             agent_id = workspace_info.get("agent_id")
             if not agent_id:
                 return None
+            workspace = workspace_info.get("workspace")
+            if workspace is not None:
+                # Hot reload initializes the replacement before the manager's
+                # atomic swap. Never register its hooks on the old instance.
+                if getattr(workspace, "agent_id", None) != agent_id:
+                    return None
+                return workspace
             registry = PluginRegistry()
             mgr = registry.get_workspace_manager()
             if mgr is None:

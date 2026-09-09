@@ -521,6 +521,16 @@ class MultiAgentManager:
                 )
 
         try:
+            # A replacement has fresh plugin registries. Register contributions
+            # against that instance before it starts serving requests; looking
+            # it up by agent_id here would still return the old workspace.
+            await self._fire_workspace_created_hooks(
+                {
+                    "agent_id": agent_id,
+                    "workspace_dir": str(agent_ref.workspace_dir),
+                    "workspace": new_instance,
+                },
+            )
             await new_instance.start()
             new_instance.set_manager(self)  # Set manager reference
             logger.info(f"New workspace instance started: {agent_id}")
