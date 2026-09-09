@@ -115,3 +115,15 @@ def test_presentation_image_policy_guidance_is_available_via_native_skill_viewer
     content = asyncio.run(_read_native_skill("bank-presentation"))
     for required in ("image_policy", "uploaded_only", "source_index", "内置素材", "不传素材路径", "不对上传图片做视觉语义识别"):
         assert required in content
+
+
+def test_presentation_complete_request_and_recovery_rules_survive_native_viewer():
+    import asyncio
+    import json
+
+    content = asyncio.run(_read_native_skill("bank-presentation"))
+    full = [json.loads(block) for block in re.findall(r"```json\s*\n(.*?)\n```", content, re.S)]
+    assert any(item.get("artifact_type") == "pptx" and "content" in item for item in full)
+    assert "上传 PPT 的文件编号不是" in content
+    assert "清晰确定的参数错误可作一次有实质修改的重试" in content
+    assert "不是仅生成了文字大纲" in content
