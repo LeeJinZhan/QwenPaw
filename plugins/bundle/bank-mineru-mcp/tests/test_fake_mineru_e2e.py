@@ -53,6 +53,28 @@ async def _fake_mineru_server(requests: list[str]):
             },
         }
 
+    @app.post("/tasks")
+    async def submit_task(request: Request) -> dict[str, str]:
+        requests.append(request.url.path)
+        assert request.headers["authorization"] == "Bearer secret"
+        assert b"file_file_001.pdf" in await request.body()
+        return {"task_id": "synthetic_task", "status": "pending"}
+
+    @app.get("/tasks/synthetic_task")
+    async def task_status(request: Request) -> dict[str, str]:
+        requests.append(request.url.path)
+        assert request.headers["authorization"] == "Bearer secret"
+        return {"task_id": "synthetic_task", "status": "completed"}
+
+    @app.get("/tasks/synthetic_task/result")
+    async def task_result(request: Request) -> dict[str, object]:
+        requests.append(request.url.path)
+        assert request.headers["authorization"] == "Bearer secret"
+        return {"results": {"file_file_001": {
+            "md_content": "# 扫描报告\n" + "识别正文。" * 5000,
+            "page_count": 12,
+        }}}
+
     port = _port()
     server = uvicorn.Server(
         uvicorn.Config(
@@ -81,8 +103,9 @@ async def _fake_mineru_server(requests: list[str]):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("submit_mode", ["file_parse", "tasks"])
 async def test_native_mcp_call_uses_fake_mineru_and_reads_large_result(
-    tmp_path,
+    tmp_path, submit_mode,
 ) -> None:
     task_root = tmp_path / "task_001"
     task_root.mkdir()
@@ -106,7 +129,7 @@ async def test_native_mcp_call_uses_fake_mineru_and_reads_large_result(
     async with _fake_mineru_server(requests) as base_url:
         settings = MinerUSettings(
             base_url=base_url,
-            submit_mode="file_parse",
+            submit_mode=submit_mode,
             token="secret",
             mcp_port=_port(),
             inline_max_chars=20000,
@@ -143,6 +166,15 @@ async def test_native_mcp_call_uses_fake_mineru_and_reads_large_result(
                         },
                     )
                     assert parsed.isError is False
+                    from agentscope.message import ToolResultState
+                    from agentscope.tool import ToolChunk, ToolResponse
+                    from bank_runtime.gateway.completion import parse_outcomes
+                    from qwenpaw.drivers.adapters.agentscope_tool import _blocks_from_value
+
+                    response = ToolResponse(id="parse").append_chunk(ToolChunk(
+                        content=_blocks_from_value(parsed), state=ToolResultState.SUCCESS,
+                    ))
+                    assert list(parse_outcomes(response.content)) == [("parse:file_001", True)]
                     item = parsed.structuredContent["items"][0]
                     assert item["content_mode"] == "chunked"
                     assert item["page_count"] == 12
@@ -158,4 +190,6 @@ async def test_native_mcp_call_uses_fake_mineru_and_reads_large_result(
         finally:
             await service.stop()
 
-    assert requests == ["/health", "/file_parse"]
+    assert requests == (["/health", "/file_parse"] if submit_mode == "file_parse" else [
+        "/health", "/tasks", "/tasks/synthetic_task", "/tasks/synthetic_task/result",
+    ])
