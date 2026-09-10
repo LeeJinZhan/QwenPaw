@@ -8,6 +8,14 @@ description: 起草、整合、润色、提炼中文材料与公文，处理大�
 
 当前原生 Skill 阅读器只返回本文件，因此完成任务所需规则均在本文；references 仅供维护和契约核对，不要求用文件工具读取插件目录。
 
+## 交互与执行节奏
+
+复用当前会话已确认的内容、要求和有效材料，不要重复询问或要求用户重新粘贴。只有关键缺项才集中询问；不影响事实与交付的一般措辞、结构和样式由助手合理选择，不增加确认步骤。已有授权及用户明确要求仍有效，不能据此跳过真正的权限或审批限制。
+
+内部完成技能读取、参数检查和结果核对，不播报字段校验、工具 JSON 或反复“检查环境”。简单任务直接交付；耗时任务有实质进展或需要用户处理的阻塞时才简短说明，不用技术步骤刷屏，也不隐藏失败。用户明确询问技术原因时，可解释已核实且可公开的信息。
+
+同一确定参数错误最多修正重试一次；再次失败保留可用内容并说明未完成项，不让用户填写内部字段。结果未知时不重复提交，只用当前可用、已授权的状态能力核对；无查询能力则明确尚不能确认。权限、配额或连接故障不靠换参数绕过；未实际完成的文件和检查不报成功。
+
 ## 确定交付与材料
 
 识别起草、润色、提炼、大纲、续写及复合需求；“先写作再摘要”应交付用户要求的全文和摘要。确定主题、文种、读者、事实、篇幅和有效材料。信息足够直接执行，不为一般写作机械追问。仅有附件不能证明已读：使用当前授权附件读取能力；未授权、读取失败、空文本、缺页分别说明，只据实际读取的范围写作。同名文件按引用和版本区分。
@@ -51,22 +59,28 @@ description: 起草、整合、润色、提炼中文材料与公文，处理大�
 
 用户明确要普通 Word、不要公文排版时，遵从 standard_document；明确要公文版式时遵从 official_document。文种与版式不是同一个字段，例如用户要求普通排版的函仍可 document_type=letter。只说“任务”且上下文无法区分个人清单和正式下发通知时，简短问清用途；已说明主送部门和执行安排时直接起草。缺失事实不凭空补全。
 
-DOCX 的 artifact_generate / artifact_revise 调用必须同时提交严格三字段 delivery_plan，例如：
-
-```json
-{"document_type":"notice","target_format":"docx","layout_kind":"official_document"}
-```
+DOCX 的 artifact_generate / artifact_revise 调用必须同时提交严格三字段 delivery_plan，例如 `{"document_type":"notice","target_format":"docx","layout_kind":"official_document"}`；下文给出与正文一起提交的完整请求。
 
 document_type 仅支持 letter、request、notice、report、work_plan、task_list、article、other；layout_kind 仅支持 official_document、standard_document。这三个字段是工具参数，不作为正文或内部推理展示。公文 content 必须使用下文固定版式，普通文档可用完整正文字符串或 sections/paragraphs 对象；对象不再次序列化为 JSON 字符串。后端在工具准入、生成及完成时核对，作业将判断与正文一起冻结；重试不得偷偷降级。修订同样提交完整判断与完整正文，改变版式需要用户意图支持。
 
 模板优先级高于上述默认版式：用户明确选择机构模板时走 template_fill_docx，使用真实已发布且当前授权的 template_version_id；不虚构版本、不自动选择未知模板。固定公文版式的 layout_version 为 bank-official-docx-v1，模板版本为空；不能将它冒充机构模板。
 
-## 公文 DOCX 交付
+## 普通 Word 与来源选择
 
-普通文字与公文写作由当前助手直接完成，不因为文种委派专家。用户只要正文时直接交付正文。要求公文 DOCX 时调用当前获授权的 `artifact_generate`，`artifact_type="docx"`，content 直接提交对象：
+“生成 Word”沿用刚确认的正文和用途，不重新问标题或文种，不先返回大纲等待确认。内容足够时直接生成。用户上传的文件不是已生成成果：上传原稿需实际读取后用 artifact_generate 生成新稿；artifact_revise 只接受工具真实返回的 source_generated_file_id。只改局部时保留其余全文，不把修订建议或摘要当作完整正文。
+
+普通 Word 完整参数示例（示例正文仅用于说明结构，实际用当前确认稿替换）：
 
 ```json
-{"kind":"official_document","layout_version":"bank-official-docx-v1","document":{"title":"用户确认的标题","recipients":[],"blocks":[{"type":"paragraph","text":"完整正文"}]}}
+{"artifact_type":"docx","title":"工作说明示例","content":{"sections":[{"heading":"工作安排","paragraphs":["本段是结构示例，实际交付使用用户确认的正文。"]}]},"output_name":"工作说明示例.docx","delivery_plan":{"document_type":"article","target_format":"docx","layout_kind":"standard_document"}}
+```
+
+## 公文 DOCX 交付
+
+普通文字与公文写作由当前助手直接完成，不因为文种委派专家。用户只要正文时直接交付正文。要求公文 DOCX 时调用当前获授权的 `artifact_generate`；以下是完整参数，content 直接提交对象，kind 和 layout_version 位于 content 内、document 外：
+
+```json
+{"artifact_type":"docx","title":"工作安排通知初稿示例","output_name":"工作安排通知初稿示例.docx","delivery_plan":{"document_type":"notice","target_format":"docx","layout_kind":"official_document"},"content":{"kind":"official_document","layout_version":"bank-official-docx-v1","document":{"title":"关于工作安排的通知","recipients":[],"blocks":[{"type":"heading","level":1,"text":"一、工作安排"},{"type":"paragraph","text":"本段仅为结构示例，实际使用用户确认的安排，不补造执行时间或责任人。"}]}}}
 ```
 
 此为字段示例，不是用户事实。document 可选字段：signatory、date、classification、urgency 为字符串，attachments、cc 为字符串数组。blocks 支持 paragraph（text）、heading（level 为 1–4 的整数、text）与 table（headers 为非空字符串数组、rows 为等宽字符串二维数组）。正文每个语义段落一个块，不合并丢段；数组直接传数组，不加 item、不转成 JSON 字符串或代码块。所有主送和抄送完整保留。布局由服务端固定，不传字体、路径、脚本、外链、命令或身份。
@@ -78,3 +92,10 @@ document_type 仅支持 letter、request、notice、report、work_plan、task_li
 后续修改使用 `artifact_revise`，携带已有受控文件引用及完整修订结构。外层文件名可变化，`document.title` 保持用户确认的正文标题；不得覆盖旧文件。要求普通 Word 而非公文时使用完整正文字符串或普通 DOCX sections/paragraphs 对象。
 
 生成成功且实际返回当前文件引用后，才说明文件已生成，由原文件卡片和工作区交付。缺字体、未知版式或校验失败时保留可用正文，准确说明尚未交付文件，不静默降级或改用 shell、write_file 等绕过。结构输入错误可据工具给出的安全提示修正后通过同一工具重试；权限拒绝不得规避。已发布文件和后续回答失败分别说明。
+
+
+修订完整参数示例：`generated_example_only` 仅为结构占位，调用前必须替换为本轮可用且已授权的真实成果引用；没有该引用时不试填编号。content 包含未修改的全部段落；不添加 artifact_type、title 或 source_refs 等修订工具不接受的外层字段。
+
+```json
+{"source_generated_file_id":"generated_example_only","instructions":"按用户要求更新安排，保留其余完整正文","output_name":"工作安排通知修订初稿示例.docx","delivery_plan":{"document_type":"notice","target_format":"docx","layout_kind":"official_document"},"content":{"kind":"official_document","layout_version":"bank-official-docx-v1","document":{"title":"关于工作安排的通知","recipients":[],"blocks":[{"type":"heading","level":1,"text":"一、工作安排"},{"type":"paragraph","text":"修订示例：按用户已确认的安排更新本段，其余标题和完整正文保持原有要求。"}]}}}
+```

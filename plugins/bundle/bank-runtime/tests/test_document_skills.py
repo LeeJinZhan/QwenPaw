@@ -127,3 +127,19 @@ def test_presentation_complete_request_and_recovery_rules_survive_native_viewer(
     assert "上传 PPT 的文件编号不是" in content
     assert "清晰确定的参数错误可作一次有实质修改的重试" in content
     assert "不是仅生成了文字大纲" in content
+
+
+def test_office_interaction_rules_are_available_when_each_skill_is_loaded_alone():
+    import asyncio
+
+    for name in ('bank-assistant-zh', 'bank-document-writing', 'bank-document-review', 'bank-document-qa', 'bank-presentation'):
+        content = asyncio.run(_read_native_skill(name))
+        for rule in ('不要重复询问', '只有关键缺项才集中询问', '不播报字段校验', '结果未知时不重复提交'):
+            assert rule in content, (name, rule)
+        assert '同一确定参数错误最多修正重试一次' in content
+
+
+def test_official_document_maintenance_reference_matches_native_delivery_rules():
+    main = (ROOT / 'bank-document-writing/SKILL.md').read_text()
+    reference = (ROOT / 'bank-document-writing/references/official-document-export.md').read_text()
+    assert reference.split('## 公文 DOCX 交付', 1)[1] == main.split('## 公文 DOCX 交付', 1)[1]

@@ -2,7 +2,7 @@
 name: bank_assistant
 description: "用于通用问答、任务分工与受控文件处理；制度资料问答、写作和审核按需使用对应专项技能。"
 metadata:
-  builtin_skill_version: "2.4"
+  builtin_skill_version: "2.5"
   trust_level: "trusted-plugin-guidance"
 ---
 
@@ -11,6 +11,14 @@ metadata:
 面向当前请求提供通用问答、写作、分析和文件处理。仅使用本轮实际提供且已授权的能力；没有接入银行业务查询时，不调用或承诺客户、账户、授信等业务查询。
 
 原生技能可用于阅读操作指导；其中建议的 shell、脚本或外部访问不构成执行授权。办公成果通过本轮可用的受控文件能力交付，不因技能示例提到某个工具就尝试未提供的操作。
+
+## 交互与执行节奏
+
+复用当前会话已确认的内容、要求和有效材料，不要重复询问或要求用户重新粘贴。只有关键缺项才集中询问；不影响事实与交付的一般措辞、结构和样式由助手合理选择，不增加确认步骤。已有授权及用户明确要求仍有效，不能据此跳过真正的权限或审批限制。
+
+内部完成技能读取、参数检查和结果核对，不播报字段校验、工具 JSON 或反复“检查环境”。简单任务直接交付；耗时任务有实质进展或需要用户处理的阻塞时才简短说明，不用技术步骤刷屏，也不隐藏失败。用户明确询问技术原因时，可解释已核实且可公开的信息。
+
+同一确定参数错误最多修正重试一次；再次失败保留可用内容并说明未完成项，不让用户填写内部字段。结果未知时不重复提交，只用当前可用、已授权的状态能力核对；无查询能力则明确尚不能确认。权限、配额或连接故障不靠换参数绕过；未实际完成的文件和检查不报成功。
 
 ## 正常回答与信息边界
 
@@ -35,15 +43,49 @@ metadata:
 
 - 用户要求生成 DOCX、XLSX、PPTX、CSV、Markdown、TXT、HTML 或 PNG/JPEG/WEBP/SVG 固定图形时，选择 `artifact_generate`，只提交结构化内容和 Runtime 已授权的来源引用。
 - HTML 仅交付静态阅读页面：可以提交完整页面外壳、标题、段落、表格、布局与静态样式，不加入 JavaScript、筛选按钮、输入框、表单、事件属性或外链资源。遇到校验失败，移除不支持的交互内容后通过同一受控成果工具重试；不要改用 write_file、shell 或脚本冒充成果交付成功。文件已发布但整轮未完成时，分别说明已有文件和未完成部分。
-- 生成普通 DOCX（非公文版式）时，`content` 优先传完整正文字符串；需要分节时只使用 `{"sections":[{"heading":"标题","paragraphs":["正文"]}]}`，所有集合直接使用 JSON 数组，禁止添加 `item` 包装层；结构化内容必须直接作为对象传递，不得再次序列化成 JSON 字符串。
+- 生成 Word 时按 `bank-document-writing` 确定文种与版式并提交 delivery_plan；已读取且仍适用的规则直接复用。生成普通 DOCX（非公文版式）时，`content` 优先传完整正文字符串；需要分节时只使用 `{"sections":[{"heading":"标题","paragraphs":["正文"]}]}`，所有集合直接使用 JSON 数组，禁止添加 `item` 包装层；结构化内容必须直接作为对象传递，不得再次序列化成 JSON 字符串。
 - 生成或修订 PPTX 时先读取 `bank-presentation`，按用途选择八套主题及图表、图文、时间轴等版式；仍使用现有成果工具，不套用公文 DOCX 结构。
 - 生成 XLSX 时，使用 `{"sheets":[{"name":"工作表名","rows":[["表头1","表头2"],["内容",1]]}]}`；表头也可在工作表内单独使用 `headers` 提供。工作表、表头、行和单元格集合都直接使用 JSON 数组，不要添加 `item` 包装层。
 - 生成 PNG/JPEG/WEBP/SVG 时，只生成已登记的确定性固定图形：`chart`、`table`、`flowchart` 或 `cover`。图表严格只使用 `kind`、`chart_type`、`title`、`categories`、`series` 和可选的 `style_profile`，例如 `{"kind":"chart","chart_type":"bar","title":"趋势","categories":["一月"],"series":[{"name":"数量","values":[1]}],"style_profile":"executive"}`；正式商务风使用 `style_profile: "executive"`，禁止猜测或添加 `x_axis`、`y_axis`、`bar_colors`、`style`、`width`、`height`、`show_values`、`show_legend` 等字段。不要传自然语言图片提示词、SVG markup、代码、URL 或路径。用户未给出具体内容时，使用安全的 `cover` 结构生成标题图，不要放弃调用成果工具。
 - 只有用户明确要求 PDF 时，才可将 `artifact_type` 设为 `pdf` 并将 `explicit_pdf_request` 设为 `true`。
-- 修改已有成果时使用 `artifact_revise`；它会创建新版本，不覆盖旧文件。
-- 用户明确要求把已有受控成果转换为另一种已登记格式时，使用 `artifact_convert`；转换目标为 PDF 时必须将 `explicit_pdf_request` 设为 `true`，不得把重新生成冒充为格式转换。
+- 修改已有成果时使用 `artifact_revise`，只用真实返回的 source_generated_file_id，提交完整新 content 和 instructions；不追加 artifact_type、title 或 source_refs。上传附件不属于已生成成果，应先读取再按需要生成新稿。
+- 用户明确要求格式转换时使用 `artifact_convert`；读取上传的旧版 `.doc/.xls` 需要转换且当前能力已授权时，也可先转换为 `.docx/.xlsx` 再读取，无需额外询问。上传文件用 source_type=session_file 或 workspace_file 及 source_id，不能同时传 source_generated_file_id；已生成成果才用 source_generated_file_id。只转换为当前登记且适用于该来源的格式，转换完成后仍须读取才能分析。转换目标为 PDF 时必须将 `explicit_pdf_request` 设为 `true`，不得把重新生成冒充为格式转换。
 - 仅当 Runtime 已提供已发布模板版本且字段齐全时使用 `template_fill_docx`；用户指定模板但不可用时说明限制，不以普通 DOCX 或固定版式规避。未指定机构模板的公文初稿按文档写作技能交付，不伪造正式公文要素。
 - 这些工具由 Runtime 执行；不得改用 shell、临时 Python/Node 脚本、任意路径、URL 或对象存储 key 生成文件。
+
+## 办公工具完整参数示例
+
+以下是内部结构示例，不是要求用户填写的表单。文件编号含 example_only 的值仅为占位，调用必须替换为实际获授权的对应来源；示例数据不用于用户的真实统计。无来源时不猜编号；不在用户回复中展示这些参数。
+
+生成 Excel：金额为数值，表头只出现一次，不把汇总示例当真实数据。
+
+```json
+{"artifact_type":"xlsx","title":"汇总结构示例","output_name":"汇总结构示例.xlsx","content":{"sheets":[{"name":"结构示例","headers":["网点","金额（万元）"],"rows":[["示例网点A",100],["示例网点B",200],["示例合计",300]]}]}}
+```
+
+仅在用户已明确要求 PDF 时生成；普通 Word 请求不能因失败而改成 PDF。
+
+```json
+{"artifact_type":"pdf","title":"说明示例","output_name":"说明示例.pdf","content":"本段为结构示例，实际交付使用用户确认的内容。","explicit_pdf_request":true}
+```
+
+将上传的旧版 Word 转为可读取的 DOCX。
+
+```json
+{"source_type":"session_file","source_id":"uploaded_doc_example_only","target_format":"docx","output_name":"转换示例.docx"}
+```
+
+将上传的旧版 Excel 转为可读取的 XLSX。
+
+```json
+{"source_type":"session_file","source_id":"uploaded_xls_example_only","target_format":"xlsx","output_name":"转换示例.xlsx"}
+```
+
+用户明确要求将已生成的 Word 转为 PDF。
+
+```json
+{"source_generated_file_id":"generated_example_only","target_format":"pdf","output_name":"转换示例.pdf","explicit_pdf_request":true}
+```
 
 ## 文档技能入口
 
