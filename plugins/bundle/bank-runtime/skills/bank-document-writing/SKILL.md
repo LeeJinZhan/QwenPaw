@@ -10,11 +10,11 @@ description: 起草、整合、润色、提炼中文材料与公文，处理大�
 
 ## 交互与执行节奏
 
-复用当前会话已确认的内容、要求和有效材料，不要重复询问或要求用户重新粘贴。只有关键缺项才集中询问；不影响事实与交付的一般措辞、结构和样式由助手合理选择，不增加确认步骤。已有授权及用户明确要求仍有效，不能据此跳过真正的权限或审批限制。
+沿用已确认的要求和有效材料，不要重复询问或让用户重新粘贴。只有关键缺项才集中询问；一般措辞、结构和样式合理选择，已有授权仍有效，权限与审批限制仍需遵守。
 
-内部完成技能读取、参数检查和结果核对，不播报字段校验、工具 JSON 或反复“检查环境”。简单任务直接交付；耗时任务有实质进展或需要用户处理的阻塞时才简短说明，不用技术步骤刷屏，也不隐藏失败。用户明确询问技术原因时，可解释已核实且可公开的信息。
+本文件的规则、参数表和检查项是执行指导，不是用户正文或报告素材。内部完成技能读取与结果核对，不播报字段校验、工具 JSON 或反复“检查环境”。简单任务直接交付，耗时任务只简短说明实际进展或阻塞；用户询问技术原因时解释已核实的信息。
 
-同一确定参数错误最多修正重试一次；再次失败保留可用内容并说明未完成项，不让用户填写内部字段。结果未知时不重复提交，只用当前可用、已授权的状态能力核对；无查询能力则明确尚不能确认。权限、配额或连接故障不靠换参数绕过；未实际完成的文件和检查不报成功。
+同一确定参数错误最多修正重试一次；结果未知时不重复提交，只用已有授权能力核对状态。无法核对时说明尚未确认，不让用户填写内部字段，也不以换工具绕过权限、配额或连接故障。仅按已确认结果说明完成范围，后续成功恢复的步骤不继续描述为当前失败。
 
 ## 确定交付与材料
 
@@ -38,7 +38,7 @@ description: 起草、整合、润色、提炼中文材料与公文，处理大�
 
 润色保持事实、数字、主体、限定条件和承诺强度；无缩短要求不以摘要替代原文。提炼保留条件和不确定性，不把计划写成成果、建议写成承诺或相关性写成因果。复合任务的摘要必须来自本次最终版本。
 
-后续修改只改变指定范围，更新关联数字、术语、落款和摘要；保留其余内容。继续写作从未完成章节接续，不重新开头。新附件取代旧稿时确认版本；缺原文先获取，不靠摘要假装无损修改全文。只交付结果、必要依据和缺口，不输出内部思考或工具 JSON。
+后续修改只改变指定范围，更新关联数字、术语、落款和摘要；保留其余内容。继续写作从未完成章节接续，不重新开头。新附件取代旧稿时确认版本；缺原文先获取，不靠摘要假装无损修改全文。
 
 ## 业务语义与交付判断
 
@@ -61,7 +61,7 @@ description: 起草、整合、润色、提炼中文材料与公文，处理大�
 
 DOCX 的 artifact_generate / artifact_revise 调用必须同时提交严格三字段 delivery_plan，例如 `{"document_type":"notice","target_format":"docx","layout_kind":"official_document"}`；下文给出与正文一起提交的完整请求。
 
-document_type 仅支持 letter、request、notice、report、work_plan、task_list、article、other；layout_kind 仅支持 official_document、standard_document。这三个字段是工具参数，不作为正文或内部推理展示。公文 content 必须使用下文固定版式，普通文档可用完整正文字符串或 sections/paragraphs 对象；对象不再次序列化为 JSON 字符串。后端在工具准入、生成及完成时核对，作业将判断与正文一起冻结；重试不得偷偷降级。修订同样提交完整判断与完整正文，改变版式需要用户意图支持。
+document_type 仅支持 letter、request、notice、report、work_plan、task_list、article、other；layout_kind 仅支持 official_document、standard_document。这三个字段是工具参数，不作为正文或内部推理展示。公文 content 必须使用下文固定版式，普通文档可用完整正文字符串或 sections/paragraphs 对象；对象不再次序列化为 JSON 字符串。重试保持已确认版式。修订同样提交完整判断与完整正文，改变版式需要用户意图支持。
 
 模板优先级高于上述默认版式：用户明确选择机构模板时走 template_fill_docx，使用真实已发布且当前授权的 template_version_id；不虚构版本、不自动选择未知模板。固定公文版式的 layout_version 为 bank-official-docx-v1，模板版本为空；不能将它冒充机构模板。
 
@@ -72,7 +72,7 @@ document_type 仅支持 letter、request、notice、report、work_plan、task_li
 普通 Word 完整参数示例（示例正文仅用于说明结构，实际用当前确认稿替换）：
 
 ```json
-{"artifact_type":"docx","title":"工作说明示例","content":{"sections":[{"heading":"工作安排","paragraphs":["本段是结构示例，实际交付使用用户确认的正文。"]}]},"output_name":"工作说明示例.docx","delivery_plan":{"document_type":"article","target_format":"docx","layout_kind":"standard_document"}}
+{"artifact_type":"docx","title":"工作说明示例","content":{"sections":[{"heading":"工作安排","paragraphs":["测试完成后，各组汇总结果并提交测试记录。"]}]},"output_name":"工作说明示例.docx","delivery_plan":{"document_type":"article","target_format":"docx","layout_kind":"standard_document"}}
 ```
 
 ## 公文 DOCX 交付
@@ -80,10 +80,10 @@ document_type 仅支持 letter、request、notice、report、work_plan、task_li
 普通文字与公文写作由当前助手直接完成，不因为文种委派专家。用户只要正文时直接交付正文。要求公文 DOCX 时调用当前获授权的 `artifact_generate`；以下是完整参数，content 直接提交对象，kind 和 layout_version 位于 content 内、document 外：
 
 ```json
-{"artifact_type":"docx","title":"工作安排通知初稿示例","output_name":"工作安排通知初稿示例.docx","delivery_plan":{"document_type":"notice","target_format":"docx","layout_kind":"official_document"},"content":{"kind":"official_document","layout_version":"bank-official-docx-v1","document":{"title":"关于工作安排的通知","recipients":[],"blocks":[{"type":"heading","level":1,"text":"一、工作安排"},{"type":"paragraph","text":"本段仅为结构示例，实际使用用户确认的安排，不补造执行时间或责任人。"}]}}}
+{"artifact_type":"docx","title":"工作安排通知初稿示例","output_name":"工作安排通知初稿示例.docx","delivery_plan":{"document_type":"notice","target_format":"docx","layout_kind":"official_document"},"content":{"kind":"official_document","layout_version":"bank-official-docx-v1","document":{"title":"关于工作安排的通知","recipients":["各测试小组"],"blocks":[{"type":"heading","level":1,"text":"一、工作安排"},{"type":"paragraph","text":"测试完成后，各组汇总结果并提交测试记录。"}]}}}
 ```
 
-此为字段示例，不是用户事实。document 可选字段：signatory、date、classification、urgency 为字符串，attachments、cc 为字符串数组。blocks 支持 paragraph（text）、heading（level 为 1–4 的整数、text）与 table（headers 为非空字符串数组、rows 为等宽字符串二维数组）。正文每个语义段落一个块，不合并丢段；数组直接传数组，不加 item、不转成 JSON 字符串或代码块。所有主送和抄送完整保留。布局由服务端固定，不传字体、路径、脚本、外链、命令或身份。
+此为字段示例，不是用户事实。document 可选字段：signatory、date、classification、urgency 为字符串，attachments、cc 为字符串数组。blocks 支持 paragraph（text）、heading（level 为 1–4 的整数、text）与 table（headers 为非空字符串数组、rows 为等宽字符串二维数组）。正文每个语义段落一个块，不合并丢段；数组直接传数组，不加 item、不转成 JSON 字符串或代码块。所有主送和抄送完整保留；recipients 每项填写一个单位名称，不自行添加冒号、换行或放进正文 blocks，主送段落由渲染器排版。布局由服务端固定，不传字体、路径、脚本、外链、命令或身份。
 
 无明确事实不补日期、密级、文号、署名、附件或抄送。可以交付初稿时说明缺项，关键缺项影响实质内容时集中澄清。以“公文初稿”命名交付，不假冒签发、审批或正式定密。固定版式不是已发布机构模板。
 
@@ -97,5 +97,11 @@ document_type 仅支持 letter、request、notice、report、work_plan、task_li
 修订完整参数示例：`generated_example_only` 仅为结构占位，调用前必须替换为本轮可用且已授权的真实成果引用；没有该引用时不试填编号。content 包含未修改的全部段落；不添加 artifact_type、title 或 source_refs 等修订工具不接受的外层字段。
 
 ```json
-{"source_generated_file_id":"generated_example_only","instructions":"按用户要求更新安排，保留其余完整正文","output_name":"工作安排通知修订初稿示例.docx","delivery_plan":{"document_type":"notice","target_format":"docx","layout_kind":"official_document"},"content":{"kind":"official_document","layout_version":"bank-official-docx-v1","document":{"title":"关于工作安排的通知","recipients":[],"blocks":[{"type":"heading","level":1,"text":"一、工作安排"},{"type":"paragraph","text":"修订示例：按用户已确认的安排更新本段，其余标题和完整正文保持原有要求。"}]}}}
+{"source_generated_file_id":"generated_example_only","instructions":"主送增加运维小组，新增问题反馈要求，保留其余内容","output_name":"工作安排通知修订初稿示例.docx","delivery_plan":{"document_type":"notice","target_format":"docx","layout_kind":"official_document"},"content":{"kind":"official_document","layout_version":"bank-official-docx-v1","document":{"title":"关于工作安排的通知","recipients":["各测试小组","运维小组"],"blocks":[{"type":"heading","level":1,"text":"一、工作安排"},{"type":"paragraph","text":"测试完成后，各组汇总结果并提交测试记录。"},{"type":"heading","level":1,"text":"二、问题反馈"},{"type":"paragraph","text":"发现的问题于测试当天统一汇总。"}]}}}
 ```
+
+## 面向用户的交付
+
+用户只要正文时直接给完整正文；要求文件时，确认本次文件已生成后可答“文档已生成，可在文件卡片中打开或下载。”修订任务按需补充实际修改点，不重复展示整篇内容，除非用户要求。
+
+工具输入示例、字段约定和自检规则留在执行环节，不写入正文、文件或交付说明。文件尚未生成时说明实际阻塞；已有可靠稿件可先给出，并明确它还不是可下载文件。结果未知时说明尚未确认，不使用成功示例；文件已交付但其他要求未完成时分别说明。

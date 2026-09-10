@@ -143,3 +143,27 @@ def test_official_document_maintenance_reference_matches_native_delivery_rules()
     main = (ROOT / 'bank-document-writing/SKILL.md').read_text()
     reference = (ROOT / 'bank-document-writing/references/official-document-export.md').read_text()
     assert reference.split('## 公文 DOCX 交付', 1)[1] == main.split('## 公文 DOCX 交付', 1)[1]
+
+
+def test_office_examples_keep_maintenance_instructions_out_of_artifact_content():
+    import json
+
+    for name in ('bank-assistant-zh', 'bank-document-writing', 'bank-presentation'):
+        content = (ROOT / name / 'SKILL.md').read_text()
+        for block in re.findall(r'```json\s*\n(.*?)\n```', content, re.S):
+            request = json.loads(block)
+            artifact = json.dumps(request.get('content', {}), ensure_ascii=False)
+            for instruction in ('本段仅为结构示例', '实际交付使用用户确认', '示例用于说明字段组合', '按用户已确认的安排更新本段'):
+                assert instruction not in artifact, (name, instruction)
+
+
+def test_native_office_skills_end_with_conditional_public_delivery_guidance():
+    import asyncio
+
+    for name in ('bank-assistant-zh', 'bank-document-writing', 'bank-document-review', 'bank-document-qa', 'bank-presentation'):
+        content = asyncio.run(_read_native_skill(name))
+        delivery = content.split('## 面向用户的交付', 1)[1]
+        assert '```json' not in delivery
+        assert '文件' in delivery
+        assert '未' in delivery
+        assert '技术原因' in content
