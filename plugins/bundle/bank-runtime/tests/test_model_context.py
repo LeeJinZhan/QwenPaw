@@ -11,6 +11,28 @@ from agentscope.model import ChatResponse
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from bank_runtime.model_context import prepare_public_model_context
 from bank_runtime.gateway.middleware import BankRuntimeGatewayMiddleware
+from bank_runtime.artifact_tools import ArtifactDeliveryIntent
+
+
+@pytest.mark.asyncio
+async def test_document_schema_guidance_precedes_user_facing_answer_guidance():
+    middleware = BankRuntimeGatewayMiddleware(None, artifact_intent=ArtifactDeliveryIntent(
+        "generate", "docx", layout_kind="official_document", layout_resolution="skill"
+    ))
+    request = {"messages": [UserMsg("user", "生成通知")], "tools": []}
+    before = copy.deepcopy(request)
+
+    async def model(**kwargs):
+        return kwargs
+
+    prepared = await middleware.on_model_call(None, request, model)
+    assert request == before
+    texts = [msg.get_text_content() for msg in prepared["messages"]]
+    assert "本轮回答约定" in texts[-1]
+    assert "参数说明" in texts[-1]
+    assert "文件已生成，可在文件卡片中打开或下载。" in texts[-1]
+    assert any("bank-official-docx-v1" in text for text in texts[:-1])
+    assert any("delivery_plan" in text for text in texts[:-1])
 
 
 @pytest.mark.asyncio

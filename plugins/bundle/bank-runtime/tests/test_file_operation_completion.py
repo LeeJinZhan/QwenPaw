@@ -139,3 +139,42 @@ def test_conflicting_status_across_blocks_keeps_failure():
     content = [TextBlock(type="text", text=json.dumps({"items": [
         {"file_id": "f1", "status": status}]})) for status in ("failed", "completed")]
     assert list(parse_outcomes(content)) == [("parse:f1", False)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("scenario", ["success", "conflict", "error", "unrequested"])
+async def test_successful_reconversion_clears_only_same_source_parse_failures(scenario):
+    from agentscope.message import ToolCallBlock, ToolResultState
+
+    class Client:
+        async def report_guard(self, *args): pass
+        async def report_result(self, *args): pass
+
+    middleware = BankRuntimeGatewayMiddleware(Client())
+    middleware.converted_sources = {"converted1": "source1", "converted2": "source1", "other": "source2"}
+    middleware.unresolved_file_operations = {"parse:source1", "parse:converted1", "parse:other"}
+    payload = {"documents": [{"file_id": "converted2"}]}
+    if scenario == "conflict":
+        payload["documents"].append({"file_id": "converted1"})
+    items = [{"file_id": "converted2", "status": "completed"}]
+    if scenario == "conflict":
+        items.append({"file_id": "converted1", "status": "failed"})
+    if scenario == "unrequested":
+        payload = {"documents": [{"file_id": "other"}]}
+    middleware.prepare("MinerU__parse_documents", payload, {"tool_call_id": "call"})
+
+    async def parser():
+        yield ToolResponse(id="call", state=ToolResultState.ERROR if scenario == "error" else ToolResultState.SUCCESS, content=[TextBlock(text=json.dumps(
+            {"items": items}
+        ))])
+
+    call = ToolCallBlock(id="call", name="MinerU__parse_documents", input=json.dumps(payload))
+    _ = [item async for item in middleware.on_acting(None, {"tool_call": call}, parser)]
+    expected = {"parse:other"}
+    if scenario in {"conflict", "error", "unrequested"}:
+        expected.add("parse:converted1")
+    if scenario in {"error", "unrequested"}:
+        expected.add("parse:source1")
+    if scenario == "error":
+        expected.add("parse:converted2")
+    assert middleware.unresolved_file_operations == expected

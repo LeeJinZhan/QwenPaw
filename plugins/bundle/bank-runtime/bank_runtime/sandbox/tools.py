@@ -5,6 +5,7 @@ from __future__ import annotations
 from contextvars import ContextVar
 from dataclasses import dataclass
 import json
+import logging
 from datetime import datetime
 from .file_refs import get_file_ref_registry
 import re
@@ -22,6 +23,7 @@ _EXTENSION = re.compile(r"^\.[a-z0-9][a-z0-9.+_-]{0,31}$")
 _CONTENT_TYPE = re.compile(
     r"^[A-Za-z0-9][A-Za-z0-9!#$&^_.+*-]*/[A-Za-z0-9][A-Za-z0-9!#$&^_.+*-]*$"
 )
+_logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -144,7 +146,11 @@ async def converted_attachment_blocks(payload, result):
     try:
         prepared = await state.cache.prepare_files(state.scope, ids, state.broker)
         return _prepared_blocks(state, prepared)
-    except (RuntimeError, ValueError):
+    except (RuntimeError, ValueError) as exc:
+        _logger.warning(
+            "Converted attachment preparation failed: task_id=%s error_type=%s",
+            state.scope.task_id, type(exc).__name__,
+        )
         return [TextBlock(type="text", text="格式转换已完成，但转换后的正文尚未读取，请勿声称已经完成文档分析。")]
 
 

@@ -131,3 +131,27 @@ async def test_converted_result_issues_parser_reference_after_authorization(tmp_
         registry.revoke_task(state.scope.task_id)
         await state.cache.cleanup(state.scope.task_id)
         reset_sandbox_tool_state(token)
+
+
+@pytest.mark.asyncio
+async def test_conversion_read_failure_is_logged_without_raw_details(caplog):
+    from bank_runtime.sandbox.cache import SandboxCacheError
+    from bank_runtime.sandbox.tools import converted_attachment_blocks
+
+    class FailedCache:
+        async def prepare_files(self, *args):
+            raise SandboxCacheError("private-filename private-token")
+
+    state = _state()
+    state.cache = FailedCache()
+    token = set_sandbox_tool_state(state)
+    try:
+        blocks = await converted_attachment_blocks(
+            {"source_type": "session_file", "source_id": "file_old", "target_format": "docx"},
+            {"artifact_status": "succeeded", "generated_file_ids": ["gfile_converted"]},
+        )
+        assert "正文尚未读取" in blocks[0].text
+        assert "SandboxCacheError" in caplog.text
+        assert "private-" not in caplog.text + blocks[0].text
+    finally:
+        reset_sandbox_tool_state(token)

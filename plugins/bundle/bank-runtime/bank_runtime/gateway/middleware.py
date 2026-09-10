@@ -157,8 +157,6 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
                 if isinstance(schema, dict)
                 and str(schema.get("function", {}).get("name") or "") in allowed
             ]
-        if input_kwargs.get("messages"):
-            input_kwargs = prepare_public_model_context(input_kwargs)
         if (
             self.artifact_intent is not None
             and self.artifact_intent.layout_kind == "official_document"
@@ -199,6 +197,10 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
                     ),
                 ),
             ]
+        # Technical instructions guide tool inputs; finish the model context
+        # with public-answer guidance rather than a schema to recite.
+        if input_kwargs.get("messages"):
+            input_kwargs = prepare_public_model_context(input_kwargs)
         state = self._artifact_turn_state
         if state is None or state.invoked:
             return await next_handler(**input_kwargs)
@@ -386,7 +388,12 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
                 if tool_name == "artifact_convert" and result.get("status") == "success":
                     from ..sandbox.tools import converted_attachment_blocks
                     response.content.extend(await converted_attachment_blocks(tool_input, delivered))
-                    if tool_input.get("source_type") in {"session_file", "workspace_file"} and tool_input.get("target_format") in {"docx", "xlsx"} and not (self.artifact_intent and self.artifact_intent.operation == "convert"):
+                    if (
+                        delivered.get("artifact_status") == "succeeded"
+                        and tool_input.get("source_type") in {"session_file", "workspace_file"}
+                        and tool_input.get("target_format") in {"docx", "xlsx"}
+                        and not (self.artifact_intent and self.artifact_intent.operation == "convert")
+                    ):
                         for file_id in delivered.get("generated_file_ids") or []:
                             self.converted_sources[str(file_id)] = str(tool_input.get("source_id") or "")
                             self.unresolved_file_operations.add("parse:" + str(file_id))
@@ -420,12 +427,21 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
                     keys = operation_keys(tool_name, tool_input)
                     if keys:
                         self.unresolved_file_operations.update(keys)
-                        for key, complete in parse_outcomes(item.content):
-                            if complete:
+                        outcomes = dict(parse_outcomes(item.content))
+                        failed_keys = {key for key, complete in outcomes.items() if not complete}
+                        for key, complete in outcomes.items():
+                            if complete and key in keys and item.state == ToolResultState.SUCCESS:
                                 self.unresolved_file_operations.discard(key)
                                 source = self.converted_sources.get(key.removeprefix("parse:"))
                                 if source:
-                                    self.unresolved_file_operations.discard("parse:" + source)
+                                    recovered = {"parse:" + source} | {
+                                        "parse:" + converted
+                                        for converted, origin in self.converted_sources.items()
+                                        if origin == source
+                                    }
+                                    # Only older failures are superseded. A conflicting
+                                    # failure in this response remains unresolved.
+                                    self.unresolved_file_operations.difference_update(recovered - failed_keys)
                     status, error_code = _result_status(item)
                     await self.client.report_result(
                         tool_call_id,
