@@ -48,9 +48,12 @@ class CompactEventProjector:
     def __init__(self, runtime_task_id: str) -> None:
         self.runtime_task_id = runtime_task_id
         self._snapshots: dict[tuple[str, str], str] = {}
+        self._content_snapshots: dict[tuple[str, str], dict[str, str]] = {}
         self._message_stream_types: dict[str, str] = {}
         self._terminal = False
         self._active_message_id = ""
+        self._classified_text_messages: set[str] = set()
+        self._streamed_text_messages: set[str] = set()
 
     def project(self, raw_event: dict[str, Any]) -> list[dict[str, Any]]:
         phases = []
@@ -71,7 +74,7 @@ class CompactEventProjector:
         if any(item.get("event") == "answer.completed" for item in projected):
             message_id = self._active_message_id
             text = self._snapshots.get(("answer.chunk", message_id), "")
-            if text:
+            if text and message_id not in self._streamed_text_messages:
                 projected.insert(0, {"event": "answer.chunk", "message_id": message_id, "text": text})
             self._active_message_id = ""
         return phases + projected
@@ -145,6 +148,16 @@ class CompactEventProjector:
         ).strip().lower()
         if obj == "message" and message_id:
             self._message_stream_types[message_id] = declared_stream_type
+            if (
+                raw_event.get("type") == "message"
+                and status == "in_progress"
+                and not _text(raw_event.get("content"))
+            ):
+                # The native envelope emits this typed header at TEXT_BLOCK_START,
+                # before any text delta. A bare content/snapshot has no such proof.
+                self._classified_text_messages.add(message_id)
+            elif declared_stream_type not in {"message", "text"}:
+                self._classified_text_messages.discard(message_id)
         stream_type = (
             self._message_stream_types.get(message_id, declared_stream_type)
             if obj == "content"
@@ -164,7 +177,18 @@ class CompactEventProjector:
         current = _text(raw_content)
         key = (event, message_id)
         previous = self._snapshots.get(key, "")
-        if raw_event.get("delta"):
+        if obj == "content":
+            blocks = self._content_snapshots.setdefault(key, {})
+            index = str(raw_event.get("index") if raw_event.get("index") is not None else 0)
+            block_previous = blocks.get(index, "")
+            if raw_event.get("delta"):
+                chunk = current
+                blocks[index] = block_previous + chunk
+            else:
+                chunk = _delta(block_previous, current)
+                blocks[index] = current
+            self._snapshots[key] = "".join(blocks.values())
+        elif raw_event.get("delta"):
             chunk = current
             self._snapshots[key] = previous + chunk
         else:
@@ -173,13 +197,15 @@ class CompactEventProjector:
         if not chunk:
             return []
         if not is_thinking and obj in {"message", "content"}:
-            # Native text is provisional until the next tool/message or terminal boundary.
-            # Never publish a preamble in the final-answer channel, then retract it later.
+            # Preserve classification for ambiguous native snapshots, but do not
+            # hold explicitly typed TEXT_BLOCK streams until the response ends.
             self._active_message_id = message_id
             if len(self._snapshots[key]) > 1_000_000:
                 self._active_message_id = ""
                 return [self._terminal_event("answer.failed", error_code="WORKER_UNAVAILABLE")]
-            return []
+            if message_id not in self._classified_text_messages:
+                return []
+            self._streamed_text_messages.add(message_id)
         payload = {"event": event, "text": chunk}
         if not is_thinking and self._active_message_id == message_id:
             payload["message_id"] = message_id
