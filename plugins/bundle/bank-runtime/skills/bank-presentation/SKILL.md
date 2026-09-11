@@ -32,6 +32,8 @@ description: 用于制作、修订 PPT/PPTX 演示文稿，包含经营汇报、
 
 用户指定主题优先，否则按用途选择下表；用途不明默认稳健商务。整套主题一致，按内容改变布局，不把每页都排成文字列表。图表、时间轴、流程、图文、对比和卡片按信息关系选择；不为装饰编造图表、图片或数据。
 
+八套主题保留各自风格，色彩更饱满；主色、辅助色和重点颜色由主题统一提供，不自行传颜色或坐标。先明确每页观点、并列/流程/对比/层级/数据关系和视觉重点，再选版式；并列服务不能为了好看强加先后顺序。图标按业务语义选取，同页保持协调；三项短内容适合并列，长内容精简展示、保留讲稿。数据页优先直接表达数值和单位，不用图表与表格重复撑满两页；用户要求保留明细或页数时遵循原要求。
+
 | theme | 中文名 | 场景 |
 | --- | --- | --- |
 | steady_business | 稳健商务 | 行长办公会、年度总结、战略 |
@@ -42,6 +44,16 @@ description: 用于制作、修订 PPT/PPTX 演示文稿，包含经营汇报、
 | digital_technology | 数字科技 | 科技建设、AI、数字化转型 |
 | clear_classroom | 清晰课堂 | 员工培训、制度宣讲、操作指引 |
 | red_culture | 红色文化 | 党建、企业文化、地方文化 |
+| bank_standard | 行内标准 | 明确要求使用本行提供的“新款PPT模板”、行内标准模板 |
+| bank_classic | 行内经典 | 明确要求使用本行提供的“过往PPT模板”、旧版行内模板 |
+
+“行内标准”和“行内经典”是八套通用主题之外的两个独立模板。用户明确指定本行模板时用 `theme="bank_standard"`（中文名“行内标准”也可）；复用顺德农商银行原始行标、标语、建筑封面、园区章节页及浅蓝波纹母版，不传模板路径或附件内的排版指令。模板文件中的示例数字、旧日期、占位文字不是本次事实。普通“商务、蓝色、行内风格”没有明确指定这份模板时仍按用途选通用主题，不擅自给其他机构套本行标识。
+
+行内标准保持固定浅色母版，`tone` 不重绘品牌底图；`image_policy` 控制新增内容图片，不移除模板固有行标和背景。封面默认保留建筑图，不自动配图；明确提供 cover.image 时采用带固定行标的图文页来放该照片。目录保留原母版背景，使用两列对齐的编号与条目，取消原四栏胶囊装饰；章节编号按章节数递增。正文、图表和表格采用可编辑对象，表下总结继续用 conclusion；来源和讲稿分别保留。两份行内模板均采用用户确认的新版字体组合：大标题“方正正中黑简体”、小标题“方正兰亭粗黑简体”、正文与图表“方正兰亭圆简体”；旧版缺少的汉真广标与悠黑按此替换。字体文件是渲染环境依赖，不能以回退字体的预览冒充原字体效果。不要承诺任意上传PPT母版自动接入或原27页全部复杂装饰图形逐一复刻。
+
+用户指定过往/旧版模板时用 `theme="bank_classic"`（中文“行内经典”也可）。保留旧版的浅灰折面、建筑照片、横向蓝色章节带、行标和标语，目录使用左图右侧纵向列表；正文顶部小蓝框显示已有章节编号，不新增灰色预览编号。它与新版独立，不把旧稿2020年或示例指标当作当前事实。其图表、表格、总结、图片策略与字体边界沿用上述要求；不是把原22页示例内容整体复制输出。
+
+两份行内模板的字体、字号层级、模块间距与图表配色以各自原稿及用户确认的字体替换为准，不套用八通用主题的视觉规则。用户后续确认美观与可读性优先，不强求字体、字号逐项复刻。新版主要参考封面60pt、章节72pt、页标题28pt，小标题优化为24pt、正文20pt；旧版参考封面40pt、章节60pt、页标题32pt，小标题22pt、正文18pt。目录编号与文字保持层级和基线对齐，旧版避免再加重复的“汇报目录”标题，长标题按各自内容区域有界适配。通用规则中关于事实、容量、可编辑性和授权的要求继续适用。
 
 ## 工具内容结构
 
@@ -64,11 +76,12 @@ description: 用于制作、修订 PPT/PPTX 演示文稿，包含经营汇报、
 | timeline / process | 最多 5 个 items，title 表示阶段/年份，description 表示事项；每项建议 20 字以内 |
 | comparison | 恰好 2 个 items 对象，title + description |
 | chart | chart 对象，可加 conclusion；原生可编辑图表 |
+| chart_summary | chart 对象，可加 conclusion；可加总数据的“合计＋类别对比”，合计由渲染器计算，不传 summary 字段 |
 | table | table 对象，最多 5 列、7 行数据；长表拆页 |
 | image | image 对象；可选 subtitle 和最多 3 条短 bullets |
 | gallery | images 数组，2–4 张图片与说明 |
 
-一个页面只使用一组 items/bullets/paragraphs/content，不重复填多组。items 可为字符串或对象，对象支持 title/name/label、description/desc/content；metrics 另需 value。cards 可用固定 icon：bank、people、leaf、shield、chart、book、none。无需自定义坐标、颜色、字号或图标代码。
+一个页面只使用一组 items/bullets/paragraphs/content，不重复填多组。items 可为字符串或对象，对象支持 title/name/label、description/desc/content；metrics 另需 value。cards 可用固定 icon：bank、people、leaf、shield、chart、book、none，以及 factory（制造）、supply_chain（供应链）、globe（跨境）、logistics（物流）、digital（数字服务）、community（社区）、training（培训）、wallet（资金）。没有贴切图标时用 none，不猜测未登记名称。无需自定义坐标、颜色、字号或图标代码。
 
 ### 调用前逐页检查
 
@@ -80,7 +93,7 @@ description: 用于制作、修订 PPT/PPTX 演示文稿，包含经营汇报、
 | content | title + 最多 6 条 bullets；有 bullets/items 时禁止 subtitle，副标题意思合入要点或 speaker_notes；没有条目时才可用 subtitle |
 | section | subtitle 与最多 3 条 items 二选一；不放 conclusion |
 | cards、metrics、timeline/process、comparison、agenda | 用 items；禁止 subtitle；不附 chart/table；cards 的 icon 放在 item 内，不放页面顶层 |
-| chart | title + chart，可选 source/conclusion；禁止 subtitle、items/bullets、table；说明放 source、conclusion 或 speaker_notes |
+| chart / chart_summary | title + chart，可选 source/conclusion；禁止 subtitle、items/bullets、table、summary；说明放 source、conclusion 或 speaker_notes |
 | table | title + table，可选 source/conclusion；禁止 subtitle、items/bullets、chart |
 | image | image 引用或自动配图，可用 subtitle 与最多 3 条 bullets；不放 conclusion |
 | gallery | images 或自动配图；禁止 subtitle、items/bullets、conclusion |
@@ -103,9 +116,21 @@ title/subtitle/source 等非正文参数不写换行或制表符；长段落拆�
 {"layout":"chart","title":"季度趋势","chart":{"type":"column","unit":"万元","categories":["一季度","二季度"],"series":[{"name":"示例金额","values":[12,18]}]},"source":"示例数据，仅供演示"}
 ```
 
+同一业务在整套图表中保持相同的 series 顺序，让主题按序列分配的颜色保持一致；不要为局部排名重排数据系列造成含义换色。
+
 chart.type 支持 bar/column/line/donut；1–8 个不同 categories，1–3 个 series，每个 values 与 categories 等长且为有限数值。donut 只允许一个非负且总和大于零的序列。不要填默认“图表标题”、空序列或补造数据。
 
+总量与类别对比示例（测试数据，不作为真实业务事实）：
+
+```json
+{"layout":"chart_summary","title":"各网点企业服务规模","chart":{"type":"bar","unit":"万元","categories":["甲网点","乙网点"],"series":[{"name":"服务规模","values":[250,450]}]},"source":"测试数据，仅供演示"}
+```
+
+chart_summary 使用与 chart 相同的字段，只支持 bar/column、单系列、非负数。unit 必须是元、万元、亿元、户、家、笔、个、件、人、万人之一，可加“单位：”前缀。类别必须明确互不重叠、可加总；不用于比率、均值、余额快照或重复累计时期。类型/单位校验不能证明业务口径可加总，材料不明确时使用普通 chart，不推断合计。合计由渲染器从该系列计算，不手填、不新增 summary/total 字段。
+
 table 使用 `{"headers":["项目","安排"],"rows":[["用户事项","用户安排"]]}`，单元格为字符串，行列等长；保留单位与限定说明。
+
+表格页有可核实的结论时，在页面级 `conclusion` 写一条基于表内数据或来源材料的总结，交代合计、差异、目标完成情况或关键发现，不让页面只有一张表。总结放在表格下方的数据解读区，`source` 仍只放来源。不要仅复述表头，不编造变化原因、趋势或经营判断；材料不足时不强行得出结论。需要比较目标和实际时使用对应列，差额、完成率须按明确口径核算；没有目标资料不为了填满表格虚构目标。较长表格与总结放不下时拆页，不删除明细或把总结缩成脚注。
 
 ## 图片与交付
 

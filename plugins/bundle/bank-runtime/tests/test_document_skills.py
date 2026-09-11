@@ -117,6 +117,21 @@ def test_presentation_image_policy_guidance_is_available_via_native_skill_viewer
         assert required in content
 
 
+def test_presentation_summary_and_business_icons_survive_native_skill_viewer():
+    import asyncio
+    import json
+
+    content = asyncio.run(_read_native_skill("bank-presentation"))
+    examples = [json.loads(block) for block in re.findall(r"```json\s*\n(.*?)\n```", content, re.S)]
+    summary = next(item for item in examples if item.get("layout") == "chart_summary")
+    assert summary["chart"]["series"][0]["values"] == [250, 450]
+    assert "summary" not in summary
+    for icon in ("factory", "supply_chain", "globe", "logistics", "digital", "community", "training", "wallet"):
+        assert icon in content
+    for rule in ("合计由渲染器", "重复累计时期", "材料不明确时使用普通 chart", "不传 summary 字段", "无需自定义坐标"):
+        assert rule in content
+
+
 def test_presentation_complete_request_and_recovery_rules_survive_native_viewer():
     import asyncio
     import json
