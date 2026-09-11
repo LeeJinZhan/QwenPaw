@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 import os
 from pathlib import Path
+
 from dotenv import load_dotenv
 
 # Load .env file from project root before reading any env vars
@@ -86,6 +87,17 @@ class EnvVarLoader:
         return _get_env(env_var, default)
 
 
+CUSTOM_AGENT_STARTUP_CONCURRENCY_ENV = (
+    "QWENPAW_CUSTOM_AGENT_STARTUP_CONCURRENCY"
+)
+DEFAULT_CUSTOM_AGENT_STARTUP_CONCURRENCY = 5
+CUSTOM_AGENT_STARTUP_CONCURRENCY = EnvVarLoader.get_int(
+    CUSTOM_AGENT_STARTUP_CONCURRENCY_ENV,
+    default=DEFAULT_CUSTOM_AGENT_STARTUP_CONCURRENCY,
+    min_value=1,
+)
+
+
 # WORKING_DIR priority:
 # 1. QWENPAW_WORKING_DIR / COPAW_WORKING_DIR env var is set → use it
 # 2. ~/.copaw exists (legacy installation) → use it as-is
@@ -114,6 +126,33 @@ SECRET_DIR = (
 KEYRING_ACCOUNT_ENV = "QWENPAW_KEYRING_ACCOUNT"
 
 PROJECT_NAME = "QwenPaw"
+
+# Message metadata tags shared across agent middleware and memory managers.
+QWENPAW_MESSAGE_TAG_KEY = "qwenpaw_tag"
+QWENPAW_CLIENT_MESSAGE_ID_KEY = "qwenpaw_client_message_id"
+SCROLL_MEMORY_MESSAGE_TAG = "scroll_memory"
+AUTO_MEMORY_SEARCH_BLOCK_IDS_KEY = "auto_memory_search_block_ids"
+EXTERNAL_USER_QUERY_MESSAGE_TAG = "external_user_query"
+AUTO_CONTINUE_MESSAGE_TAG = "auto_continue"
+LOOP_CONTINUATION_MESSAGE_TAG = "loop_continuation"
+RUBRIC_EVALUATION_MESSAGE_TAG = "rubric_evaluation"
+# User-role messages the runtime injects to keep a turn going. They are NOT
+# new requests: the scroll active-turn anchor (live scan + SQL floor) must
+# skip them, or the anchor jumps to the stub and the REAL request becomes
+# evictable/searchable again (the #5746 failure mode, loop-session flavor).
+SYNTHETIC_USER_MESSAGE_TAGS = frozenset(
+    {
+        AUTO_CONTINUE_MESSAGE_TAG,
+        LOOP_CONTINUATION_MESSAGE_TAG,
+        RUBRIC_EVALUATION_MESSAGE_TAG,
+    },
+)
+AUTO_MEMORY_SEARCH_TEXT = (
+    "I'll check memory for relevant context before answering."
+)
+AUTO_MEMORY_SEARCH_THINKING_PREFIX = (
+    "I should search long-term memory before answering."
+)
 
 # Subdirectory name inside each agent's workspace that holds cloned / imported
 # coding projects.
@@ -189,6 +228,8 @@ CONFIG_FILE = EnvVarLoader.get_str("QWENPAW_CONFIG_FILE", "config.json")
 HEARTBEAT_FILE = EnvVarLoader.get_str("QWENPAW_HEARTBEAT_FILE", "HEARTBEAT.md")
 HEARTBEAT_DEFAULT_EVERY = "6h"
 HEARTBEAT_DEFAULT_TARGET = "main"
+HEARTBEAT_DEFAULT_TIMEOUT_SECONDS = 300
+HEARTBEAT_MAX_TIMEOUT_SECONDS = 3600
 HEARTBEAT_TARGET_LAST = "last"
 HEARTBEAT_TARGET_INBOX = "inbox"
 
@@ -242,9 +283,6 @@ BACKUP_DIR = (
     .resolve()
 )
 
-# Custom channel modules (installed via `qwenpaw channels install`); manager
-# loads BaseChannel subclasses from here.
-CUSTOM_CHANNELS_DIR = WORKING_DIR / "custom_channels"
 
 # Plugin directory (installed via `qwenpaw plugin install`)
 PLUGINS_DIR = WORKING_DIR / "plugins"
@@ -355,6 +393,7 @@ try:
 except (TypeError, ValueError):
     TOOL_GUARD_APPROVAL_TIMEOUT_SECONDS = 300.0
 
+
 # Tool guard approval heartbeat interval (seconds).
 # Sends periodic heartbeat messages during approval wait to keep SSE
 # connection alive. Should be less than browser/proxy timeout (30-60s).
@@ -367,6 +406,20 @@ try:
     )
 except (TypeError, ValueError):
     TOOL_GUARD_APPROVAL_HEARTBEAT_INTERVAL = 15.0
+
+# TTL for learned model capability cache entries (seconds).
+# 0 disables expiry. Stale entries from transient upstream failures
+# (e.g. a gateway routing a multimodal model to a text-only backend)
+# are discarded after this duration.
+try:
+    CAPABILITY_CACHE_TTL_SECONDS = max(
+        float(
+            _get_env("QWENPAW_CAPABILITY_CACHE_TTL_SECONDS", "1800"),
+        ),
+        0.0,
+    )
+except (TypeError, ValueError):
+    CAPABILITY_CACHE_TTL_SECONDS = 1800.0
 
 # Marker prepended to every truncation notice.
 # Format:

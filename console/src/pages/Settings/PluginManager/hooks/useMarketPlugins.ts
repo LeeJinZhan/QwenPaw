@@ -5,8 +5,12 @@ import {
   fetchMarketPlugins,
   buildMarketDownloadUrl,
   type MarketPluginEntry,
+  type MarketPluginSortBy,
 } from "@/api/modules/pluginMarket";
 import { installPlugin } from "@/api/modules/plugin";
+import { isMarketPluginCompatible } from "@/utils/pluginCompatibility";
+
+export { isMarketPluginCompatible } from "@/utils/pluginCompatibility";
 
 interface UseMarketPluginsOptions {
   onInstalled: () => void;
@@ -26,10 +30,43 @@ export function useMarketPlugins({ onInstalled }: UseMarketPluginsOptions) {
   const [pageSize] = useState(20);
   const [search, setSearch] = useState("");
   const [category, setCategory] = useState<string | undefined>(undefined);
+  const [sortBy, setSortBy] = useState<MarketPluginSortBy>("downloads");
   const [installingId, setInstallingId] = useState<string | null>(null);
+  const [qwenpawVersion, setQwenpawVersion] = useState<string | null>(null);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    fetch("/api/version", { signal: controller.signal })
+      .then((res) => {
+        if (!res.ok) {
+          throw new Error(`HTTP ${res.status}`);
+        }
+        return res.json();
+      })
+      .then((data) => {
+        const version =
+          typeof data === "object" && data !== null ? data.version : null;
+        setQwenpawVersion(typeof version === "string" ? version : null);
+      })
+      .catch((err) => {
+        if (err instanceof Error && err.name === "AbortError") {
+          return;
+        }
+        console.error("[useMarketPlugins] failed to fetch version:", err);
+        setQwenpawVersion(null);
+      });
+    return () => {
+      controller.abort();
+    };
+  }, []);
 
   const loadPlugins = useCallback(
-    async (pageNum: number, keyword: string, cat?: string) => {
+    async (
+      pageNum: number,
+      keyword: string,
+      cat: string | undefined,
+      sort: MarketPluginSortBy,
+    ) => {
       setLoading(true);
       setError(null);
       try {
@@ -38,6 +75,7 @@ export function useMarketPlugins({ onInstalled }: UseMarketPluginsOptions) {
           page_size: pageSize,
           search: keyword || undefined,
           category: cat || undefined,
+          sort_by: sort,
         });
         setPlugins(data.plugins ?? []);
         setTotal(data.total);
@@ -53,8 +91,8 @@ export function useMarketPlugins({ onInstalled }: UseMarketPluginsOptions) {
   );
 
   useEffect(() => {
-    void loadPlugins(page, search, category);
-  }, [page, search, category, loadPlugins]);
+    void loadPlugins(page, search, category, sortBy);
+  }, [page, search, category, sortBy, loadPlugins]);
 
   const handleSearch = useCallback((keyword: string) => {
     setSearch(keyword);
@@ -66,13 +104,24 @@ export function useMarketPlugins({ onInstalled }: UseMarketPluginsOptions) {
     setPage(1);
   }, []);
 
+  const handleSortChange = useCallback((sort: MarketPluginSortBy) => {
+    setSortBy(sort);
+    setPage(1);
+  }, []);
+
   const handlePageChange = useCallback((newPage: number) => {
     setPage(newPage);
   }, []);
 
   const handleRefresh = useCallback(() => {
-    void loadPlugins(page, search, category);
-  }, [loadPlugins, page, search, category]);
+    void loadPlugins(page, search, category, sortBy);
+  }, [loadPlugins, page, search, category, sortBy]);
+
+  const isCompatible = useCallback(
+    (entry: MarketPluginEntry) =>
+      isMarketPluginCompatible(entry, qwenpawVersion),
+    [qwenpawVersion],
+  );
 
   const handleInstall = useCallback(
     async (entry: MarketPluginEntry) => {
@@ -106,9 +155,13 @@ export function useMarketPlugins({ onInstalled }: UseMarketPluginsOptions) {
     page,
     pageSize,
     category,
+    sortBy,
     installingId,
+    qwenpawVersion,
+    isCompatible,
     handleSearch,
     handleCategoryChange,
+    handleSortChange,
     handlePageChange,
     handleRefresh,
     handleInstall,

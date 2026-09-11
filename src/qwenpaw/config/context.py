@@ -7,16 +7,22 @@ correctly in a multi-agent environment.
 """
 from __future__ import annotations
 
-from contextvars import ContextVar, Token
+from contextvars import ContextVar
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from agentscope.state import AgentState
     from agentscope.tool import Toolkit
 
 # Context variable to store the current agent's workspace directory
 current_workspace_dir: ContextVar[Path | None] = ContextVar(
     "current_workspace_dir",
+    default=None,
+)
+
+current_project_dir: ContextVar[Path | None] = ContextVar(
+    "current_project_dir",
     default=None,
 )
 
@@ -37,6 +43,16 @@ def set_current_workspace_dir(workspace_dir: Path | None) -> None:
         workspace_dir: Path to the agent's workspace directory.
     """
     current_workspace_dir.set(workspace_dir)
+
+
+def get_current_project_dir() -> Path | None:
+    """Get the effective project directory for the current turn."""
+    return current_project_dir.get()
+
+
+def set_current_project_dir(project_dir: Path | None) -> None:
+    """Set the immutable effective project directory for the current turn."""
+    current_project_dir.set(project_dir)
 
 
 # Context variable to store the recent_max_bytes limit
@@ -163,83 +179,29 @@ def set_current_toolkit(toolkit: Toolkit | None) -> None:
     current_toolkit.set(toolkit)
 
 
-current_runtime_tool_gateway: ContextVar[dict[str, Any] | None] = ContextVar(
-    "current_runtime_tool_gateway",
+# Context variable to store the current agent's AgentState instance.
+# Set per-request by ContextVarsSetupHook so that sub-tool calls
+# (e.g. run_tool_batch) can invoke toolkit.call_tool() with the
+# correct state for permission checking and state injection.
+current_agent_state: ContextVar[AgentState | None] = ContextVar(
+    "current_agent_state",
     default=None,
 )
 
 
-def get_current_runtime_tool_gateway() -> dict[str, Any] | None:
-    """Get Runtime Tool Gateway metadata for the current tool call."""
-    return current_runtime_tool_gateway.get()
+def get_current_agent_state() -> AgentState | None:
+    """Get the current agent's AgentState from context.
+
+    Returns:
+        The current AgentState instance, or None if not set.
+    """
+    return current_agent_state.get()
 
 
-def set_current_runtime_tool_gateway(
-    gateway: dict[str, Any] | None,
-) -> None:
-    """Set Runtime Tool Gateway metadata for the current tool call."""
-    current_runtime_tool_gateway.set(gateway)
+def set_current_agent_state(state: AgentState | None) -> None:
+    """Set the current agent's AgentState in context.
 
-
-current_runtime_attachments_manifest: ContextVar[list[dict[str, Any]] | None] = ContextVar(
-    "current_runtime_attachments_manifest",
-    default=None,
-)
-
-
-def get_current_runtime_attachments_manifest() -> list[dict[str, Any]] | None:
-    """Get Runtime-issued attachment grants for the current request."""
-    return current_runtime_attachments_manifest.get()
-
-
-def set_current_runtime_attachments_manifest(
-    manifest: list[dict[str, Any]] | None,
-) -> None:
-    """Set Runtime-issued attachment grants for the current request."""
-    current_runtime_attachments_manifest.set(manifest)
-
-
-current_runtime_sandbox_context: ContextVar[dict[str, Any] | None] = ContextVar(
-    "current_runtime_sandbox_context",
-    default=None,
-)
-
-
-def get_current_runtime_sandbox_context() -> dict[str, Any] | None:
-    """Get Runtime-issued sandbox context for the current request."""
-    return current_runtime_sandbox_context.get()
-
-
-def set_current_runtime_sandbox_context(
-    sandbox_context: dict[str, Any] | None,
-) -> None:
-    """Set Runtime-issued sandbox context for the current request."""
-    current_runtime_sandbox_context.set(sandbox_context)
-
-
-current_runtime_discovered_file_ids: ContextVar[frozenset[str]] = ContextVar(
-    "current_runtime_discovered_file_ids",
-    default=frozenset(),
-)
-
-
-def get_current_runtime_discovered_file_ids() -> frozenset[str]:
-    """Get file IDs discovered during the current Runtime request."""
-    return current_runtime_discovered_file_ids.get()
-
-
-def set_current_runtime_discovered_file_ids(
-    file_ids: frozenset[str] | set[str] | list[str] | tuple[str, ...],
-) -> Token:
-    """Replace request-local discovered file IDs and return a reset token."""
-    normalized = frozenset(
-        str(file_id).strip()
-        for file_id in file_ids
-        if str(file_id).strip()
-    )
-    return current_runtime_discovered_file_ids.set(normalized)
-
-
-def reset_current_runtime_discovered_file_ids(token: Token) -> None:
-    """Restore discovered file IDs to the value before this request."""
-    current_runtime_discovered_file_ids.reset(token)
+    Args:
+        state: AgentState instance to store in context.
+    """
+    current_agent_state.set(state)

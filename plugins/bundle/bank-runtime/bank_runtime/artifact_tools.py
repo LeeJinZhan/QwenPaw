@@ -1,0 +1,353 @@
+"""Runtime-executed office artifact tools.
+
+These functions define the model-facing JSON schema only.  Bank Runtime's
+Gateway middleware intercepts every admitted call and executes it in Runtime;
+falling through to the local function is therefore a fail-closed condition.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Mapping
+from dataclasses import dataclass
+import re
+from typing import Any
+
+from qwenpaw.exceptions import AgentRuntimeErrorException
+from qwenpaw.hooks.base import LifecycleHook
+from qwenpaw.runtime.hooks import HookContext, HookResult
+from qwenpaw.runtime.phases import Phase
+
+
+_UNMEDIATED = "成果工具必须通过 Bank Runtime Tool Gateway 执行。"
+_SAFE_FORMAT = re.compile(r"[a-z0-9][a-z0-9._-]{0,31}")
+_OPERATIONS = frozenset({"generate", "revise", "convert", "template_fill"})
+
+ARTIFACT_RUNTIME_ACTION_BY_TOOL = {
+    "artifact_generate": "artifact.generate",
+    "artifact_revise": "artifact.revise",
+    "artifact_convert": "artifact.convert",
+    "template_fill_docx": "template.fill",
+}
+ARTIFACT_WORKER_TOOL_NAMES = frozenset(ARTIFACT_RUNTIME_ACTION_BY_TOOL)
+
+
+@dataclass(frozen=True)
+class ArtifactDeliveryIntent:
+    """Trusted, structured marker for one required artifact delivery."""
+
+    operation: str
+    target_format: str
+    source_refs: tuple[str, ...] = ()
+    layout_kind: str = ""
+    layout_resolution: str = ""
+
+
+def complete_artifact_tool_input(
+    tool_name: str,
+    payload: Mapping[str, Any],
+    intent: ArtifactDeliveryIntent | None,
+) -> dict[str, Any]:
+    """Carry explicit PDF intent from the trusted request into both call phases.
+
+    Model tool arguments are not evidence of user consent. Only a matching
+    Runtime-authored delivery marker can supply an omitted confirmation.
+    Resource authorization and the original contract validation still apply.
+    """
+    result = dict(payload)
+    operation, format_field = {
+        "artifact_convert": ("convert", "target_format"),
+        "artifact_generate": ("generate", "artifact_type"),
+    }.get(tool_name, ("", ""))
+    if (
+        intent is not None
+        and operation == intent.operation
+        and intent.target_format == "pdf"
+        and str(payload.get(format_field) or "").strip().lower() == "pdf"
+        and "explicit_pdf_request" not in payload
+    ):
+        result["explicit_pdf_request"] = True
+    return result
+
+
+class ArtifactToolNotInvokedError(AgentRuntimeErrorException):
+    """The model answered in text instead of invoking an admitted tool."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            error_code="ARTIFACT_TOOL_NOT_INVOKED",
+            message="明确的成果交付请求未调用受控成果工具",
+            details={},
+        )
+
+
+class ArtifactInputRetryExhaustedError(ArtifactToolNotInvokedError):
+    """Stop this turn after repeated rejected input, before another model call."""
+
+    def __init__(self) -> None:
+        AgentRuntimeErrorException.__init__(
+            self,
+            error_code="ARTIFACT_VALIDATION_FAILED",
+            message="文件参数多次校验失败，本轮已停止，请核对已交付文件和未完成项。",
+            details={},
+        )
+
+
+class FileOperationsIncompleteError(ArtifactToolNotInvokedError):
+    def __init__(self) -> None:
+        AgentRuntimeErrorException.__init__(
+            self, error_code="ARTIFACT_OUTPUT_MISSING",
+            message="部分文件处理或交付尚未完成，请查看已交付文件和失败步骤。", details={},
+        )
+
+
+class ArtifactDeliveryErrorHook(LifecycleHook):
+    """Expose the stable artifact error without leaking candidate model text."""
+
+    phase = Phase.ON_ERROR
+    name = "bank_runtime_artifact_delivery_error"
+    priority = 90
+
+    async def run(self, ctx: HookContext) -> HookResult:
+        if isinstance(ctx.error, ArtifactToolNotInvokedError):
+            ctx.extras["_error_code"] = ctx.error.error_code
+            ctx.extras["_error_text"] = ctx.error.message
+        return HookResult()
+
+
+def parse_artifact_delivery_intent(value: Any) -> ArtifactDeliveryIntent | None:
+    """Parse only Runtime-authored structured intent; never infer from prose."""
+
+    if not isinstance(value, Mapping):
+        return None
+    operation = str(value.get("operation") or "").strip().lower()
+    target_format = str(value.get("target_format") or "").strip().lower()
+    if (
+        value.get("schema_version") != "1.0"
+        or value.get("kind") != "artifact"
+        or value.get("required") is not True
+        or operation not in _OPERATIONS
+        or not _SAFE_FORMAT.fullmatch(target_format)
+    ):
+        return None
+    raw_refs = value.get("source_refs", [])
+    if not isinstance(raw_refs, list):
+        return None
+    refs = tuple(str(item).strip() for item in raw_refs)
+    if any(not item for item in refs) or len(set(refs)) != len(refs):
+        return None
+    layout_kind = value.get("layout_kind", "")
+    if "layout_kind" in value and (
+        not isinstance(layout_kind, str)
+        or layout_kind not in {"official_document", "standard_document"}
+        or target_format != "docx"
+        or operation not in {"generate", "revise"}
+    ):
+        return None
+    layout_resolution = value.get("layout_resolution", "")
+    if "layout_resolution" in value and (
+        layout_resolution != "skill"
+        or target_format != "docx"
+        or operation not in {"generate", "revise"}
+    ):
+        return None
+    return ArtifactDeliveryIntent(
+        operation=operation,
+        target_format=target_format,
+        source_refs=refs,
+        layout_kind=layout_kind,
+        layout_resolution=layout_resolution,
+    )
+
+
+def artifact_delivery_intent_from_request(
+    request: Any,
+) -> ArtifactDeliveryIntent | None:
+    """Read the same marker from the supported Runtime request envelopes."""
+
+    direct = parse_artifact_delivery_intent(
+        getattr(request, "output_requirement", None),
+    )
+    if direct is not None:
+        return direct
+    for field in ("request_context", "runtime_context"):
+        container = getattr(request, field, None)
+        if isinstance(container, Mapping):
+            parsed = parse_artifact_delivery_intent(
+                container.get("output_requirement"),
+            )
+            if parsed is not None:
+                return parsed
+    return None
+
+
+async def artifact_generate(
+    artifact_type: str,
+    title: str,
+    content: dict[str, Any] | list[Any] | str,
+    instructions: str = "",
+    source_refs: list[dict[str, str]] | None = None,
+    output_name: str = "",
+    explicit_pdf_request: bool = False,
+    delivery_plan: dict[str, str] | None = None,
+) -> str:
+    """Generate one controlled office, text, or fixed-graphic artifact.
+
+    Args:
+        artifact_type: One of ``docx``, ``xlsx``, ``pptx``, ``csv``,
+            ``markdown``, ``txt``, ``html``, ``png``, ``jpeg``, ``webp``,
+            ``svg`` or explicitly requested ``pdf``.
+        title: User-visible artifact title.
+        content: Complete artifact body. For DOCX, use a non-empty plain string
+            or exactly ``{"paragraphs": ["正文"]}`` / ``{"sections":
+            [{"heading": "标题", "paragraphs": ["正文"]}]}``. Arrays must be
+            JSON arrays; never wrap them in an ``{"item": ...}`` object. Pass
+            structured content as an object; do not JSON-encode it as a string.
+            For an official document draft, use ``{"kind": "official_document",
+            "layout_version": "bank-official-docx-v1", "document": {"title":
+            "标题", "recipients": [], "blocks": [{"type": "paragraph",
+            "text": "正文"}]}}``. Read bank-document-writing for heading/table
+            and optional fields. Keep document.title independent of filenames.
+            A requested institution template still requires template_fill_docx
+            and its published, authorized version. Never silently substitute
+            this fixed layout when that template is unavailable.
+            For PPTX, first read bank-presentation for eight themes, layouts, and
+            authorized image source_index (1-based source_refs). Use
+            ``{"theme": "steady_business", "slides": [{"layout": "title", "title":
+            "封面", "subtitle": "副标题"}, {"title": "内容页",
+            "bullets": ["要点"], "speaker_notes": "讲稿"}]}``.
+            For XLSX, use ``{"sheets": [{"name": "数据", "rows":
+            [["表头1", "表头2"], ["内容", 1]]}]}``; ``{"headers":
+            ["表头1", "表头2"]}`` may be supplied separately inside a sheet
+            and is prepended to ``rows``.
+            For HTML, pass a static HTML string or ``{"text": "<h2>标题</h2><p>正文</p>"}``.
+            Full html/head/body wrappers and static layout/CSS are supported.
+            Do not include script, button, input, forms, event attributes,
+            links, external resources, CSS url/import or JavaScript filters.
+            Use headings, sections and tables for a static reading experience.
+            If validation fails, simplify to static content and retry this
+            controlled artifact tool; never fall back to write_file or shell
+            to claim that the requested artifact was delivered.
+            For PNG/JPEG/WEBP/SVG, provide a deterministic fixed graphic such
+            as ``{"kind": "chart", "chart_type": "bar", "title": "趋势",
+            "categories": ["一月"], "series": [{"name": "数量", "values":
+            [1]}], "style_profile": "executive"}``. This schema is strict:
+            a chart may contain only ``kind``, ``chart_type``, ``title``,
+            ``categories``, ``series`` and optional ``style_profile``. Use
+            ``style_profile: executive`` for a formal/business look. Never add
+            guessed fields such as ``x_axis``, ``y_axis``, ``bar_colors``,
+            ``style``, ``width``, ``height``, ``show_values`` or
+            ``show_legend``. Fixed graphics also support registered ``table``,
+            ``flowchart`` and ``cover`` structures; they are not free-form
+            image-generation prompts.
+        instructions: Optional bounded formatting or revision guidance.
+        source_refs: Runtime-authorized source identifiers only.
+        output_name: Optional safe output filename.
+        delivery_plan: For DOCX generation/revision, register the writing skill's
+            semantic decision as exactly {"document_type": "letter", "target_format":
+            "docx", "layout_kind": "official_document"}. document_type is letter,
+            request, notice, report, work_plan, task_list, article or other;
+            layout_kind is official_document or standard_document. Infer from
+            communicative purpose and user instructions, not title keywords.
+            Match content to this decision; never downgrade explicit official
+            requirements. Institution templates use template_fill_docx instead.
+        explicit_pdf_request: Must be true only when the user asked for PDF.
+    """
+    del (
+        artifact_type,
+        title,
+        content,
+        instructions,
+        source_refs,
+        output_name,
+        explicit_pdf_request,
+        delivery_plan,
+    )
+    return _UNMEDIATED
+
+
+async def artifact_revise(
+    source_generated_file_id: str,
+    instructions: str,
+    content: dict[str, Any] | list[Any] | str,
+    output_name: str = "",
+    delivery_plan: dict[str, str] | None = None,
+) -> str:
+    """Create a new version of an existing Runtime-generated Office file.
+
+    Args:
+        source_generated_file_id: Runtime-generated source file identifier.
+        instructions: Requested changes.
+        content: Complete structured content for the new version. Official
+            documents retain kind, layout_version and document.title, including
+            every unchanged block; do not pass only a patch or revised section.
+        output_name: Optional safe output filename.
+        delivery_plan: DOCX semantic decision using the same strict three fields
+            and enums as artifact_generate. Preserve the original purpose/layout
+            unless the user requests a change; send complete revised content.
+    """
+    del source_generated_file_id, instructions, content, output_name, delivery_plan
+    return _UNMEDIATED
+
+
+async def artifact_convert(
+    source_generated_file_id: str = "",
+    target_format: str = "",
+    output_name: str = "",
+    explicit_pdf_request: bool = False,
+    source_type: str = "",
+    source_id: str = "",
+) -> str:
+    """Convert an authorized source through an admitted worker.
+
+    For uploaded .doc/.xls, set source_type=session_file, source_id to its file_id,
+    target_format=docx/xlsx, and omit source_generated_file_id. For personal files
+    use workspace_file. Read the returned converted attachment before analysis.
+    A converted file alone is not a completed analysis or a revised deliverable.
+
+    Args:
+        source_generated_file_id: Existing generated source; omit for uploaded files.
+        source_type: session_file or workspace_file for uploaded sources.
+        source_id: Authorized uploaded source file identifier.
+        target_format: Registered target format selected by Runtime.
+        output_name: Optional safe output filename.
+        explicit_pdf_request: Must be true only when the user asked for PDF.
+    """
+    del source_generated_file_id, target_format, output_name, explicit_pdf_request, source_type, source_id
+    return _UNMEDIATED
+
+
+async def template_fill_docx(
+    template_version_id: str,
+    title: str,
+    fields: dict[str, Any],
+    instructions: str = "",
+    source_refs: list[dict[str, str]] | None = None,
+    output_name: str = "",
+) -> str:
+    """Fill a published DOCX template already authorized by Runtime.
+
+    Args:
+        template_version_id: Published Runtime template version identifier.
+        title: User-visible document title.
+        fields: Template field values.
+        instructions: Optional bounded content guidance.
+        source_refs: Runtime-authorized source identifiers only.
+        output_name: Optional safe output filename.
+    """
+    del template_version_id, title, fields, instructions, source_refs, output_name
+    return _UNMEDIATED
+
+
+__all__ = [
+    "ARTIFACT_RUNTIME_ACTION_BY_TOOL",
+    "ARTIFACT_WORKER_TOOL_NAMES",
+    "ArtifactDeliveryErrorHook",
+    "ArtifactDeliveryIntent",
+    "ArtifactToolNotInvokedError",
+    "artifact_convert",
+    "artifact_delivery_intent_from_request",
+    "artifact_generate",
+    "artifact_revise",
+    "parse_artifact_delivery_intent",
+    "template_fill_docx",
+]

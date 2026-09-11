@@ -26,14 +26,29 @@ import MainLayout from "./layouts/MainLayout";
 import { ThemeProvider, useTheme } from "./contexts/ThemeContext";
 import { PluginProvider, usePlugins } from "./plugins/PluginContext";
 import { ApprovalProvider } from "./contexts/ApprovalContext";
-import { Suspense } from "react";
+import { DesktopUpdateProvider } from "./contexts/DesktopUpdateContext";
+import { UpdateTakeoverGate } from "./components/UpdateTakeoverPage";
+import { Suspense, lazy } from "react";
 import { lazyImportWithRetry } from "./utils/lazyWithRetry";
+import {
+  getLoginHref,
+  getLoginPath,
+  getRouterBasename,
+  isOsPath,
+} from "./utils/navigationMode";
 
 const LoginPage = lazyImportWithRetry("./pages/Login/index");
+// Desktop OS shell. Uses React.lazy (not lazyImportWithRetry, which only
+// resolves the ./pages/** glob) so it can load from ./os/.
+const DesktopOSPage = lazy(() => import("./os/DesktopOS"));
 import { authApi } from "./api/modules/auth";
 import { languageApi } from "./api/modules/language";
 import { useUploadLimitStore } from "./stores/uploadLimitStore";
 import { getApiUrl, getApiToken, clearAuthToken } from "./api/config";
+import CloseWindowPrompt from "./tauri/CloseWindowPrompt";
+import { isTauri } from "@tauri-apps/api/core";
+import { isDesktopTauriRuntime } from "./utils/openExternalLink";
+import { interceptBlankLinkClicks } from "./utils/interceptBlankLinkClicks";
 import "./styles/layout.css";
 import "./styles/form-override.css";
 
@@ -60,7 +75,13 @@ const GlobalStyle = createGlobalStyle`
 }
 `;
 
-function AuthGuard({ children }: { children: React.ReactNode }) {
+function AuthGuard({
+  children,
+  useHardRedirect = false,
+}: {
+  children: React.ReactNode;
+  useHardRedirect?: boolean;
+}) {
   const [status, setStatus] = useState<"loading" | "auth-required" | "ok">(
     "loading",
   );
@@ -107,18 +128,16 @@ function AuthGuard({ children }: { children: React.ReactNode }) {
   }, []);
 
   if (status === "loading") return null;
-  if (status === "auth-required")
-    return (
-      <Navigate
-        to={`/login?redirect=${encodeURIComponent(window.location.pathname)}`}
-        replace
-      />
-    );
+  if (status === "auth-required") {
+    const loginTo = getLoginPath(window.location);
+    if (useHardRedirect) {
+      // The OS shell renders outside a Router, so <Navigate> is unavailable.
+      window.location.replace(getLoginHref(window.location));
+      return null;
+    }
+    return <Navigate to={loginTo} replace />;
+  }
   return <>{children}</>;
-}
-
-function getRouterBasename(pathname: string): string | undefined {
-  return /^\/console(?:\/|$)/.test(pathname) ? "/console" : undefined;
 }
 
 function AppInner() {
@@ -165,13 +184,65 @@ function AppInner() {
     };
   }, [i18n]);
 
+  // Disable the default browser context menu in the Tauri desktop build so
+  // users cannot open DevTools via right-click. DevTools is still available
+  // through the hidden 8-click logo gesture handled in Header.tsx.
+  useEffect(() => {
+    if (!isTauri()) return;
+    const preventContextMenu = (e: MouseEvent) => e.preventDefault();
+    window.addEventListener("contextmenu", preventContextMenu);
+    return () => window.removeEventListener("contextmenu", preventContextMenu);
+  }, []);
+
+  // Vendor-rendered markdown (e.g. chat bubbles) emits native
+  // `<a target="_blank">` anchors we cannot override at the React level. The
+  // Tauri WebView ignores such clicks, so route them to the system browser.
+  useEffect(() => {
+    if (!isDesktopTauriRuntime()) return;
+    return interceptBlankLinkClicks();
+  }, []);
+
   // Wait for plugins to load before rendering routes that might be patched
   if (pluginsLoading) {
     return null;
   }
 
-  return (
+  const osActive = isOsPath(window.location.pathname);
+
+  // The Desktop OS shell renders OUTSIDE any Router: each window supplies its
+  // own MemoryRouter (WindowRouter.tsx) and React Router forbids nesting a
+  // <Router> inside another. The classic browser layout keeps its BrowserRouter.
+  const routedContent = osActive ? (
+    <AuthGuard useHardRedirect>
+      <Suspense fallback={null}>
+        <DesktopOSPage />
+      </Suspense>
+    </AuthGuard>
+  ) : (
     <BrowserRouter basename={basename}>
+      <Routes>
+        <Route
+          path="/login"
+          element={
+            <Suspense fallback={null}>
+              <LoginPage />
+            </Suspense>
+          }
+        />
+        <Route
+          path="/*"
+          element={
+            <AuthGuard>
+              <MainLayout />
+            </AuthGuard>
+          }
+        />
+      </Routes>
+    </BrowserRouter>
+  );
+
+  return (
+    <>
       <GlobalStyle />
       <ConfigProvider
         {...selectedTheme}
@@ -189,29 +260,15 @@ function AppInner() {
         }}
       >
         <AntdApp>
-          <ApprovalProvider>
-            <Routes>
-              <Route
-                path="/login"
-                element={
-                  <Suspense fallback={null}>
-                    <LoginPage />
-                  </Suspense>
-                }
-              />
-              <Route
-                path="/*"
-                element={
-                  <AuthGuard>
-                    <MainLayout />
-                  </AuthGuard>
-                }
-              />
-            </Routes>
-          </ApprovalProvider>
+          <CloseWindowPrompt />
+          <DesktopUpdateProvider>
+            <UpdateTakeoverGate>
+              <ApprovalProvider>{routedContent}</ApprovalProvider>
+            </UpdateTakeoverGate>
+          </DesktopUpdateProvider>
         </AntdApp>
       </ConfigProvider>
-    </BrowserRouter>
+    </>
   );
 }
 

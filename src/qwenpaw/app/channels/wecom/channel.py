@@ -25,17 +25,19 @@ from collections import OrderedDict
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from agentscope_runtime.engine.schemas.agent_schemas import (
+from aibot import WSClient, WSClientOptions, generate_req_id
+
+from qwenpaw.schemas import (
     AgentRequest,
     FileContent,
     ImageContent,
     TextContent,
     VideoContent,
 )
-from aibot import WSClient, WSClientOptions, generate_req_id
 
 from ....constant import DEFAULT_MEDIA_DIR
 from ....exceptions import ChannelError
+from ..renderer import ChannelDisplayConfig
 from ..base import (
     BaseChannel,
     ContentType,
@@ -143,9 +145,8 @@ class WecomChannel(BaseChannel):
         share_session_in_group: bool = True,
         workspace_dir: Path | None = None,
         on_reply_sent: OnReplySent = None,
-        show_tool_details: bool = True,
-        filter_tool_messages: bool = False,
-        filter_thinking: bool = False,
+        display_config: ChannelDisplayConfig | None = None,
+        no_text_debounce: bool = True,
         dm_policy: str = "open",
         group_policy: str = "open",
         allow_from: Optional[List[str]] = None,
@@ -154,13 +155,13 @@ class WecomChannel(BaseChannel):
         streaming_enabled: bool = False,
         access_control_dm: bool = False,
         access_control_group: bool = False,
+        ws_url: str = "",
     ):
         super().__init__(
             process,
             on_reply_sent=on_reply_sent,
-            show_tool_details=show_tool_details,
-            filter_tool_messages=filter_tool_messages,
-            filter_thinking=filter_thinking,
+            display_config=display_config,
+            no_text_debounce=no_text_debounce,
             dm_policy=dm_policy,
             group_policy=group_policy,
             allow_from=allow_from,
@@ -186,6 +187,7 @@ class WecomChannel(BaseChannel):
         else:
             self._media_dir = DEFAULT_MEDIA_DIR
         self._max_reconnect_attempts = max_reconnect_attempts
+        self._ws_url = (ws_url or "").strip()
 
         self._client: Any = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
@@ -243,6 +245,7 @@ class WecomChannel(BaseChannel):
             max_reconnect_attempts=int(
                 os.getenv("WECOM_MAX_RECONNECT_ATTEMPTS", "-1"),
             ),
+            ws_url=os.getenv("WECOM_WS_URL", ""),
         )
 
     @classmethod
@@ -251,9 +254,8 @@ class WecomChannel(BaseChannel):
         process: ProcessHandler,
         config: Any,
         on_reply_sent: OnReplySent = None,
-        show_tool_details: bool = True,
-        filter_tool_messages: bool = False,
-        filter_thinking: bool = False,
+        display_config: ChannelDisplayConfig | None = None,
+        no_text_debounce: bool = True,
         workspace_dir: Path | None = None,
     ) -> "WecomChannel":
         return cls(
@@ -269,9 +271,9 @@ class WecomChannel(BaseChannel):
             ),
             workspace_dir=workspace_dir,
             on_reply_sent=on_reply_sent,
-            show_tool_details=show_tool_details,
-            filter_tool_messages=filter_tool_messages,
-            filter_thinking=filter_thinking,
+            display_config=display_config
+            or ChannelDisplayConfig.from_config(config),
+            no_text_debounce=no_text_debounce,
             dm_policy=getattr(config, "dm_policy", "open") or "open",
             group_policy=getattr(config, "group_policy", "open") or "open",
             allow_from=getattr(config, "allow_from", []) or [],
@@ -292,6 +294,7 @@ class WecomChannel(BaseChannel):
             access_control_group=bool(
                 getattr(config, "access_control_group", False),
             ),
+            ws_url=getattr(config, "ws_url", "") or "",
         )
 
     # ------------------------------------------------------------------
@@ -1259,13 +1262,6 @@ class WecomChannel(BaseChannel):
                 stream_id[:20],
             )
 
-        await self._card_handler.try_send_card_for_event(
-            to_handle,
-            event,
-            send_meta,
-            skip_stream_detail=True,
-        )
-
     # ------------------------------------------------------------------
     # Session processing state management
     # ------------------------------------------------------------------
@@ -1576,6 +1572,7 @@ class WecomChannel(BaseChannel):
             secret=self.secret,
             max_reconnect_attempts=self._max_reconnect_attempts,
             logger=_SdkLoggerAdapter(_sdk_logger),
+            **({"ws_url": self._ws_url} if self._ws_url else {}),
         )
         self._client = WSClient(options)
 

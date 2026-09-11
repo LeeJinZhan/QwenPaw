@@ -441,12 +441,15 @@ class TestXiaoYiChannelWebSocketConnection:
         xiaoyi_channel,
     ):
         """_start_connections with empty backup constant skips backup."""
-        with patch(
-            "qwenpaw.app.channels.xiaoyi.channel.DEFAULT_WS_URL_BACKUP",
-            "",
-        ), patch(
-            "qwenpaw.app.channels.xiaoyi.channel.XiaoYiConnection",
-        ) as MockConn:
+        with (
+            patch(
+                "qwenpaw.app.channels.xiaoyi.channel.DEFAULT_WS_URL_BACKUP",
+                "",
+            ),
+            patch(
+                "qwenpaw.app.channels.xiaoyi.channel.XiaoYiConnection",
+            ) as MockConn,
+        ):
             mock_instance = MagicMock()
             mock_instance.connect = AsyncMock(return_value=True)
             mock_instance.disconnect = AsyncMock()
@@ -867,7 +870,7 @@ class TestXiaoYiChannelMedia:
         xiaoyi_channel._connected = True
         xiaoyi_channel._session_task_map["session_123"] = "task_123"
 
-        from agentscope_runtime.engine.schemas.agent_schemas import (
+        from qwenpaw.schemas import (
             ImageContent,
             ContentType,
         )
@@ -1102,7 +1105,7 @@ class TestXiaoYiChannelPartsExtraction:
         mock_message = MagicMock()
         mock_message.type = "message"
 
-        from agentscope_runtime.engine.schemas.agent_schemas import (
+        from qwenpaw.schemas import (
             TextContent,
             ContentType,
         )
@@ -1110,11 +1113,41 @@ class TestXiaoYiChannelPartsExtraction:
         text_content = TextContent(type=ContentType.TEXT, text="Hello World")
         mock_message.content = [text_content]
 
-        result = xiaoyi_channel._extract_xiaoyi_parts(mock_message)
+        result, media = xiaoyi_channel._extract_xiaoyi_parts(mock_message)
 
         assert len(result) == 1
+        assert media == []
         assert result[0]["kind"] == "text"
         assert "\n\nHello World" in result[0]["text"]
+
+    @pytest.mark.parametrize(
+        "headline",
+        [
+            "⟦ 当前格式的内部检索标题 ⟧",
+            "<!-- ⟦ 旧格式的内部检索标题 ⟧ -->",
+        ],
+    )
+    def test_extract_xiaoyi_parts_hides_scroll_headline(
+        self,
+        xiaoyi_channel,
+        headline,
+    ):
+        """XiaoYi must not expose Scroll's display-only headline."""
+        from qwenpaw.schemas import ContentType, TextContent
+
+        mock_message = MagicMock()
+        mock_message.type = "message"
+        mock_message.content = [
+            TextContent(
+                type=ContentType.TEXT,
+                text=f"正常答复\n{headline}",
+            ),
+        ]
+
+        result, media = xiaoyi_channel._extract_xiaoyi_parts(mock_message)
+
+        assert media == []
+        assert result == [{"kind": "text", "text": "\n\n正常答复"}]
 
     def test_extract_xiaoyi_parts_empty_content(self, xiaoyi_channel):
         """_extract_xiaoyi_parts should handle empty content."""
@@ -1122,12 +1155,51 @@ class TestXiaoYiChannelPartsExtraction:
         mock_message.type = "message"
         mock_message.content = []
 
-        result = xiaoyi_channel._extract_xiaoyi_parts(mock_message)
+        result, media = xiaoyi_channel._extract_xiaoyi_parts(mock_message)
 
         # When content is empty, returns a fallback text with message type
         assert len(result) == 1
+        assert media == []
         assert result[0]["kind"] == "text"
         assert "message" in result[0]["text"]
+
+    def test_hidden_tool_result_keeps_media(self, xiaoyi_channel):
+        from qwenpaw.schemas import (
+            DataContent,
+            Message,
+            MessageType,
+            Role,
+            RunStatus,
+        )
+
+        xiaoyi_channel._display_config.show_tool_results = False
+        message = Message(
+            type=MessageType.PLUGIN_CALL_OUTPUT,
+            role=Role.TOOL,
+            status=RunStatus.Completed,
+            content=[
+                DataContent(
+                    data={
+                        "name": "image_tool",
+                        "output": [
+                            {"type": "text", "text": "hidden"},
+                            {
+                                "type": "image",
+                                "source": {
+                                    "type": "url",
+                                    "url": "https://example.com/image.png",
+                                },
+                            },
+                        ],
+                    },
+                ),
+            ],
+        )
+
+        parts, media = xiaoyi_channel._extract_xiaoyi_parts(message)
+
+        assert parts == []
+        assert len(media) == 1
 
 
 # =============================================================================

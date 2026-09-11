@@ -14,6 +14,7 @@ import platform
 import re
 import time
 import uuid
+from collections import OrderedDict
 from pathlib import Path
 from typing import (
     Any,
@@ -28,7 +29,7 @@ from urllib.parse import urlparse
 
 import aiohttp
 
-from agentscope_runtime.engine.schemas.agent_schemas import (
+from ....schemas import (
     FileContent,
     ImageContent,
     ContentType,
@@ -37,6 +38,7 @@ from agentscope_runtime.engine.schemas.agent_schemas import (
 
 from ....config.config import XiaoYiConfig as XiaoYiChannelConfig
 from ....constant import DEFAULT_MEDIA_DIR
+from ..renderer import ChannelDisplayConfig
 from ..base import (
     BaseChannel,
     OnReplySent,
@@ -58,8 +60,11 @@ from .utils import download_file
 
 logger = logging.getLogger(__name__)
 
+# Upper bound for per-session routing maps to prevent unbounded growth.
+_SESSION_MAP_MAX = 4096
+
 if TYPE_CHECKING:
-    from agentscope_runtime.engine.schemas.agent_schemas import AgentRequest
+    from ....schemas import AgentRequest
 
 # Type alias for message/disconnect callbacks
 _OnMessage = Callable[[Dict[str, Any], str], Coroutine[Any, Any, None]]
@@ -357,11 +362,11 @@ class XiaoYiChannel(BaseChannel):
         ak: str,
         sk: str,
         agent_id: str,
+        ws_url: str = "",
         task_timeout_ms: int = DEFAULT_TASK_TIMEOUT_MS,
         on_reply_sent: OnReplySent = None,
-        show_tool_details: bool = True,
-        filter_tool_messages: bool = False,
-        filter_thinking: bool = False,
+        display_config: ChannelDisplayConfig | None = None,
+        no_text_debounce: bool = True,
         bot_prefix: str = "",
         media_dir: str = "",
         workspace_dir: Path | None = None,
@@ -371,9 +376,8 @@ class XiaoYiChannel(BaseChannel):
         super().__init__(
             process,
             on_reply_sent=on_reply_sent,
-            show_tool_details=show_tool_details,
-            filter_tool_messages=filter_tool_messages,
-            filter_thinking=filter_thinking,
+            display_config=display_config,
+            no_text_debounce=no_text_debounce,
             access_control_dm=access_control_dm,
             access_control_group=access_control_group,
         )
@@ -382,6 +386,7 @@ class XiaoYiChannel(BaseChannel):
         self.ak = ak
         self.sk = sk
         self.agent_id = agent_id
+        self.ws_url = (ws_url or "").strip()
         self.task_timeout_ms = task_timeout_ms
         self.bot_prefix = bot_prefix
 
@@ -405,11 +410,13 @@ class XiaoYiChannel(BaseChannel):
         self._connected = False
         self._reconnect_attempts = 0
         self._stopping = False  # Flag to prevent reconnect during stop
+        # In-flight reconnect task, tracked so stop() can cancel it.
+        self._reconnect_task: Optional[asyncio.Task] = None
 
-        # Session routing: session_id -> server_name
-        self._session_server_map: Dict[str, str] = {}
-        # Session -> task_id mapping
-        self._session_task_map: Dict[str, str] = {}
+        # Session routing: session_id -> server_name (bounded)
+        self._session_server_map: "OrderedDict[str, str]" = OrderedDict()
+        # Session -> task_id mapping (bounded)
+        self._session_task_map: "OrderedDict[str, str]" = OrderedDict()
 
     @classmethod
     def from_env(
@@ -436,9 +443,8 @@ class XiaoYiChannel(BaseChannel):
         process: ProcessHandler,
         config: XiaoYiChannelConfig,
         on_reply_sent: OnReplySent = None,
-        show_tool_details: bool = True,
-        filter_tool_messages: bool = False,
-        filter_thinking: bool = False,
+        display_config: ChannelDisplayConfig | None = None,
+        no_text_debounce: bool = True,
         workspace_dir: Path | None = None,
     ) -> "XiaoYiChannel":
         if isinstance(config, dict):
@@ -448,14 +454,15 @@ class XiaoYiChannel(BaseChannel):
                 ak=config.get("ak", ""),
                 sk=config.get("sk", ""),
                 agent_id=config.get("agent_id", ""),
+                ws_url=config.get("ws_url", ""),
                 task_timeout_ms=config.get(
                     "task_timeout_ms",
                     DEFAULT_TASK_TIMEOUT_MS,
                 ),
                 on_reply_sent=on_reply_sent,
-                show_tool_details=show_tool_details,
-                filter_tool_messages=filter_tool_messages,
-                filter_thinking=filter_thinking,
+                display_config=display_config
+                or ChannelDisplayConfig.from_config(config),
+                no_text_debounce=no_text_debounce,
                 bot_prefix=config.get("bot_prefix", ""),
                 media_dir=config.get("media_dir", ""),
                 workspace_dir=workspace_dir,
@@ -473,11 +480,12 @@ class XiaoYiChannel(BaseChannel):
             ak=config.ak,
             sk=config.sk,
             agent_id=config.agent_id,
+            ws_url=getattr(config, "ws_url", "") or "",
             task_timeout_ms=config.task_timeout_ms,
             on_reply_sent=on_reply_sent,
-            show_tool_details=show_tool_details,
-            filter_tool_messages=filter_tool_messages,
-            filter_thinking=filter_thinking,
+            display_config=display_config
+            or ChannelDisplayConfig.from_config(config),
+            no_text_debounce=no_text_debounce,
             bot_prefix=config.bot_prefix,
             media_dir=getattr(config, "media_dir", ""),
             workspace_dir=workspace_dir,
@@ -551,15 +559,8 @@ class XiaoYiChannel(BaseChannel):
                     "XiaoYi: Updating settings for existing "
                     f"connection agent_id={self.agent_id}",
                 )
-                existing._render_style.filter_tool_messages = (
-                    self._render_style.filter_tool_messages
-                )
-                existing._render_style.filter_thinking = (
-                    self._render_style.filter_thinking
-                )
-                existing._render_style.show_tool_details = (
-                    self._render_style.show_tool_details
-                )
+                existing._display_config = self._display_config
+                existing._render_style.display_config = self._display_config
                 _active_connections[self.agent_id] = self
                 # Transfer connections to this instance
                 self._conn_primary = existing._conn_primary
@@ -592,8 +593,8 @@ class XiaoYiChannel(BaseChannel):
 
         logger.info(
             "XiaoYi: Connecting to %s + %s...",
-            DEFAULT_WS_URL,
-            DEFAULT_WS_URL_BACKUP,
+            self.ws_url or DEFAULT_WS_URL,
+            "" if self.ws_url else DEFAULT_WS_URL_BACKUP,
         )
 
         await self._start_connections()
@@ -613,7 +614,7 @@ class XiaoYiChannel(BaseChannel):
 
         self._conn_primary = XiaoYiConnection(
             server_name="primary",
-            ws_url=DEFAULT_WS_URL,
+            ws_url=self.ws_url or DEFAULT_WS_URL,
             ak=self.ak,
             sk=self.sk,
             agent_id=self.agent_id,
@@ -623,7 +624,7 @@ class XiaoYiChannel(BaseChannel):
 
         tasks = [self._conn_primary.connect()]
 
-        if DEFAULT_WS_URL_BACKUP:
+        if DEFAULT_WS_URL_BACKUP and not self.ws_url:
             self._conn_backup = XiaoYiConnection(
                 server_name="backup",
                 ws_url=DEFAULT_WS_URL_BACKUP,
@@ -707,6 +708,19 @@ class XiaoYiChannel(BaseChannel):
                     f"agent_id={self.agent_id}",
                 )
 
+    @staticmethod
+    def _bounded_map_put(
+        store: "OrderedDict[str, str]",
+        key: str,
+        value: str,
+        max_items: int = _SESSION_MAP_MAX,
+    ) -> None:
+        """Set store[key]=value, evicting oldest entries beyond max_items."""
+        store[key] = value
+        store.move_to_end(key)
+        while len(store) > max_items:
+            store.popitem(last=False)
+
     # -----------------------------------------------------------------
     # Message routing (dual connection)
     # -----------------------------------------------------------------
@@ -740,7 +754,11 @@ class XiaoYiChannel(BaseChannel):
                 "sessionId",
             ) or message.get("sessionId")
             if session_id:
-                self._session_server_map[session_id] = server_name
+                self._bounded_map_put(
+                    self._session_server_map,
+                    session_id,
+                    server_name,
+                )
 
             # Handle clear context
             if (
@@ -825,7 +843,11 @@ class XiaoYiChannel(BaseChannel):
                 logger.warning("XiaoYi: No sessionId in message")
                 return
 
-            self._session_task_map[session_id] = task_id
+            self._bounded_map_put(
+                self._session_task_map,
+                session_id,
+                task_id or "",
+            )
 
             # Extract content parts
             text_parts: List[str] = []
@@ -1032,7 +1054,7 @@ class XiaoYiChannel(BaseChannel):
                 logger.error(f"XiaoYi: Reconnect failed: {e}")
                 self._schedule_reconnect()
 
-        asyncio.create_task(reconnect())
+        self._reconnect_task = asyncio.create_task(reconnect())
 
     async def stop(self) -> None:
         """Stop WebSocket connections."""
@@ -1040,6 +1062,15 @@ class XiaoYiChannel(BaseChannel):
 
         self._stopping = True  # Prevent reconnect during stop
         self._connected = False
+
+        # Cancel any in-flight reconnect task.
+        if self._reconnect_task and not self._reconnect_task.done():
+            self._reconnect_task.cancel()
+            try:
+                await self._reconnect_task
+            except asyncio.CancelledError:
+                pass
+        self._reconnect_task = None
 
         # Disconnect both connections
         for conn in (self._conn_primary, self._conn_backup):
@@ -1300,11 +1331,20 @@ class XiaoYiChannel(BaseChannel):
                     "uri": getattr(part, "video_url", ""),
                 },
             }
+        elif part_type == ContentType.AUDIO:
+            artifact_part = {
+                "kind": "file",
+                "file": {
+                    "name": "audio",
+                    "mimeType": getattr(part, "format", None) or "audio/mpeg",
+                    "uri": getattr(part, "data", ""),
+                },
+            }
         elif part_type == ContentType.FILE:
             artifact_part = {
                 "kind": "file",
                 "file": {
-                    "name": getattr(part, "file_name", "file"),
+                    "name": getattr(part, "filename", None) or "file",
                     "mimeType": "application/octet-stream",
                     "uri": getattr(part, "file_url", ""),
                 },
@@ -1324,7 +1364,7 @@ class XiaoYiChannel(BaseChannel):
     def _extract_xiaoyi_parts(
         self,
         message: Any,
-    ) -> List[Dict[str, Any]]:
+    ) -> tuple[List[Dict[str, Any]], List[OutgoingContentPart]]:
         # pylint: disable=too-many-branches,too-many-statements
         # pylint: disable=too-many-nested-blocks
         """Extract parts from message with proper XiaoYi kinds.
@@ -1333,9 +1373,8 @@ class XiaoYiChannel(BaseChannel):
         - kind="reasoningText": For thinking/reasoning content
         - kind="text": For regular text content
         """
-        from agentscope_runtime.engine.schemas.agent_schemas import (
-            MessageType,
-        )
+        from ....agents.context.scroll.serialize import strip_headline
+        from ....schemas import MessageType
 
         msg_type = getattr(message, "type", None)
         content = getattr(message, "content", None) or []
@@ -1344,10 +1383,10 @@ class XiaoYiChannel(BaseChannel):
         # Check if this is a reasoning/thinking message type
         if msg_type == MessageType.REASONING:
             # Check if thinking is filtered
-            if self._render_style.filter_thinking:
-                return []
+            if not self._display_config.show_thinking:
+                return [], []
             for c in content:
-                text = getattr(c, "text", None)
+                text = strip_headline(getattr(c, "text", None))
                 if text:
                     # Add newline separator for each thinking content
                     parts.append(
@@ -1356,7 +1395,33 @@ class XiaoYiChannel(BaseChannel):
                             "reasoningText": text + "\n",
                         },
                     )
-            return parts
+            return parts, []
+
+        tool_types = (
+            MessageType.FUNCTION_CALL,
+            MessageType.PLUGIN_CALL,
+            MessageType.MCP_TOOL_CALL,
+            MessageType.FUNCTION_CALL_OUTPUT,
+            MessageType.PLUGIN_CALL_OUTPUT,
+            MessageType.MCP_TOOL_CALL_OUTPUT,
+        )
+        if msg_type in tool_types:
+            rendered = self._message_to_content_parts(message)
+            media = []
+            for part in rendered:
+                part_type = getattr(part, "type", None)
+                if part_type == ContentType.TEXT:
+                    text = getattr(part, "text", "")
+                    if text:
+                        parts.append({"kind": "text", "text": text})
+                elif part_type in (
+                    ContentType.IMAGE,
+                    ContentType.VIDEO,
+                    ContentType.AUDIO,
+                    ContentType.FILE,
+                ):
+                    media.append(part)
+            return parts, media
 
         # Process each content item
         for c in content:
@@ -1370,14 +1435,16 @@ class XiaoYiChannel(BaseChannel):
                     blocks = data.get("blocks", [])
                     if (
                         isinstance(blocks, list)
-                        and not self._render_style.filter_thinking
+                        and self._display_config.show_thinking
                     ):
                         for block in blocks:
                             if (
                                 isinstance(block, dict)
                                 and block.get("type") == "thinking"
                             ):
-                                thinking_text = block.get("thinking", "")
+                                thinking_text = strip_headline(
+                                    block.get("thinking", ""),
+                                )
                                 if thinking_text:
                                     # Add newline separator
                                     parts.append(
@@ -1391,7 +1458,13 @@ class XiaoYiChannel(BaseChannel):
             # Handle TEXT type (regular message content)
             # Add leading newline to separate from previous content
             if ctype == ContentType.TEXT and getattr(c, "text", None):
-                text = c.text
+                # XiaoYi formats normal text itself instead of going through
+                # MessageRenderer, so clean Scroll's display-only retrieval
+                # headline here as well. The original event remains intact for
+                # durable history and indexing.
+                text = strip_headline(c.text)
+                if not text:
+                    continue
                 # Add leading newlines if not already present
                 if not text.startswith("\n"):
                     text = "\n\n" + text
@@ -1400,97 +1473,6 @@ class XiaoYiChannel(BaseChannel):
             # Handle REFUSAL type
             elif ctype == ContentType.REFUSAL and getattr(c, "refusal", None):
                 parts.append({"kind": "text", "text": c.refusal})
-
-        # Handle tool call/output messages
-        # with complete, independent formatting
-        # Check if tool messages should be filtered
-        if self._render_style.filter_tool_messages:
-            if msg_type in (
-                MessageType.FUNCTION_CALL,
-                MessageType.PLUGIN_CALL,
-                MessageType.MCP_TOOL_CALL,
-                MessageType.FUNCTION_CALL_OUTPUT,
-                MessageType.PLUGIN_CALL_OUTPUT,
-                MessageType.MCP_TOOL_CALL_OUTPUT,
-            ):
-                return []
-
-        if msg_type in (
-            MessageType.FUNCTION_CALL,
-            MessageType.PLUGIN_CALL,
-            MessageType.MCP_TOOL_CALL,
-        ):
-            # Tool call: format as "🔧 **name**" + code block with args
-            for c in content:
-                if getattr(c, "type", None) != ContentType.DATA:
-                    continue
-                data = getattr(c, "data", None)
-                if not isinstance(data, dict):
-                    continue
-                name = data.get("name") or "tool"
-                args = data.get("arguments") or "{}"
-                # Complete, independent formatting for each tool call
-                formatted = f"\n\n🔧 **{name}**\n```\n{args}\n```\n"
-                parts.append({"kind": "text", "text": formatted})
-            return parts
-
-        if msg_type in (
-            MessageType.FUNCTION_CALL_OUTPUT,
-            MessageType.PLUGIN_CALL_OUTPUT,
-            MessageType.MCP_TOOL_CALL_OUTPUT,
-        ):
-            # Tool output: format as "✅ **name**" + code block with result
-            for c in content:
-                if getattr(c, "type", None) != ContentType.DATA:
-                    continue
-                data = getattr(c, "data", None)
-                if not isinstance(data, dict):
-                    continue
-                name = data.get("name") or "tool"
-                output = data.get("output", "")
-
-                # Parse output and format as JSON
-                try:
-                    if isinstance(output, str):
-                        parsed = json.loads(output)
-                    else:
-                        parsed = output
-
-                    # Handle list format like [{'type': 'text', 'text': '...'}]
-                    if isinstance(parsed, list):
-                        texts = []
-                        for item in parsed:
-                            if (
-                                isinstance(item, dict)
-                                and item.get("type") == "text"
-                            ):
-                                texts.append(item.get("text", ""))
-                        output_str = "\n".join(texts) if texts else str(parsed)
-                    elif isinstance(parsed, dict):
-                        output_str = json.dumps(
-                            parsed,
-                            ensure_ascii=False,
-                            indent=2,
-                        )
-                    else:
-                        output_str = str(parsed)
-                except (json.JSONDecodeError, TypeError):
-                    output_str = str(output) if output else ""
-
-                # Truncate if too long
-                if len(output_str) > 500:
-                    output_str = output_str[:500] + "..."
-
-                # Escape backticks in output
-                # to avoid breaking code blocks
-                output_str = output_str.replace("```", "\\`\\`\\`")
-
-                # Complete, independent formatting
-                # for each tool output
-                # Ensure code block is properly closed
-                formatted = f"\n\n✅ **{name}**\n```\n{output_str}\n```\n"
-                parts.append({"kind": "text", "text": formatted})
-            return parts
 
         # If no parts extracted, use renderer as fallback
         if not parts:
@@ -1501,7 +1483,7 @@ class XiaoYiChannel(BaseChannel):
                     if text:
                         parts.append({"kind": "text", "text": text})
 
-        return parts
+        return parts, []
 
     async def send_xiaoyi_parts(
         self,
@@ -1619,14 +1601,17 @@ class XiaoYiChannel(BaseChannel):
         Separates thinking/reasoning content from regular text.
         """
         # Extract parts with proper kinds
-        parts = self._extract_xiaoyi_parts(event)
+        parts, media_parts = self._extract_xiaoyi_parts(event)
 
-        if not parts:
+        if not parts and not media_parts:
             logger.debug("XiaoYi: No parts to send for message")
             return
 
         # Send with XiaoYi format
-        await self.send_xiaoyi_parts(to_handle, parts, send_meta)
+        if parts:
+            await self.send_xiaoyi_parts(to_handle, parts, send_meta)
+        for part in media_parts:
+            await self.send_media(to_handle, part, send_meta)
 
     def resolve_session_id(
         self,

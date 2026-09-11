@@ -13,6 +13,7 @@ Run with: pytest tests/test_cross_module.py -v
 from __future__ import annotations
 
 import logging
+import re
 import time
 import pytest
 from playwright.sync_api import Page, expect, TimeoutError
@@ -92,12 +93,21 @@ class TestSkillAgentChatFlow:
             log_test_step("1. Navigate to the skills management page")
             navigate_to_skills(page)
 
-            log_test_step("2. Click the create-skill button")
-            create_btn = page.locator(
-                'button:has-text("Create")'
+            log_test_step("2. Open Add Skill menu and choose Create Skill")
+            # Post v2.0.0 the create entry lives inside the "Add Skill"
+            # dropdown (AddSkillDropdown.tsx), not a standalone button.
+            add_btn = page.locator(
+                'button:has-text("Add Skill"), button:has-text("添加技能")'
             ).first
-            expect(create_btn).to_be_visible(timeout=5000)
-            create_btn.click()
+            expect(add_btn).to_be_visible(timeout=8000)
+            add_btn.click()
+            page.wait_for_timeout(600)
+            create_item = page.locator(
+                '.qwenpaw-dropdown-menu-item:has-text("Create Skill"), '
+                '.qwenpaw-dropdown-menu-item:has-text("创建技能")'
+            ).first
+            expect(create_item).to_be_visible(timeout=5000)
+            create_item.click()
             page.wait_for_timeout(1500)
 
             log_test_step("3. Fill in skill information")
@@ -158,10 +168,7 @@ When invoked, respond with: "Cross-module test skill executed successfully."
             log_test_step("7. Find an editable agent and click edit")
             editable_agent_found = False
             for agent_row in agent_rows:
-                edit_btn = agent_row.locator(
-                    'button:has(.spark-icon-spark-edit-line), '
-                    '.qwenpaw-space-item:nth-child(1) button'
-                ).first
+                edit_btn = agent_row.locator('button:has(.anticon-edit)').first
                 if edit_btn.count() > 0 and edit_btn.is_enabled(timeout=1000):
                     edit_btn.click()
                     page.wait_for_timeout(1500)
@@ -683,3 +690,80 @@ class TestEnvAndRuntimeConfigFlow:
 
         log_test_result(test_name, True, 0)
         logger.info(f"Test {test_name} passed - environment variable and runtime config linkage verified")
+
+
+# ============================================================================
+# MA-001 P1 — sidebar Agent switcher (Agents API -> Chat sidebar)
+# ============================================================================
+
+@pytest.mark.integration
+@pytest.mark.p1
+@pytest.mark.cross_module
+class TestAgentSwitcherInChat:
+    """MA-001: seed an agent via API, switch to it in the sidebar
+    AgentSelector, assert the trigger reflects the selection; restore."""
+
+    @pytest.mark.test_id("MA-001")
+    def test_agent_switcher_in_chat(
+        self,
+        page: Page,
+        api_context,
+        request: pytest.FixtureRequest,
+    ) -> None:
+        from pages.agents_page import AgentsPage
+
+        test_name = request.node.name
+        chat = ChatPage(page)
+        agents_page = AgentsPage(page)
+        agent_name = f"E2E Switcher {int(time.time())}"
+        agent_id = None
+
+        log_test_step("1. Seed a fresh agent via API")
+        created = agents_page.api_create_agent(
+            api_context, agent_name, description="switcher probe"
+        )
+        agent_id = (created or {}).get("id")
+        if not agent_id:
+            pytest.skip(f"agent seed failed: {created!r}")
+
+        try:
+            log_test_step("2. Open /chat — AgentSelector mounts and fetches")
+            chat.open()
+            switcher = page.locator(chat.AGENT_SWITCHER).first
+            expect(switcher).to_be_visible(timeout=chat.timeout)
+
+            log_test_step("3. Open the switcher; seeded agent is listed")
+            switcher.click()
+            option = page.locator(chat.AGENT_SWITCHER_OPTION).filter(
+                has_text=agent_name
+            ).first
+            expect(option).to_be_visible(timeout=chat.timeout)
+
+            log_test_step("4. Select it; trigger label shows the agent name")
+            option.click()
+            page.wait_for_timeout(800)
+            value = page.locator(chat.AGENT_SWITCHER_VALUE).first
+            expect(value).to_contain_text(
+                agent_name, timeout=chat.timeout
+            )
+
+            log_test_step("5. Switch back to the default agent")
+            switcher.click()
+            default_option = page.locator(
+                chat.AGENT_SWITCHER_OPTION
+            ).filter(has_text=re.compile("Default Agent|默认智能体")).first
+            expect(default_option).to_be_visible(timeout=chat.timeout)
+            default_option.click()
+            page.wait_for_timeout(800)
+            expect(
+                page.locator(chat.AGENT_SWITCHER_VALUE).first
+            ).not_to_contain_text(agent_name, timeout=chat.timeout)
+        finally:
+            if agent_id:
+                try:
+                    agents_page.api_delete_agent(api_context, agent_id)
+                except Exception:
+                    pass
+
+        log_test_result(test_name, True, 0)
+        logger.info(f"Test {test_name} passed")

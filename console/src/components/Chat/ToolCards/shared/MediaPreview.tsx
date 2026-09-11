@@ -5,19 +5,19 @@
  * desktop_screenshot, send_file_to_user, and the default fallback).
  */
 
-import React, { useCallback, useState } from "react";
+import React, { useCallback, useEffect, useState } from "react";
 import { Attachments } from "@agentscope-ai/chat";
 import { Audio, Video } from "@agentscope-ai/design";
 import { Image, ConfigProvider, Alert } from "antd";
 import type { Locale } from "antd/es/locale";
-import { DownloadOutlined } from "@ant-design/icons";
 import { useTranslation } from "react-i18next";
 import type { MediaInfo } from "./utils";
-import { openExternalLink } from "../../../../utils/openExternalLink";
+import { filePathFromPreviewUrl } from "../../../../features/files-workspace/internalFileLinks";
 import styles from "./toolCards.module.less";
 
 export interface MediaPreviewProps {
   media: MediaInfo;
+  onFileOpen?: (trigger: HTMLElement) => void;
 }
 
 /** Fetch the preview URL and return the HTTP status code + detail code. */
@@ -34,12 +34,12 @@ async function fetchPreviewError(
   }
 }
 
-const MediaPreview: React.FC<MediaPreviewProps> = ({ media }) => {
+const MediaPreview: React.FC<MediaPreviewProps> = ({ media, onFileOpen }) => {
   const { t } = useTranslation();
   const [error, setError] = useState<string | null>(null);
 
-  const handleMediaError = useCallback(() => {
-    fetchPreviewError(media.url).then(({ status, code }) => {
+  const resolveError = useCallback(
+    ({ status, code }: { status: number; code: string }) => {
       const i18nKey = `preview.error.${code}`;
       const translated = t(i18nKey, { defaultValue: "" });
       if (translated) {
@@ -53,13 +53,44 @@ const MediaPreview: React.FC<MediaPreviewProps> = ({ media }) => {
       } else {
         setError(t("preview.error.LOAD_FAILED"));
       }
+    },
+    [t],
+  );
+
+  const handleMediaError = useCallback(() => {
+    fetchPreviewError(media.url).then(resolveError);
+  }, [media.url, resolveError]);
+
+  // Reset any stale error when the media URL changes (e.g. the tool result
+  // arrives with a resolved absolute path after a relative-path probe 404'd).
+  useEffect(() => {
+    setError(null);
+  }, [media.url]);
+
+  // For "file" type there is no native onError — proactively HEAD-check the URL
+  useEffect(() => {
+    if (media.type !== "file" || !media.url) return;
+    let cancelled = false;
+    fetchPreviewError(media.url).then((result) => {
+      if (!cancelled && result.status !== 200) {
+        resolveError(result);
+      }
     });
-  }, [media.url, t]);
+    return () => {
+      cancelled = true;
+    };
+  }, [media.type, media.url, resolveError]);
 
   if (error) {
+    const description = media.name ? media.name : undefined;
     return (
       <div className={styles.toolCallMediaPreview}>
-        <Alert type="warning" showIcon message={error} />
+        <Alert
+          type="warning"
+          showIcon
+          message={error}
+          description={description}
+        />
       </div>
     );
   }
@@ -89,25 +120,37 @@ const MediaPreview: React.FC<MediaPreviewProps> = ({ media }) => {
         </div>
       )}
       {media.type === "file" && (
-        <div className={styles.bubbleFile}>
-          <Attachments.FileCard
-            item={
-              {
-                uid: media.name,
-                name: media.name,
-                url: media.url,
-                status: "done",
-              } as any
+        <div
+          className={styles.bubbleFile}
+          onClickCapture={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            if (onFileOpen) {
+              onFileOpen(event.currentTarget);
+              return;
             }
+            window.dispatchEvent(
+              new CustomEvent("qwenpaw:open-file-preview", {
+                detail: {
+                  target: {
+                    source: "attachment",
+                    path: filePathFromPreviewUrl(media.url) || media.name,
+                    artifactUrl: media.url,
+                  },
+                  trigger: event.currentTarget,
+                },
+              }),
+            );
+          }}
+        >
+          <Attachments.FileCard
+            item={{
+              uid: media.name,
+              name: media.name,
+              url: media.url,
+              status: "done",
+            }}
           />
-          {media.url && (
-            <div
-              className={styles.bubbleFileDownload}
-              onClick={() => openExternalLink(media.url)}
-            >
-              <DownloadOutlined />
-            </div>
-          )}
         </div>
       )}
     </div>

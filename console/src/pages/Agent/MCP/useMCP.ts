@@ -1,14 +1,26 @@
 import { useCallback, useEffect, useState } from "react";
 import { useAppMessage } from "../../../hooks/useAppMessage";
 import api from "../../../api";
-import type { MCPClientInfo } from "../../../api/types";
+import type { MCPAccessPolicy, MCPClientInfo } from "../../../api/types";
 import { useTranslation } from "react-i18next";
 import { useAgentStore } from "../../../stores/agentStore";
+import {
+  harnessApi,
+  type HarnessDiscoveredMCPServer,
+} from "../../../api/modules/harness";
 
 export function useMCP() {
   const { t } = useTranslation();
-  const { selectedAgent } = useAgentStore();
+  const { selectedAgent, agents } = useAgentStore();
+  const selectedAgentInfo = agents.find((item) => item.id === selectedAgent);
+  const selectedBackend = selectedAgentInfo?.backend ?? "qwenpaw";
+  const canDiscoverProviderMCP = Boolean(
+    selectedAgentInfo?.backend_capabilities?.provider_mcp_discovery,
+  );
   const [clients, setClients] = useState<MCPClientInfo[]>([]);
+  const [providerServers, setProviderServers] = useState<
+    HarnessDiscoveredMCPServer[]
+  >([]);
   const [loading, setLoading] = useState(false);
   const { message } = useAppMessage();
 
@@ -17,13 +29,27 @@ export function useMCP() {
     try {
       const data = await api.listMCPClients();
       setClients(data);
+      if (selectedBackend !== "qwenpaw" && canDiscoverProviderMCP) {
+        try {
+          const discovered = await harnessApi.listMCP(selectedBackend);
+          setProviderServers(discovered.servers);
+          if (discovered.message) {
+            message.warning(discovered.message);
+          }
+        } catch (error) {
+          console.warn("Failed to discover Provider MCP servers:", error);
+          setProviderServers([]);
+        }
+      } else {
+        setProviderServers([]);
+      }
     } catch (error) {
       console.error("Failed to load MCP clients:", error);
       message.error(t("mcp.loadError"));
     } finally {
       setLoading(false);
     }
-  }, [t]);
+  }, [canDiscoverProviderMCP, message, selectedBackend, t]);
 
   useEffect(() => {
     loadClients();
@@ -59,7 +85,7 @@ export function useMCP() {
         return false;
       }
     },
-    [t, loadClients],
+    [message, t, loadClients],
   );
 
   const updateClient = useCallback(
@@ -89,7 +115,7 @@ export function useMCP() {
         return false;
       }
     },
-    [t, loadClients],
+    [message, t, loadClients],
   );
 
   const toggleEnabled = useCallback(
@@ -104,7 +130,7 @@ export function useMCP() {
         message.error(t("mcp.toggleError"));
       }
     },
-    [t, loadClients],
+    [message, t, loadClients],
   );
 
   const deleteClient = useCallback(
@@ -117,14 +143,32 @@ export function useMCP() {
         message.error(t("mcp.deleteError"));
       }
     },
-    [t, loadClients],
+    [message, t, loadClients],
+  );
+
+  const updatePolicy = useCallback(
+    async (clientKey: string, policy: MCPAccessPolicy) => {
+      try {
+        await api.updateMCPPolicy(clientKey, policy);
+        message.success(t("mcp.access.saveSuccess"));
+        await loadClients();
+        return true;
+      } catch (error: any) {
+        const errorMsg = error?.message || t("mcp.access.saveError");
+        message.error(errorMsg);
+        return false;
+      }
+    },
+    [message, t, loadClients],
   );
 
   return {
     clients,
+    providerServers,
     loading,
     createClient,
     updateClient,
+    updatePolicy,
     toggleEnabled,
     deleteClient,
     refreshClients: loadClients,

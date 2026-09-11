@@ -8,10 +8,13 @@ import { useAgentStore } from "../../../stores/agentStore";
 import {
   CONTEXT_MANAGER_BACKEND_MAPPINGS,
   MEMORY_MANAGER_BACKEND_MAPPINGS,
+  MEMORY_MANAGER_BACKEND_OPTIONS,
 } from "../../../constants/backendMappings";
 import type { ToolExecutionLevel } from "./components/ToolExecutionLevelCard";
 
-export function useAgentConfig() {
+export function useAgentConfig(
+  onConfigLoaded?: (config: AgentsRunningConfig) => void,
+) {
   const { t } = useTranslation();
   const { message } = useAppMessage();
   const { selectedAgent } = useAgentStore();
@@ -45,14 +48,23 @@ export function useAgentConfig() {
           ? config.context_manager_backend
           : "light";
       const memoryBackend =
-        config.memory_manager_backend in MEMORY_MANAGER_BACKEND_MAPPINGS
+        config.memory_manager_backend in MEMORY_MANAGER_BACKEND_MAPPINGS ||
+        MEMORY_MANAGER_BACKEND_OPTIONS.some(
+          (o) => o.value === config.memory_manager_backend,
+        )
           ? config.memory_manager_backend
           : "remelight";
       form.setFieldsValue({
-        max_iters: config.max_iters,
-        auto_continue_on_text_only: config.auto_continue_on_text_only ?? false,
         shell_command_timeout: config.shell_command_timeout ?? 60.0,
         shell_command_executable: config.shell_command_executable ?? "",
+        loop: {
+          ...config.loop,
+          iteration: {
+            ...config.loop?.iteration,
+            max_iterations:
+              config.loop?.iteration?.max_iterations ?? config.max_iters ?? 100,
+          },
+        },
         llm_retry_enabled: config.llm_retry_enabled,
         llm_max_retries: config.llm_max_retries,
         llm_backoff_base: config.llm_backoff_base,
@@ -76,6 +88,7 @@ export function useAgentConfig() {
 
       // Store original config for complete save
       originalConfigRef.current = config;
+      onConfigLoaded?.(config);
 
       setLanguage(langResp.language);
       setTimezone(tzResp.timezone || "UTC");
@@ -86,7 +99,7 @@ export function useAgentConfig() {
     } finally {
       setLoading(false);
     }
-  }, [form, t, selectedAgent]);
+  }, [form, t, selectedAgent, onConfigLoaded]);
 
   useEffect(() => {
     fetchConfig();
@@ -94,8 +107,13 @@ export function useAgentConfig() {
 
   const handleSave = useCallback(async () => {
     try {
-      const values = await form.validateFields();
+      await form.validateFields();
       setSaving(true);
+
+      // Include values written programmatically and fields inside collapsed
+      // editors. validateFields() only returns currently registered fields,
+      // which can omit custom loop gate identity and parameters.
+      const values = form.getFieldsValue(true);
 
       // Deep-merge nested config objects so that collapsed (unrendered)
       // Collapse panels don't lose their saved values.  Shallow spread
@@ -104,17 +122,18 @@ export function useAgentConfig() {
       const original = originalConfigRef.current!;
       const formValues = values as AgentsRunningConfig;
 
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const deepMergeConfig = <T,>(
         base: T | undefined | null,
         override: T | undefined | null,
       ): T | undefined => {
         if (!base) return override ?? undefined;
         if (!override) return base;
-        const result = { ...(base as any) };
-        for (const key of Object.keys(override as any)) {
-          const overrideVal = (override as any)[key];
-          const baseVal = (base as any)[key];
+        const baseRecord = base as Record<string, unknown>;
+        const overrideRecord = override as Record<string, unknown>;
+        const result: Record<string, unknown> = { ...baseRecord };
+        for (const key of Object.keys(overrideRecord)) {
+          const overrideVal = overrideRecord[key];
+          const baseVal = baseRecord[key];
           if (
             overrideVal != null &&
             typeof overrideVal === "object" &&
@@ -152,12 +171,16 @@ export function useAgentConfig() {
           formValues.auto_title_config,
         ) as typeof original.auto_title_config,
         approval_level: approvalLevel,
+        // Keep legacy max_iters aligned with the UI-bound iteration limit.
+        max_iters:
+          formValues.loop?.iteration?.max_iterations ?? original.max_iters,
       };
 
-      await api.updateAgentRunningConfig(configToSave);
+      const savedConfig = await api.updateAgentRunningConfig(configToSave);
 
       // Update original config after successful save
-      originalConfigRef.current = configToSave;
+      originalConfigRef.current = savedConfig;
+      onConfigLoaded?.(savedConfig);
       message.success(t("agentConfig.saveSuccess"));
     } catch (err) {
       if (err instanceof Error && "errorFields" in err) return;
@@ -167,7 +190,7 @@ export function useAgentConfig() {
     } finally {
       setSaving(false);
     }
-  }, [form, t, selectedAgent, approvalLevel]);
+  }, [form, t, selectedAgent, approvalLevel, onConfigLoaded]);
 
   const handleLanguageChange = useCallback(
     (value: string): void => {

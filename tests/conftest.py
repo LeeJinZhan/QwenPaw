@@ -8,6 +8,7 @@ This module provides shared fixtures for testing CoPaw components.
 All fixtures are designed to be isolated, safe, and easy to use.
 """
 
+import logging
 import os
 import shutil
 import sys
@@ -20,6 +21,13 @@ from unittest.mock import MagicMock
 import pytest
 
 from qwenpaw.providers import provider_manager as _provider_manager_module
+
+
+@pytest.fixture(autouse=True)
+def capture_qwenpaw_logs(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Let caplog see qwenpaw records despite the app logger handler."""
+    monkeypatch.setattr(logging.getLogger("qwenpaw"), "propagate", True)
+
 
 # =============================================================================
 # Third-Party Library Mocks
@@ -355,8 +363,9 @@ def mock_channel_config():
 
     config = MagicMock()
     config.enabled = True
-    config.filter_tool_messages = False
-    config.filter_thinking = False
+    config.show_tool_calls = True
+    config.show_tool_results = True
+    config.show_thinking = True
     config.dm_policy = "open"
     config.group_policy = "open"
     config.require_mention = False
@@ -415,8 +424,10 @@ def pytest_collection_modifyitems(
 ) -> None:
     """Modify test collection to add markers based on test location."""
     for item in items:
-        # Auto-mark tests based on directory
-        path_str = str(item.path)
+        # Auto-mark tests based on directory. as_posix() keeps the separator
+        # forward-slashed on Windows, where str() would yield backslashes and
+        # silently drop these tests from any -m filtered run.
+        path_str = item.path.as_posix()
         if "/unit/" in path_str:
             item.add_marker(pytest.mark.unit)
         elif "/integration/" in path_str:

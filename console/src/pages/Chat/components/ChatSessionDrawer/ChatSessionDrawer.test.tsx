@@ -1,25 +1,33 @@
-import { describe, it, expect, vi, afterEach } from "vitest";
-import { screen, waitFor } from "@testing-library/react";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { act, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { renderWithProviders } from "@/test/common_setup";
 import ChatSessionDrawer from "./index";
 import { useChatAnywhereSessionsState } from "@agentscope-ai/chat";
+import { useAgentStore } from "../../../../stores/agentStore";
 
-// Mock react-window's FixedSizeList to render all items directly
-// (jsdom has no layout, so the virtual list never renders rows)
-vi.mock("react-window", () => ({
-  FixedSizeList: ({ children, itemData, itemCount }: any) => {
-    // children is a React component passed as JSX child: <FixedSizeList>{Row}</FixedSizeList>
-    // react-window passes itemData as "data" prop to the row component
-    const Row = children;
+// Mock react-window's VariableSizeList to render all items directly
+// (jsdom has no layout, so the virtual list never renders rows).
+// Must use forwardRef because the component uses ref={listRef} for resetAfterIndex.
+const { MockVariableSizeList } = vi.hoisted(() => {
+  const React = require("react");
+  const MockVariableSizeList = React.forwardRef((props: any, ref: any) => {
+    React.useImperativeHandle(ref, () => ({
+      resetAfterIndex: () => {},
+    }));
+    const Row = props.children;
     return (
       <>
-        {Array.from({ length: itemCount }, (_, i) => (
-          <Row key={i} index={i} style={{}} data={itemData} />
+        {Array.from({ length: props.itemCount }, (_: any, i: number) => (
+          <Row key={i} index={i} style={{}} data={props.itemData} />
         ))}
       </>
     );
-  },
+  });
+  return { MockVariableSizeList };
+});
+vi.mock("react-window", () => ({
+  VariableSizeList: MockVariableSizeList,
 }));
 
 const {
@@ -29,6 +37,8 @@ const {
   mockDeleteChat,
   mockUpdateChat,
   mockGetSessionList,
+  mockNavigate,
+  mockGetEffectiveSessionId,
 } = vi.hoisted(() => ({
   mockCreateSession: vi.fn().mockResolvedValue(undefined),
   mockSetCurrentSessionId: vi.fn(),
@@ -36,6 +46,8 @@ const {
   mockDeleteChat: vi.fn().mockResolvedValue(undefined),
   mockUpdateChat: vi.fn().mockResolvedValue(undefined),
   mockGetSessionList: vi.fn().mockResolvedValue([]),
+  mockNavigate: vi.fn(),
+  mockGetEffectiveSessionId: vi.fn((id: string) => id),
 }));
 
 vi.mock("@agentscope-ai/chat", () => ({
@@ -65,15 +77,20 @@ vi.mock("../../sessionApi", () => ({
   default: {
     getSessionList: mockGetSessionList,
     isSessionSwitching: false,
+    startNewSwitch: vi.fn(() => ({ signal: { aborted: false } })),
     preloadSession: vi.fn().mockResolvedValue({ session: {}, realId: null }),
     finishSessionSwitch: vi.fn(),
     lastNavigatedChatId: null,
+    getEffectiveSessionId: mockGetEffectiveSessionId,
+    // Ownership epoch helpers: tests run under a single stable owner.
+    getActiveOwner: vi.fn(() => ({ agentId: "default", generation: 0 })),
+    isActiveOwner: vi.fn(() => true),
   },
 }));
 
 vi.mock("react-router-dom", async () => {
   const actual = await vi.importActual("react-router-dom");
-  return { ...actual, useNavigate: () => vi.fn() };
+  return { ...actual, useNavigate: () => mockNavigate };
 });
 
 vi.mock("react-i18next", () => ({
@@ -119,7 +136,7 @@ Object.defineProperty(HTMLElement.prototype, "clientHeight", {
   },
 });
 
-vi.mock("../ChatSessionItem", () => ({
+vi.mock("../../../../components/SessionItem", () => ({
   default: ({
     sessionId,
     name,
@@ -164,6 +181,9 @@ vi.mock("@agentscope-ai/icons", () => ({
   ),
   SparkLockLine: () => <span data-testid="icon">lock</span>,
   SparkLockFill: () => <span data-testid="icon">lock-fill</span>,
+  SparkDownArrowLine: ({ size }: { size?: number }) => (
+    <span data-testid="icon">chevron-{size}</span>
+  ),
 }));
 
 vi.mock("../../../../components/ContextMenu", () => ({
@@ -176,8 +196,15 @@ vi.mock("../../../../components/ContextMenu", () => ({
 const defaultProps = { open: true, onClose: vi.fn() };
 
 function withSession(overrides: Record<string, unknown> = {}) {
+  const session = {
+    id: "s1",
+    name: "Session One",
+    updatedAt: new Date().toISOString(),
+    ...overrides,
+  } as any;
+  mockGetSessionList.mockResolvedValue([session]);
   vi.mocked(useChatAnywhereSessionsState).mockReturnValue({
-    sessions: [{ id: "s1", name: "Session One", ...overrides }] as any,
+    sessions: [session],
     currentSessionId: null,
     setCurrentSessionId: mockSetCurrentSessionId,
     setSessions: mockSetSessions,
@@ -185,6 +212,10 @@ function withSession(overrides: Record<string, unknown> = {}) {
 }
 
 describe("ChatSessionDrawer", () => {
+  beforeEach(() => {
+    useAgentStore.setState({ selectedAgent: "default" });
+  });
+
   afterEach(() => vi.clearAllMocks());
 
   it("renders nothing when open=false", () => {
@@ -205,7 +236,7 @@ describe("ChatSessionDrawer", () => {
     expect(mockCreateSession).toHaveBeenCalledOnce();
   });
 
-  it("renders ChatSessionItem for each session", async () => {
+  it("renders SessionItem for each session", async () => {
     withSession();
     renderWithProviders(<ChatSessionDrawer {...defaultProps} />);
     await waitFor(() =>
@@ -213,7 +244,7 @@ describe("ChatSessionDrawer", () => {
     );
   });
 
-  it("clicking a session item calls setCurrentSessionId", async () => {
+  it("clicking a session item navigates to the session path", async () => {
     withSession();
     const user = userEvent.setup();
     renderWithProviders(<ChatSessionDrawer {...defaultProps} />);
@@ -221,7 +252,7 @@ describe("ChatSessionDrawer", () => {
       expect(screen.getByText("Session One")).toBeInTheDocument(),
     );
     await user.click(screen.getByText("Session One"));
-    expect(mockSetCurrentSessionId).toHaveBeenCalledWith("s1");
+    expect(mockNavigate).toHaveBeenCalledWith("/chat/s1");
   });
 
   it("clicking the close button calls onClose", async () => {
@@ -257,6 +288,27 @@ describe("ChatSessionDrawer", () => {
     );
     await user.click(screen.getByTestId("delete-btn"));
     expect(mockDeleteChat).not.toHaveBeenCalled();
+  });
+
+  it("delete clears the message queue for both local id and backend id", async () => {
+    const { useMessageQueueStore } = await import("@/stores/messageQueueStore");
+    useMessageQueueStore.getState().enqueue("s1", { text: "local" });
+    useMessageQueueStore.getState().enqueue("uuid-1", { text: "backend" });
+    expect(useMessageQueueStore.getState().getQueue("s1")).toHaveLength(1);
+    expect(useMessageQueueStore.getState().getQueue("uuid-1")).toHaveLength(1);
+
+    withSession({ realId: "uuid-1" });
+    const user = userEvent.setup();
+    renderWithProviders(<ChatSessionDrawer {...defaultProps} />);
+    await waitFor(() =>
+      expect(screen.getByTestId("delete-btn")).toBeInTheDocument(),
+    );
+    await user.click(screen.getByTestId("delete-btn"));
+
+    await waitFor(() => {
+      expect(useMessageQueueStore.getState().getQueue("s1")).toEqual([]);
+      expect(useMessageQueueStore.getState().getQueue("uuid-1")).toEqual([]);
+    });
   });
 
   it("edit start sets editing state and edit submit calls updateChat", async () => {
@@ -301,16 +353,65 @@ describe("ChatSessionDrawer", () => {
     await vi.waitFor(() => expect(mockGetSessionList).toHaveBeenCalled());
   });
 
+  it("clears stale sessions and reloads when the selected agent changes", async () => {
+    let resolveAgentB!: (sessions: Array<Record<string, unknown>>) => void;
+    const agentBList = new Promise<Array<Record<string, unknown>>>(
+      (resolve) => {
+        resolveAgentB = resolve;
+      },
+    );
+
+    mockGetSessionList
+      .mockResolvedValueOnce([
+        {
+          id: "agent-a-chat",
+          name: "Agent A Chat",
+          updatedAt: new Date().toISOString(),
+        },
+      ])
+      .mockReturnValueOnce(agentBList);
+
+    renderWithProviders(<ChatSessionDrawer {...defaultProps} />);
+    await screen.findByText("Agent A Chat");
+
+    act(() => {
+      useAgentStore.setState({ selectedAgent: "agent-b" });
+    });
+
+    await waitFor(() => {
+      expect(screen.queryByText("Agent A Chat")).not.toBeInTheDocument();
+      expect(mockGetSessionList).toHaveBeenCalledTimes(2);
+    });
+
+    await act(async () => {
+      resolveAgentB([
+        {
+          id: "agent-b-chat",
+          name: "Agent B Chat",
+          updatedAt: new Date().toISOString(),
+        },
+      ]);
+      await agentBList;
+    });
+
+    expect(await screen.findByText("Agent B Chat")).toBeInTheDocument();
+  });
+
   it("pinned sessions sort before unpinned", async () => {
-    vi.mocked(useChatAnywhereSessionsState).mockReturnValue({
-      sessions: [
-        { id: "s1", name: "Unpinned" },
-        { id: "s2", name: "Pinned", pinned: true },
-      ] as any,
-      currentSessionId: null,
-      setCurrentSessionId: mockSetCurrentSessionId,
-      setSessions: mockSetSessions,
-    } as any);
+    mockGetSessionList.mockResolvedValue([
+      {
+        id: "s1",
+        name: "Unpinned",
+        pinned: false,
+        updatedAt: new Date().toISOString(),
+      },
+      {
+        id: "s2",
+        name: "Pinned",
+        pinned: true,
+        updatedAt: new Date().toISOString(),
+      },
+    ]);
     renderWithProviders(<ChatSessionDrawer {...defaultProps} />);
     const items = await screen.findAllByTestId("session-item");
     expect(items[0]).toHaveTextContent("Pinned");

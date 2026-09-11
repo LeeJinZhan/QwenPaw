@@ -1,5 +1,12 @@
-import { useCallback, useMemo, useState } from "react";
+import React, {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { Input, Spin } from "antd";
+import { VariableSizeList, type ListChildComponentProps } from "react-window";
 import { useTranslation } from "react-i18next";
 import { useLocation } from "react-router-dom";
 import { SparkPlusLine, SparkDownArrowLine } from "@agentscope-ai/icons";
@@ -14,83 +21,121 @@ import {
   syncSessionsGlobal,
   type ExtendedSession,
 } from "../stores/sessionListStore";
-import SidebarSessionItem from "./SidebarSessionItem";
+import {
+  type DateGroup,
+  groupSessions,
+  findSessionRowIndex,
+} from "../utils/sessionGrouping";
+import { useCollapsedSessionGroups } from "../hooks/useCollapsedSessionGroups";
+import SessionItem from "../components/SessionItem";
 import styles from "./sidebarSessionList.module.less";
+import { isRuntimeManagedChat } from "../api/modules/runtimeConsole";
 
-// ── Date grouping ─────────────────────────────────────────────────────────
+/** Fixed height of each session item row */
+const SESSION_ROW_HEIGHT = 42;
+/** Fixed height of each group header row */
+const GROUP_HEADER_HEIGHT = 28;
 
-type DateGroup = "pinned" | "today" | "week" | "month" | "older";
-
-interface SessionGroup {
-  key: DateGroup;
-  label: string;
-  sessions: ExtendedChatSession[];
-}
-
-function getDateGroup(
-  timestamp: string | null | undefined,
-): Exclude<DateGroup, "pinned"> {
-  if (!timestamp) return "older";
-  const date = new Date(timestamp);
-  if (isNaN(date.getTime())) return "older";
-
-  // Use calendar dates (not elapsed-time differences) so that
-  // "today" always means the same Y/M/D, regardless of the hour.
-  const now = new Date();
-  const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-  const dateStart = new Date(
-    date.getFullYear(),
-    date.getMonth(),
-    date.getDate(),
-  );
-  const calendarDays = Math.floor(
-    (todayStart.getTime() - dateStart.getTime()) / (1000 * 60 * 60 * 24),
-  );
-
-  if (calendarDays <= 0) return "today"; // same calendar day (or future)
-  if (calendarDays < 7) return "week";
-  if (calendarDays < 30) return "month";
-  return "older";
-}
-
-function groupSessions(
-  sessions: ExtendedChatSession[],
-  t: (key: string, fallback: string) => string,
-): SessionGroup[] {
-  const buckets: Record<DateGroup, ExtendedChatSession[]> = {
-    pinned: [],
-    today: [],
-    week: [],
-    month: [],
-    older: [],
-  };
-
-  for (const s of sessions) {
-    if (s.pinned) {
-      buckets.pinned.push(s);
-    } else {
-      buckets[getDateGroup(s.updatedAt ?? s.createdAt)].push(s);
+/** A flattened row: either a group header or a session item */
+type FlatRow =
+  | {
+      kind: "groupHeader";
+      groupKey: DateGroup;
+      label: string;
+      count: number;
+      collapsed: boolean;
     }
-  }
-
-  const order: Array<{ key: DateGroup; fallback: string }> = [
-    { key: "pinned", fallback: "Pinned" },
-    { key: "today", fallback: "Today" },
-    { key: "week", fallback: "Within 7 days" },
-    { key: "month", fallback: "Within 30 days" },
-    { key: "older", fallback: "Earlier" },
-  ];
-
-  return order
-    .filter(({ key }) => buckets[key].length > 0)
-    .map(({ key, fallback }) => ({
-      key,
-      label: t(`chat.group.${key}`, fallback),
-      sessions: buckets[key],
-    }));
-}
+  | { kind: "session"; session: ExtendedChatSession };
 
 // ── Component ─────────────────────────────────────────────────────────────
+
+/** Data passed to each virtual row */
+interface VirtualRowData {
+  flatRows: FlatRow[];
+  currentSessionId: string | undefined;
+  editingSessionId: string | null;
+  editValue: string;
+  t: ReturnType<typeof useTranslation>["t"];
+  handleSessionClick: (sessionId: string) => void;
+  handleEditStart: (sessionId: string, currentName: string) => void;
+  handleDelete: (sessionId: string) => void;
+  handlePinToggle: (sessionId: string) => void;
+  handleArchiveToggle: (sessionId: string) => void;
+  handleEditChange: (value: string) => void;
+  handleEditSubmit: () => void;
+  handleEditCancel: () => void;
+  toggleGroup: (key: DateGroup) => void;
+}
+
+/** Virtual list row renderer */
+const VirtualRow = React.memo(function VirtualRow({
+  index,
+  style,
+  data,
+}: ListChildComponentProps<VirtualRowData>) {
+  const row = data.flatRows[index];
+  if (!row) return null;
+
+  if (row.kind === "groupHeader") {
+    return (
+      <div style={style}>
+        <button
+          className={styles.groupLabel}
+          onClick={() => data.toggleGroup(row.groupKey)}
+        >
+          <span>{row.label}</span>
+          <span
+            className={styles.groupChevron}
+            style={{
+              transform: row.collapsed ? "rotate(-90deg)" : "rotate(0deg)",
+            }}
+          >
+            <SparkDownArrowLine size={10} />
+          </span>
+        </button>
+      </div>
+    );
+  }
+
+  const session = row.session;
+  const channelKey = session.channel?.trim() || "";
+  const channelLabel = channelKey
+    ? getChannelLabel(channelKey, data.t)
+    : undefined;
+  const isEditing = data.editingSessionId === session.id;
+  const runtimeManaged = isRuntimeManagedChat(session);
+
+  return (
+    <div style={style}>
+      <SessionItem
+        variant="sidebar"
+        sessionId={session.id!}
+        name={session.name || "New Chat"}
+        channelKey={channelKey || undefined}
+        channelLabel={channelLabel}
+        chatStatus={session.status}
+        generating={session.generating}
+        pinned={session.pinned}
+        archived={session.archived}
+        active={
+          session.id === data.currentSessionId ||
+          (!!data.currentSessionId && session.realId === data.currentSessionId)
+        }
+        disabled={false}
+        editing={isEditing}
+        editValue={isEditing ? data.editValue : undefined}
+        onClick={data.handleSessionClick}
+        onEdit={runtimeManaged ? undefined : data.handleEditStart}
+        onDelete={runtimeManaged ? undefined : data.handleDelete}
+        onPin={runtimeManaged ? undefined : data.handlePinToggle}
+        onArchive={runtimeManaged ? undefined : data.handleArchiveToggle}
+        onEditChange={data.handleEditChange}
+        onEditSubmit={data.handleEditSubmit}
+        onEditCancel={data.handleEditCancel}
+      />
+    </div>
+  );
+});
 
 export interface SidebarSessionListProps {
   /** Called when user clicks "New Chat". Provided by parent (Sidebar) which has navigate(). */
@@ -109,6 +154,9 @@ export default function SidebarSessionList({
 
   const [searchQuery, setSearchQuery] = useState("");
   const [historyCollapsed, setHistoryCollapsed] = useState(false);
+  /** Collapsed date groups — persisted so remounts keep the user's state */
+  const { collapsedGroups, toggleGroup, expandGroupForSession } =
+    useCollapsedSessionGroups();
 
   const storeSessionsRaw = useSessionListStore((s) => s.sessions);
   const storeSessions = storeSessionsRaw as ExtendedChatSession[];
@@ -139,13 +187,13 @@ export default function SidebarSessionList({
   const {
     sortedSessions,
     loading,
-    switchingSessionId,
     editingSessionId,
     editValue,
     handleSessionClick,
     handleEditStart,
     handleDelete,
     handlePinToggle,
+    handleArchiveToggle,
     handleEditChange,
     handleEditSubmit,
     handleEditCancel,
@@ -177,86 +225,183 @@ export default function SidebarSessionList({
     [sortedSessions, searchQuery, t],
   );
 
-  const renderItem = (session: ExtendedChatSession) => {
-    const channelKey = session.channel?.trim() || "";
-    const channelLabel = channelKey
-      ? getChannelLabel(channelKey, t)
-      : undefined;
-    const isEditing = editingSessionId === session.id;
-    const isDisabled =
-      !!switchingSessionId && session.id !== switchingSessionId;
-
-    return (
-      <SidebarSessionItem
-        key={session.id}
-        sessionId={session.id!}
-        name={session.name || "New Chat"}
-        channelKey={channelKey || undefined}
-        channelLabel={channelLabel}
-        chatStatus={session.status}
-        generating={session.generating}
-        pinned={session.pinned}
-        active={session.id === currentSessionId}
-        disabled={isDisabled}
-        editing={isEditing}
-        editValue={isEditing ? editValue : undefined}
-        onClick={handleSessionClick}
-        onEdit={handleEditStart}
-        onDelete={handleDelete}
-        onPin={handlePinToggle}
-        onEditChange={handleEditChange}
-        onEditSubmit={handleEditSubmit}
-        onEditCancel={handleEditCancel}
-      />
+  // Keep the active conversation reachable: expand the (possibly
+  // collapsed) date group that contains it whenever it changes.
+  useEffect(() => {
+    if (!currentSessionId) return;
+    const active = sortedSessions.find(
+      (s) => s.id === currentSessionId || s.realId === currentSessionId,
     );
-  };
+    if (active) expandGroupForSession(active);
+  }, [currentSessionId, sortedSessions, expandGroupForSession]);
+
+  /** Flatten groups into a single array of rows for virtual list */
+  const flatRows = useMemo<FlatRow[]>(() => {
+    if (searchQuery.trim()) {
+      return filteredSessions.map((s) => ({
+        kind: "session",
+        session: s,
+      }));
+    }
+    if (!groups) return [];
+    const rows: FlatRow[] = [];
+    for (const group of groups) {
+      const collapsed = collapsedGroups.has(group.key);
+      rows.push({
+        kind: "groupHeader",
+        groupKey: group.key,
+        label: group.label,
+        count: group.sessions.length,
+        collapsed,
+      });
+      if (!collapsed) {
+        for (const session of group.sessions) {
+          rows.push({ kind: "session", session });
+        }
+      }
+    }
+    return rows;
+  }, [groups, collapsedGroups, searchQuery, filteredSessions]);
+
+  /** Row height calculator for VariableSizeList */
+  const getRowHeight = useCallback(
+    (index: number) => {
+      const row = flatRows[index];
+      if (!row) return SESSION_ROW_HEIGHT;
+      return row.kind === "groupHeader"
+        ? GROUP_HEADER_HEIGHT
+        : SESSION_ROW_HEIGHT;
+    },
+    [flatRows],
+  );
+
+  /** Height of the virtual list container */
+  const [listHeight, setListHeight] = useState(0);
+  const observerRef = useRef<ResizeObserver | null>(null);
+  const listRef = useRef<VariableSizeList>(null);
+
+  /** Reset virtual list cache when flatRows change */
+  useEffect(() => {
+    listRef.current?.resetAfterIndex(0);
+  }, [flatRows]);
+
+  // Bring the active conversation into view once its row is visible
+  // (group expanded + list measured). Guarded by the last-scrolled id so
+  // background polling doesn't keep yanking the scroll position.
+  const lastScrolledSessionRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!currentSessionId) return;
+    if (lastScrolledSessionRef.current === currentSessionId) return;
+    const index = findSessionRowIndex(flatRows, currentSessionId);
+    if (index < 0) return;
+    lastScrolledSessionRef.current = currentSessionId;
+    listRef.current?.scrollToItem(index, "smart");
+  }, [currentSessionId, flatRows, listHeight]);
+
+  /** Callback ref: attach a ResizeObserver to measure list container height */
+  const listWrapperRef = useCallback((node: HTMLDivElement | null) => {
+    if (observerRef.current) {
+      observerRef.current.disconnect();
+      observerRef.current = null;
+    }
+    if (!node) return;
+    const observer = new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        const height = entry.contentRect.height;
+        if (height > 0) setListHeight(height);
+      }
+    });
+    observer.observe(node);
+    observerRef.current = observer;
+    const initialHeight = node.clientHeight;
+    if (initialHeight > 0) setListHeight(initialHeight);
+  }, []);
+
+  /** Data passed to each virtual row */
+  const virtualListData = useMemo(
+    () => ({
+      flatRows,
+      currentSessionId,
+      editingSessionId,
+      editValue,
+      t,
+      handleSessionClick,
+      handleEditStart,
+      handleDelete,
+      handlePinToggle,
+      handleArchiveToggle,
+      handleEditChange,
+      handleEditSubmit,
+      handleEditCancel,
+      toggleGroup,
+    }),
+    [
+      flatRows,
+      currentSessionId,
+      editingSessionId,
+      editValue,
+      t,
+      handleSessionClick,
+      handleEditStart,
+      handleDelete,
+      handlePinToggle,
+      handleArchiveToggle,
+      handleEditChange,
+      handleEditSubmit,
+      handleEditCancel,
+      toggleGroup,
+    ],
+  );
 
   return (
-    <div
-      className={styles.sessionList}
-      style={switchingSessionId ? { pointerEvents: "none" } : undefined}
-    >
-      {/* New Chat button */}
-      <button className={styles.newChatBtn} onClick={handleNewChat}>
-        <SparkPlusLine size={14} />
-        <span>{t("chat.newChatTooltip")}</span>
-      </button>
+    <div className={styles.sessionList}>
+      {/* Sticky header: new chat + history title + search */}
+      <div className={styles.sessionListHeader}>
+        {/* New Chat button */}
+        <button className={styles.newChatBtn} onClick={handleNewChat}>
+          <SparkPlusLine size={14} />
+          <span>{t("chat.newChatTooltip")}</span>
+        </button>
 
-      {/* Conversation history header (collapsible) */}
-      <button
-        className={styles.historyHeader}
-        onClick={() => setHistoryCollapsed((c) => !c)}
-      >
-        <span className={styles.historyLabel}>
-          {t("chat.conversationHistory", "Conversation History")}
-        </span>
-        <span
-          className={styles.historyChevron}
-          style={{
-            transform: historyCollapsed ? "rotate(-90deg)" : "rotate(0deg)",
-          }}
+        {/* Conversation history header (collapsible) */}
+        <button
+          className={styles.historyHeader}
+          onClick={() => setHistoryCollapsed((c) => !c)}
         >
-          <SparkDownArrowLine size={12} />
-        </span>
-      </button>
+          <span className={styles.historyLabel}>
+            {t("chat.conversationHistory", "Conversation History")}
+          </span>
+          <span
+            className={styles.historyChevron}
+            style={{
+              transform: historyCollapsed ? "rotate(-90deg)" : "rotate(0deg)",
+            }}
+          >
+            <SparkDownArrowLine size={12} />
+          </span>
+        </button>
 
-      {/* Search bar */}
-      {!historyCollapsed && (
-        <div className={styles.searchContainer}>
-          <Input
-            size="small"
-            allowClear
-            placeholder={t("chat.sessionPanel.searchConversations", "Search…")}
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-            className={styles.searchInput}
-          />
-        </div>
-      )}
+        {/* Search bar */}
+        {!historyCollapsed && (
+          <div className={styles.searchContainer}>
+            <Input
+              size="small"
+              allowClear
+              placeholder={t(
+                "chat.sessionPanel.searchConversations",
+                "Search…",
+              )}
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              className={styles.searchInput}
+            />
+          </div>
+        )}
+      </div>
 
       {/* Session list */}
       {!historyCollapsed && (
-        <div className={styles.scroll}>
+        <div className={styles.scroll} ref={listWrapperRef}>
           {loading && sortedSessions.length === 0 && (
             <div className={styles.loadingState}>
               <Spin size="small" />
@@ -268,16 +413,20 @@ export default function SidebarSessionList({
             </div>
           )}
 
-          {/* Search results — flat list */}
-          {searchQuery.trim()
-            ? filteredSessions.map(renderItem)
-            : /* Grouped by date */
-              groups?.map((group) => (
-                <div key={group.key} className={styles.group}>
-                  <div className={styles.groupLabel}>{group.label}</div>
-                  {group.sessions.map(renderItem)}
-                </div>
-              ))}
+          {sortedSessions.length > 0 && listHeight > 0 && (
+            <VariableSizeList
+              ref={listRef}
+              height={listHeight}
+              width="100%"
+              itemCount={flatRows.length}
+              itemSize={getRowHeight}
+              itemData={virtualListData}
+              className={styles.list}
+              overscanCount={10}
+            >
+              {VirtualRow}
+            </VariableSizeList>
+          )}
         </div>
       )}
     </div>

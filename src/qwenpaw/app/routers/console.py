@@ -6,18 +6,32 @@ import asyncio
 import json
 import logging
 import re
+import time
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
-from typing import AsyncGenerator, Union
+from typing import Any, AsyncGenerator, Dict, Optional, Union
 
-from fastapi import APIRouter, File, HTTPException, Query, Request, UploadFile
+from fastapi import (
+    APIRouter,
+    File,
+    HTTPException,
+    Query,
+    Request,
+    UploadFile,
+)
 from pydantic import BaseModel
 from starlette.responses import StreamingResponse
 
-from agentscope_runtime.engine.schemas.agent_schemas import AgentRequest
-from ...utils.logging import LOG_FILE_PATH
+from qwenpaw.schemas import (
+    AgentRequest,
+    _coerce_content_item,
+)
+from ...utils.logging import LOG_FILE_PATH, sanitize_log_value
 from ..agent_context import get_agent_for_request
-from ..runner.title_generator import generate_and_update_title
+from ..approvals.display import approval_display_fields
+from ..channels.console.channel import CONSOLE_REQUEST_ATTRIBUTE_FIELDS
+from ..chats.title_generator import generate_and_update_title
 from ..utils import check_upload_size
 
 
@@ -26,33 +40,30 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/console", tags=["console"])
 
 
+# ── Background task store ──
+
+
+@dataclass
+class _BackgroundTask:
+    """In-memory state for a background chat task."""
+
+    status: str = "submitted"
+    started_at: Optional[float] = None
+    finished_at: Optional[float] = None
+    result: Optional[Dict[str, Any]] = None
+    asyncio_task: Optional[asyncio.Task] = None
+
+
+_bg_tasks: Dict[str, _BackgroundTask] = {}
+_bg_lock = asyncio.Lock()
+
+
 class MarkInboxReadRequest(BaseModel):
     event_ids: list[str] = []
     all: bool = False
 
 
 MAX_DEBUG_LOG_LINES = 1000
-RUNTIME_CHANNEL_META_KEYS = (
-    "conversation_id",
-    "runtime_task_id",
-    "trace_id",
-    "runtime_execution_mode",
-    "runtime_response_mode",
-    "runtime_generation_controls",
-    "runtime_datetime_context",
-    "runtime_latency_marks",
-    "runtime_constraints",
-    "execution_sandbox",
-    "policy_search_context",
-    "identity_json",
-    "runtime_governance",
-    "runtime_context",
-    "runtime_tool_gateway",
-    "attachments_manifest",
-    "sandbox_context",
-    "personal_skills_catalog",
-    "personal_skills_access_manifest",
-)
 
 
 def _safe_filename(name: str) -> str:
@@ -90,6 +101,39 @@ def _extract_placeholder_name(content_parts: list) -> tuple[str, str]:
     return first_text[:10], first_text
 
 
+async def _apply_session_project_dir(
+    workspace,
+    chat,
+    native_payload: dict[str, Any],
+):
+    """Persist a Session project selection before dispatch."""
+    request_context = native_payload["meta"].get("request_context")
+    if not isinstance(request_context, dict):
+        return chat
+    raw_value = request_context.pop("session_project_dir", None)
+    if not isinstance(raw_value, str) or not raw_value.strip():
+        return chat
+
+    def _resolve_target() -> Path:
+        target = Path(raw_value).expanduser().resolve()
+        if not target.is_dir():
+            raise NotADirectoryError(str(target))
+        return target
+
+    try:
+        target = await asyncio.to_thread(_resolve_target)
+    except NotADirectoryError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Project directory is unavailable: {exc}",
+        ) from exc
+    updated = await workspace.chat_manager.set_project_dir(
+        chat.id,
+        str(target),
+    )
+    return updated or chat
+
+
 def _extract_session_and_payload(request_data: Union[AgentRequest, dict]):
     """Extract run_key (ChatSpec.id), session_id, and native payload.
 
@@ -102,192 +146,105 @@ def _extract_session_and_payload(request_data: Union[AgentRequest, dict]):
         content_parts = (
             list(request_data.input[0].content) if request_data.input else []
         )
+        message_metadata = (
+            request_data.input[0].metadata if request_data.input else None
+        )
     else:
         channel_id = request_data.get("channel", "console")
         sender_id = request_data.get("user_id", "default")
         session_id = request_data.get("session_id", "default")
         input_data = request_data.get("input", [])
         content_parts = []
+        message_metadata = None
         for content_part in input_data:
             if hasattr(content_part, "content"):
                 content_parts.extend(list(content_part.content or []))
+                message_metadata = getattr(
+                    content_part,
+                    "metadata",
+                    message_metadata,
+                )
             elif isinstance(content_part, dict) and "content" in content_part:
-                content_parts.extend(content_part["content"] or [])
+                # Coerce raw dicts to typed Content models so downstream
+                # getattr checks (e.g. _content_has_text) see real attrs.
+                content_parts.extend(
+                    _coerce_content_item(c)
+                    for c in (content_part["content"] or [])
+                )
+                if isinstance(content_part.get("metadata"), dict):
+                    message_metadata = content_part["metadata"]
 
-    channel_meta = {
+    meta: dict = {
         "session_id": session_id,
         "user_id": sender_id,
     }
-    if isinstance(request_data, dict):
-        for key in RUNTIME_CHANNEL_META_KEYS:
-            if key in request_data:
-                channel_meta[key] = request_data[key]
+
+    # Preserve request_context (e.g. session-level approval_level)
+    if isinstance(request_data, AgentRequest):
+        rc = getattr(request_data, "request_context", None)
     else:
-        for key in RUNTIME_CHANNEL_META_KEYS:
-            value = getattr(request_data, key, None)
-            if value is not None:
-                channel_meta[key] = value
+        rc = request_data.get("request_context")
+    if isinstance(rc, dict) and rc:
+        meta["request_context"] = rc
 
     native_payload = {
         "channel_id": channel_id,
         "sender_id": sender_id,
         "content_parts": content_parts,
-        "meta": channel_meta,
+        "message_metadata": message_metadata,
+        "meta": meta,
     }
+
+    if isinstance(request_data, AgentRequest):
+        mso = getattr(request_data, "model_slot_override", None)
+    else:
+        mso = request_data.get("model_slot_override")
+    if mso is not None:
+        native_payload["model_slot_override"] = mso
+
+    request_attributes: dict[str, Any] = {}
+    for field in CONSOLE_REQUEST_ATTRIBUTE_FIELDS:
+        if isinstance(request_data, AgentRequest):
+            value = getattr(request_data, field, None)
+        else:
+            value = request_data.get(field)
+        if value is not None:
+            request_attributes[field] = value
+    if request_attributes:
+        native_payload["request_attributes"] = request_attributes
+
     return native_payload
 
 
-def _is_runtime_native_payload(native_payload: dict) -> bool:
-    return (
-        isinstance(native_payload, dict)
-        and native_payload.get("channel_id") == "bank-runtime"
-    )
+def _is_reconnect_request(request_data: Union[AgentRequest, dict]) -> bool:
+    """Return whether the chat request asks to attach to a running stream.
+
+    ``AgentRequest`` uses ``extra="allow"`` and has no required fields,
+    so FastAPI parses ``{"reconnect": true, ...}`` bodies into an
+    ``AgentRequest`` instance — a dict-only check silently classified
+    every reconnect as a fresh send and restarted a run with an empty
+    input. Check both shapes.
+    """
+    if isinstance(request_data, dict):
+        return request_data.get("reconnect") is True
+    return getattr(request_data, "reconnect", None) is True
 
 
-def _is_runtime_terminal_sse(event_data: str) -> bool:
-    for raw_line in str(event_data).splitlines():
-        line = raw_line.strip()
-        if not line.startswith("data:"):
-            continue
-        try:
-            payload = json.loads(line.removeprefix("data:").strip())
-        except json.JSONDecodeError:
-            continue
-        if not isinstance(payload, dict):
-            continue
-        event = str(payload.get("event") or payload.get("event_type") or "").strip()
-        status = str(payload.get("status") or "").strip()
-        if event in {
-            "completed",
-            "done",
-            "success",
-            "agent.completed",
-            "answer.completed",
-            "failed",
-            "error",
-            "agent.failed",
-            "answer.failed",
-        }:
-            return True
-        if payload.get("object") == "response" and status in {
-            "completed",
-            "failed",
-            "error",
-        }:
-            return True
-    return False
+def _empty_sse_response() -> StreamingResponse:
+    """An SSE response that terminates immediately."""
 
-
-def _runtime_missing_terminal_sse(native_payload: dict) -> str:
-    del native_payload
-    return (
-        "data: "
-        f"{json.dumps({'event': 'answer.failed', 'status': 'failed', 'message': '回答生成失败'}, ensure_ascii=False)}"
-        "\n\n"
-    )
-
-
-def _runtime_invalid_sandbox_sse() -> str:
-    return (
-        "data: "
-        f"{json.dumps({'event': 'answer.failed', 'status': 'failed', 'message': '回答生成失败'}, ensure_ascii=False)}"
-        "\n\n"
-    )
-
-
-def _runtime_task_ids(meta: dict) -> tuple[str, str]:
-    runtime_task_id = str(meta.get("runtime_task_id") or "").strip()
-    sandbox_context = meta.get("sandbox_context")
-    sandbox_task_id = (
-        str(sandbox_context.get("task_id") or "").strip()
-        if isinstance(sandbox_context, dict)
-        else ""
-    )
-    return runtime_task_id, sandbox_task_id
-
-
-async def _stream_runtime_console_events(
-    console_channel,
-    native_payload: dict,
-) -> AsyncGenerator[str, None]:
-    runtime_request = (
-        isinstance(native_payload, dict)
-        and native_payload.get("channel_id") == "bank-runtime"
-    )
-    meta = native_payload.get("meta") if isinstance(native_payload, dict) else {}
-    if not isinstance(meta, dict):
-        meta = {}
-    runtime_task_id, sandbox_task_id = _runtime_task_ids(meta)
-    if runtime_request and (
-        not runtime_task_id
-        or not sandbox_task_id
-        or runtime_task_id != sandbox_task_id
-    ):
-        await _cleanup_runtime_task_files_many(
-            sandbox_task_id,
-            runtime_task_id,
-        )
-        yield _runtime_invalid_sandbox_sse()
+    async def _empty() -> AsyncGenerator[str, None]:
         return
+        yield  # pragma: no cover — makes this an async generator
 
-    lifetime_reservation = None
-    if runtime_request:
-        from ...agents.tools import runtime_sandbox_oss
-
-        try:
-            lifetime_reservation = (
-                runtime_sandbox_oss._DEFAULT_TASK_ATTACHMENT_CACHE.reserve_task_io(
-                    runtime_task_id,
-                )
-            )
-        except Exception:
-            await _cleanup_runtime_task_files(runtime_task_id)
-            yield _runtime_invalid_sandbox_sse()
-            return
-    try:
-        terminal_seen = False
-        async for event_data in console_channel.stream_one(native_payload):
-            if _is_runtime_terminal_sse(event_data):
-                terminal_seen = True
-            yield event_data
-        if not terminal_seen:
-            yield _runtime_missing_terminal_sse(native_payload)
-    finally:
-        if lifetime_reservation is not None:
-            lifetime_reservation.release()
-        if runtime_request and runtime_task_id:
-            await _cleanup_runtime_task_files(runtime_task_id)
-
-
-async def _cleanup_runtime_task_files_many(*task_ids: str) -> None:
-    seen: set[str] = set()
-    for task_id in task_ids:
-        normalized = str(task_id or "").strip()
-        if not normalized or normalized in seen:
-            continue
-        seen.add(normalized)
-        await _cleanup_runtime_task_files(normalized)
-
-
-async def _cleanup_runtime_task_files(runtime_task_id: str) -> None:
-    from ...agents.tools import runtime_sandbox_oss
-
-    cleanup = asyncio.create_task(
-        asyncio.to_thread(
-            runtime_sandbox_oss._DEFAULT_TASK_ATTACHMENT_CACHE.cleanup_task,
-            runtime_task_id,
-        ),
+    return StreamingResponse(
+        _empty(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+        },
     )
-    try:
-        await asyncio.shield(cleanup)
-    except asyncio.CancelledError:
-        await cleanup
-        raise
-    except Exception:
-        logger.exception(
-            "Failed to clean Runtime task attachment cache task_id=%s",
-            runtime_task_id,
-        )
 
 
 def _tail_text_file(
@@ -325,7 +282,7 @@ def _tail_text_file(
     "Use body.reconnect=true to attach to a running stream.",
 )
 async def post_console_chat(
-    request_data: dict,
+    request_data: Union[AgentRequest, dict],
     request: Request,
 ) -> StreamingResponse:
     """Stream agent response. Run continues in background after disconnect.
@@ -356,58 +313,70 @@ async def post_console_chat(
         name=name,
     )
     tracker = workspace.task_tracker
-
-    # Kick off an LLM-backed title generation in the background when the chat
-    # was just created with the truncated placeholder. This runs detached so
-    # the streaming response is never blocked by title generation latency.
-    if first_text and chat.name == name:
-        asyncio.create_task(
-            generate_and_update_title(
-                workspace=workspace,
-                chat_id=chat.id,
-                user_message=first_text,
-                placeholder_name=name,
-            ),
-        )
-
-    is_reconnect = False
-    if isinstance(request_data, dict):
-        is_reconnect = request_data.get("reconnect") is True
+    is_reconnect = _is_reconnect_request(request_data)
 
     if is_reconnect:
         queue = await tracker.attach(chat.id)
         if queue is None:
-            return
-    elif _is_runtime_native_payload(native_payload):
-        return StreamingResponse(
-            _stream_runtime_console_events(console_channel, native_payload),
-            media_type="text/event-stream",
-            headers={
-                "Cache-Control": "no-cache",
-                "Connection": "keep-alive",
-            },
-        )
+            # The run finished (or never existed): reply with an
+            # immediately-terminated SSE stream so the client's reader
+            # completes normally and falls back to the persisted
+            # history. Returning a JSON null here left the chat blank.
+            return _empty_sse_response()
     else:
+        chat = await _apply_session_project_dir(
+            workspace,
+            chat,
+            native_payload,
+        )
+        from ...config.config import load_agent_config
+        from ...services.project_directory import (
+            resolve_effective_project_dir,
+            session_project_dir,
+        )
+
+        agent_config = await asyncio.to_thread(
+            load_agent_config,
+            workspace.agent_id,
+        )
+        project_dir, project_source = await asyncio.to_thread(
+            resolve_effective_project_dir,
+            workspace.workspace_dir,
+            agent_config.project_dir,
+            session_project_dir(chat.meta),
+        )
+        request_context = dict(
+            native_payload["meta"].get("request_context") or {},
+        )
+        request_context["project_dir"] = str(project_dir)
+        request_context["project_dir_source"] = project_source
+        native_payload["meta"]["request_context"] = request_context
+
+        # Title generation is only needed when starting a new run.
+        if first_text and chat.name == name:
+            asyncio.create_task(
+                generate_and_update_title(
+                    workspace=workspace,
+                    chat_id=chat.id,
+                    user_message=first_text,
+                    placeholder_name=name,
+                ),
+            )
         queue, _ = await tracker.attach_or_start(
             chat.id,
             native_payload,
             console_channel.stream_one,
+            owner=workspace,
         )
 
     async def event_generator() -> AsyncGenerator[str, None]:
         # Hold iterator so finally can aclose(); guarantees stream_from_queue's
         # finally (detach_subscriber) on client abort / generator teardown.
         stream_it = tracker.stream_from_queue(queue, chat.id)
-        runtime_request = _is_runtime_native_payload(native_payload)
-        terminal_seen = False
         try:
             try:
                 async for event_data in stream_it:
-                    if runtime_request and _is_runtime_terminal_sse(event_data):
-                        terminal_seen = True
                     yield event_data
-                if runtime_request and not terminal_seen:
-                    yield _runtime_missing_terminal_sse(native_payload)
             except Exception as e:
                 logger.exception("Console chat stream error")
                 yield f"data: {json.dumps({'error': str(e)})}\n\n"
@@ -450,7 +419,7 @@ async def post_console_chat_stop(
             "[STOP API] chat_id not found in tracker, trying to resolve "
             "from session_id...",
         )
-        chat_manager = getattr(workspace.runner, "_chat_manager", None)
+        chat_manager = workspace.chat_manager
         if chat_manager:
             resolved_chat_id = await chat_manager.get_chat_id_by_session(
                 session_id=chat_id,
@@ -579,10 +548,13 @@ async def get_push_messages(
             "owner_agent_id": p.owner_agent_id,
             "agent_id": p.agent_id,
             "tool_name": p.tool_name,
+            **approval_display_fields(p),
             "severity": p.severity,
             "findings_count": p.findings_count,
             "findings_summary": p.result_summary,
             "tool_params": p.extra.get("tool_call", {}).get("input", {}),
+            "source_type": p.extra.get("source_type", "tool_guard"),
+            "driver": p.extra.get("driver"),
             "created_at": p.created_at,
             "timeout_seconds": p.timeout_seconds,
         }
@@ -597,21 +569,29 @@ async def get_inbox_events(
     limit: int = Query(50, ge=1, le=500),
     offset: int = Query(0, ge=0),
     source_type: str | None = Query(None),
+    source_types: list[str] | None = Query(None),
     status: str | None = Query(None),
     agent_id: str | None = Query(None),
     unread_only: bool = Query(False),
 ):
-    from ..inbox_store import list_events
+    from ..inbox_store import query_events
 
-    events = await list_events(
+    selected_sources = set(source_types or [])
+    if source_type:
+        selected_sources.add(source_type)
+    events, total, unread_count = await query_events(
         limit=limit,
         offset=offset,
-        source_type=source_type,
+        source_types=selected_sources or None,
         status=status,
         agent_id=agent_id,
         unread_only=unread_only,
     )
-    return {"events": events}
+    return {
+        "events": events,
+        "total": total,
+        "unread_count": unread_count,
+    }
 
 
 @router.post("/inbox/read")
@@ -649,5 +629,308 @@ async def get_inbox_trace(run_id: str):
 
     trace = await get_trace(run_id)
     if trace is None:
-        raise HTTPException(status_code=404, detail="trace not found")
+        raise HTTPException(
+            status_code=404,
+            detail="trace not found",
+        )
     return trace
+
+
+# ── Background chat task endpoints ──
+
+
+def _parse_sse_payload(line: str) -> Optional[Dict[str, Any]]:
+    """Parse a single SSE data line into a dict."""
+    stripped = line.strip()
+    if stripped.startswith("data: "):
+        try:
+            return json.loads(stripped[6:])
+        except (json.JSONDecodeError, ValueError):
+            return None
+    return None
+
+
+async def _finalize_background_fork(
+    project_dir: str,
+    branch: str,
+    *,
+    scope_id: str,
+) -> bool:
+    """Finish an in-flight fork commit before publishing task state.
+
+    Cancelling an ``asyncio.to_thread`` await cannot stop its worker thread.
+    Once finalization starts, keep waiting for its authoritative result so the
+    task API, fork registry, and branch HEAD cannot report conflicting states.
+    """
+    from qwenpaw.agents.fork_project import finalize_fork_worktree_or_fail
+
+    finalizer = asyncio.create_task(
+        asyncio.to_thread(
+            finalize_fork_worktree_or_fail,
+            project_dir,
+            branch,
+            message=f"fork worker {branch}",
+            expected_scope=scope_id or None,
+        ),
+    )
+    while True:
+        try:
+            return await asyncio.shield(finalizer)
+        except asyncio.CancelledError:
+            if finalizer.done():
+                return finalizer.result()
+
+
+async def _mark_background_fork_failed(
+    project_dir: str,
+    branch: str,
+    *,
+    scope_id: str,
+    reason: str,
+    context: str,
+) -> None:
+    """Best-effort fork failure bookkeeping for background tasks."""
+    if not project_dir or not branch:
+        return
+    try:
+        from qwenpaw.agents.fork_project import mark_fork_failed
+
+        await asyncio.to_thread(
+            mark_fork_failed,
+            project_dir,
+            branch,
+            reason=reason,
+            expected_scope=scope_id or None,
+        )
+    except Exception:
+        logger.warning(
+            "mark_fork_failed after %s failed for %s",
+            context,
+            sanitize_log_value(branch),
+            exc_info=True,
+        )
+
+
+@router.post(
+    "/chat/task",
+    status_code=200,
+    summary="Submit a background chat task",
+)
+async def post_console_chat_task(  # pylint: disable=too-many-statements
+    request_data: Union[AgentRequest, dict],
+    request: Request,
+) -> dict:
+    """Run an agent chat as a background task.
+
+    Returns a ``task_id`` immediately. Poll status via
+    ``GET /console/chat/task/{task_id}``.
+    """
+    workspace = await get_agent_for_request(request)
+    console_channel = await workspace.channel_manager.get_channel("console")
+    if console_channel is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Channel Console not found",
+        )
+
+    task_id = f"task-{uuid.uuid4().hex[:12]}"
+    native_payload = _extract_session_and_payload(request_data)
+    session_id = console_channel.resolve_session_id(
+        sender_id=native_payload["sender_id"],
+        channel_meta=native_payload["meta"],
+    )
+    name, _ = _extract_placeholder_name(native_payload["content_parts"])
+    chat = await workspace.chat_manager.get_or_create_chat(
+        session_id,
+        native_payload["sender_id"],
+        native_payload["channel_id"],
+        name=name,
+    )
+    chat = await _apply_session_project_dir(
+        workspace,
+        chat,
+        native_payload,
+    )
+
+    task_timeout: Optional[float] = None
+    fork_project_dir = ""
+    fork_worktree_branch = ""
+    fork_scope_id = ""
+    if isinstance(request_data, dict):
+        task_timeout = request_data.get("timeout")
+        rc = request_data.get("request_context")
+        if isinstance(rc, dict):
+            fork_project_dir = str(rc.get("fork_project_dir") or "")
+            fork_worktree_branch = str(
+                rc.get("fork_worktree_branch") or "",
+            )
+            fork_scope_id = str(rc.get("fork_scope_id") or "")
+    elif hasattr(request_data, "timeout"):
+        task_timeout = getattr(request_data, "timeout", None)
+        rc = getattr(request_data, "request_context", None)
+        if isinstance(rc, dict):
+            fork_project_dir = str(rc.get("fork_project_dir") or "")
+            fork_worktree_branch = str(
+                rc.get("fork_worktree_branch") or "",
+            )
+            fork_scope_id = str(rc.get("fork_scope_id") or "")
+
+    from ...config.config import load_agent_config
+    from ...services.project_directory import (
+        resolve_effective_project_dir,
+        session_project_dir,
+    )
+
+    agent_config = await asyncio.to_thread(
+        load_agent_config,
+        workspace.agent_id,
+    )
+    project_dir, project_source = await asyncio.to_thread(
+        resolve_effective_project_dir,
+        workspace.workspace_dir,
+        agent_config.project_dir,
+        session_project_dir(chat.meta),
+        None,
+        None,
+        fork_project_dir or None,
+    )
+    request_context = dict(
+        native_payload["meta"].get("request_context") or {},
+    )
+    request_context["project_dir"] = str(project_dir)
+    request_context["project_dir_source"] = project_source
+    native_payload["meta"]["request_context"] = request_context
+
+    bg = _BackgroundTask(
+        status="running",
+        started_at=time.time(),
+    )
+
+    async def _run() -> None:
+        last_response: Optional[Dict[str, Any]] = None
+        try:
+            async for sse_line in console_channel.stream_one(
+                native_payload,
+            ):
+                parsed = _parse_sse_payload(sse_line)
+                if parsed and parsed.get("type") != "turn_usage":
+                    last_response = parsed
+
+            # Fork subagents: commit dirty worktree so branch tips are
+            # mergeable before exposing a completed task result.
+            if fork_project_dir and fork_worktree_branch:
+                try:
+                    finalized = await _finalize_background_fork(
+                        fork_project_dir,
+                        fork_worktree_branch,
+                        scope_id=fork_scope_id,
+                    )
+                except Exception:
+                    logger.warning(
+                        "Background fork finalize failed for %s (%s)",
+                        sanitize_log_value(fork_worktree_branch),
+                        sanitize_log_value(fork_project_dir),
+                        exc_info=True,
+                    )
+                    await _mark_background_fork_failed(
+                        fork_project_dir,
+                        fork_worktree_branch,
+                        scope_id=fork_scope_id,
+                        reason="Fork finalization raised an exception",
+                        context="finalize error",
+                    )
+                    finalized = False
+                if not finalized:
+                    bg.status = "finished"
+                    bg.finished_at = time.time()
+                    bg.result = {
+                        "status": "failed",
+                        "error": {
+                            "message": "Failed to finalize fork worktree",
+                        },
+                    }
+                    return
+        except asyncio.CancelledError:
+            bg.status = "finished"
+            bg.finished_at = time.time()
+            bg.result = {
+                "status": "failed",
+                "error": {"message": "Task cancelled"},
+            }
+            await _mark_background_fork_failed(
+                fork_project_dir,
+                fork_worktree_branch,
+                scope_id=fork_scope_id,
+                reason="Task cancelled",
+                context="cancel",
+            )
+            return
+        except Exception as exc:
+            bg.status = "finished"
+            bg.finished_at = time.time()
+            bg.result = {
+                "status": "failed",
+                "error": {"message": str(exc)},
+            }
+            await _mark_background_fork_failed(
+                fork_project_dir,
+                fork_worktree_branch,
+                scope_id=fork_scope_id,
+                reason=str(exc),
+                context="task error",
+            )
+            return
+
+        bg.status = "finished"
+        bg.finished_at = time.time()
+        if last_response is not None:
+            bg.result = {
+                "status": "completed",
+                "session_id": session_id,
+                **last_response,
+            }
+        else:
+            bg.result = {
+                "status": "completed",
+                "session_id": session_id,
+                "output": [],
+            }
+
+    atask = asyncio.create_task(_run())
+    bg.asyncio_task = atask
+
+    if task_timeout is not None and task_timeout > 0:
+
+        async def _timeout_guard() -> None:
+            await asyncio.sleep(task_timeout)
+            if not atask.done():
+                atask.cancel()
+
+        asyncio.create_task(_timeout_guard())
+
+    async with _bg_lock:
+        _bg_tasks[task_id] = bg
+
+    return {"task_id": task_id}
+
+
+@router.get(
+    "/chat/task/{task_id}",
+    status_code=200,
+    summary="Check background chat task status",
+)
+async def get_console_chat_task(task_id: str) -> dict:
+    """Return the current status of a background chat task."""
+    async with _bg_lock:
+        bg = _bg_tasks.get(task_id)
+    if bg is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Task not found: {task_id}",
+        )
+    response: Dict[str, Any] = {"status": bg.status}
+    if bg.started_at is not None:
+        response["started_at"] = bg.started_at
+    if bg.status == "finished" and bg.result is not None:
+        response["result"] = bg.result
+    return response

@@ -4,17 +4,16 @@
 
 A lightweight channel that prints all agent responses to stdout.
 
-Messages are sent to the agent via the standard AgentApp ``/agent/process``
-endpoint or via POST /console/chat. This channel handles the **output** side:
-whenever a completed message event or a proactive send arrives, it is
-pretty-printed to the terminal.
+Messages are sent to the agent via POST /api/console/chat. This channel
+handles the **output** side: whenever a completed message event or a
+proactive send arrives, it is pretty-printed to the terminal.
 """
 
 from __future__ import annotations
 
 import asyncio
 import copy
-import json
+import json as _json
 import logging
 import os
 import sys
@@ -22,23 +21,17 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, AsyncGenerator, Dict, List, Optional, Union
 
-from agentscope_runtime.engine.schemas.agent_schemas import (
+from qwenpaw.schemas import (
     MessageType,
     Message,
     RunStatus,
 )
 
-from ....agents.tools.runtime_sandbox_oss import (
-    RuntimeAttachmentPreparationError,
-)
 from ....config.config import ConsoleConfig as ConsoleChannelConfig
 from ...console_push_store import append as push_store_append
 from ....constant import DEFAULT_MEDIA_DIR
 from ....exceptions import ModelQuotaExceededException
-from .runtime_event_projection import (
-    RuntimeEventProjector,
-    should_project_runtime_events,
-)
+from ..renderer import ChannelDisplayConfig
 from ..base import (
     BaseChannel,
     AudioContent,
@@ -56,6 +49,40 @@ from ..utils import file_url_to_local_path
 
 logger = logging.getLogger(__name__)
 
+# Request-scoped extensions consumed by the bank-runtime plugin.  The
+# Console HTTP router converts the public AgentRequest into a channel-native
+# payload before this class rebuilds it, so these fields must cross that
+# bridge explicitly rather than being folded into persistent channel meta.
+CONSOLE_REQUEST_ATTRIBUTE_FIELDS = (
+    "attachments_manifest",
+    "conversation_id",
+    "execution_sandbox",
+    "identity_json",
+    "personal_skills_access_manifest",
+    "personal_skills_catalog",
+    "policy_search_context",
+    "qwenpaw_session_state",
+    "regenerate_from_task_id",
+    "runtime_constraints",
+    "runtime_context",
+    "runtime_datetime_context",
+    "runtime_execution_mode",
+    "runtime_generation_controls",
+    "runtime_governance",
+    "runtime_latency_marks",
+    "runtime_response_mode",
+    "runtime_task_id",
+    "runtime_tool_gateway",
+    "runtime_tool_visibility",
+    "sandbox_context",
+    "session_bootstrap",
+    "session_contract_version",
+    "session_mode",
+    "session_operation",
+    "trace_id",
+    "worker_protocol",
+)
+
 # ANSI colour helpers (degrade gracefully if not a tty)
 _USE_COLOR = hasattr(sys.stdout, "isatty") and sys.stdout.isatty()
 
@@ -64,207 +91,20 @@ _YELLOW = "\033[33m" if _USE_COLOR else ""
 _RED = "\033[31m" if _USE_COLOR else ""
 _BOLD = "\033[1m" if _USE_COLOR else ""
 _RESET = "\033[0m" if _USE_COLOR else ""
-_RUNTIME_PROJECTION_TICK = object()
-_CLEANUP_TIMEOUT_SECONDS = 1.0
-_CLEANUP_CANCEL_GRACE_SECONDS = 0.1
 
 
 def _ts() -> str:
     return datetime.now().strftime("%H:%M:%S")
 
 
-def _log_cleanup_failure(message: str, error: BaseException) -> None:
-    logger.warning(
-        message,
-        exc_info=(type(error), error, error.__traceback__),
-    )
-
-
-def _observe_late_cleanup(
-    cleanup_task: asyncio.Future,
-    description: str,
-) -> None:
-    try:
-        cleanup_task.result()
-    except asyncio.CancelledError:
-        return
-    except Exception as error:  # pylint: disable=broad-exception-caught
-        _log_cleanup_failure(f"{description} failed", error)
-
-
-async def _await_protected_cleanup(
-    cleanup_task: asyncio.Future,
-    description: str,
-) -> Any:
-    caller_cancelled: asyncio.CancelledError | None = None
-    loop = asyncio.get_running_loop()
-    deadline = loop.time() + _CLEANUP_TIMEOUT_SECONDS
-    timed_out = False
-
-    while not cleanup_task.done():
-        remaining = deadline - loop.time()
-        if remaining <= 0:
-            timed_out = True
-            break
-        try:
-            done, _ = await asyncio.wait(
-                {cleanup_task},
-                timeout=remaining,
-            )
-        except asyncio.CancelledError as error:
-            caller_cancelled = error
-            continue
-        if not done:
-            timed_out = True
-            break
-
-    if timed_out and not cleanup_task.done():
-        logger.warning("%s timed out; cancelling cleanup", description)
-        cleanup_task.cancel()
-        cancel_deadline = loop.time() + _CLEANUP_CANCEL_GRACE_SECONDS
-        while not cleanup_task.done():
-            remaining = cancel_deadline - loop.time()
-            if remaining <= 0:
-                break
-            try:
-                done, _ = await asyncio.wait(
-                    {cleanup_task},
-                    timeout=remaining,
-                )
-            except asyncio.CancelledError as error:
-                caller_cancelled = error
-                continue
-            if not done:
-                break
-
-    result = None
-    if cleanup_task.done():
-        try:
-            result = cleanup_task.result()
-        except asyncio.CancelledError as error:
-            if not timed_out:
-                _log_cleanup_failure(f"{description} failed", error)
-        except Exception as error:  # pylint: disable=broad-exception-caught
-            _log_cleanup_failure(f"{description} failed", error)
-    else:
-        logger.error("%s remains pending after cancellation", description)
-        cleanup_task.add_done_callback(
-            lambda task: _observe_late_cleanup(task, description),
-        )
-
-    if caller_cancelled is not None:
-        raise caller_cancelled
-    return result
-
-
-async def _gather_pending_native_event(
-    pending: asyncio.Task,
-) -> None:
-    results = await asyncio.gather(pending, return_exceptions=True)
-    for result in results:
-        if isinstance(result, asyncio.CancelledError):
-            continue
-        if isinstance(result, BaseException):
-            _log_cleanup_failure(
-                "runtime pending native event cleanup failed",
-                result,
-            )
-
-
-async def _cancel_pending_native_event(
-    pending: asyncio.Task | None,
-) -> None:
-    if pending is None:
-        return
-    if not pending.done():
-        pending.cancel()
-    cleanup_task = asyncio.create_task(
-        _gather_pending_native_event(pending),
-    )
-    await _await_protected_cleanup(
-        cleanup_task,
-        "runtime pending native event gather",
-    )
-
-
-async def _aclose_safely(iterator: Any, description: str) -> None:
-    close = getattr(iterator, "aclose", None)
-    if not callable(close):
-        return
-    try:
-        cleanup_task = asyncio.ensure_future(close())
-    except Exception as error:  # pylint: disable=broad-exception-caught
-        _log_cleanup_failure(
-            f"{description} aclose failed",
-            error,
-        )
-        return
-    await _await_protected_cleanup(
-        cleanup_task,
-        f"{description} aclose",
-    )
-
-
-async def _with_runtime_projection_ticks(
-    events: Any,
-    *,
-    projector: RuntimeEventProjector,
-) -> AsyncGenerator[Any, None]:
-    """Yield native events plus flush ticks without cancelling the producer."""
-    iterator = aiter(events)
-    pending: asyncio.Task | None = None
-    try:
-        while True:
-            if pending is None:
-                pending = asyncio.create_task(anext(iterator))
-            flush_delay = projector.next_flush_delay_seconds()
-            if flush_delay is None:
-                done, _ = await asyncio.wait({pending})
-            else:
-                done, _ = await asyncio.wait(
-                    {pending},
-                    timeout=flush_delay,
-                )
-            if not done:
-                yield _RUNTIME_PROJECTION_TICK
-                continue
-
-            completed = pending
-            pending = None
-            try:
-                event = completed.result()
-            except StopAsyncIteration:
-                break
-            yield event
-            if projector.terminal_sent:
-                break
-    finally:
-        caller_cancelled: asyncio.CancelledError | None = None
-        try:
-            await _cancel_pending_native_event(pending)
-        except asyncio.CancelledError as error:
-            caller_cancelled = error
-        try:
-            await _aclose_safely(
-                iterator,
-                "runtime native event iterator",
-            )
-        except asyncio.CancelledError as error:
-            caller_cancelled = caller_cancelled or error
-        if caller_cancelled is not None:
-            raise caller_cancelled
-
-
 class ConsoleChannel(BaseChannel):
     """Console Channel: prints agent responses to stdout.
 
-    Input is handled by AgentApp's ``/agent/process`` endpoint; this
-    channel only takes care of output (printing to the terminal).
+    Input is handled by ``POST /api/console/chat``; this channel only
+    takes care of output (printing to the terminal).
 
     Supports filtering options via config:
-        - show_tool_details: Display tool execution details
-        - filter_tool_messages: Hide intermediate tool messages
-        - filter_thinking: Hide agent thinking/reasoning blocks
+        - display_config: Control thinking and tool message presentation
     """
 
     channel = "console"
@@ -275,9 +115,7 @@ class ConsoleChannel(BaseChannel):
         enabled: bool,
         bot_prefix: str,
         on_reply_sent: OnReplySent = None,
-        show_tool_details: bool = True,
-        filter_tool_messages: bool = False,
-        filter_thinking: bool = False,
+        display_config: ChannelDisplayConfig | None = None,
         workspace_dir: Optional[Union[str, Path]] = None,
         media_dir: Optional[str] = None,
     ):
@@ -288,9 +126,7 @@ class ConsoleChannel(BaseChannel):
             enabled: Whether this channel is active.
             bot_prefix: Prefix string for bot messages.
             on_reply_sent: Callback when reply is sent.
-            show_tool_details: Whether to show tool execution details.
-            filter_tool_messages: Whether to filter out tool messages.
-            filter_thinking: Whether to filter thinking/reasoning blocks.
+            display_config: Thinking and tool display settings.
             workspace_dir: Agent workspace directory; used to resolve uploaded
                 file names (media_dir = workspace_dir / "media").
             media_dir: Agent workspace directory for resolving uploads.
@@ -298,9 +134,7 @@ class ConsoleChannel(BaseChannel):
         super().__init__(
             process,
             on_reply_sent=on_reply_sent,
-            show_tool_details=show_tool_details,
-            filter_tool_messages=filter_tool_messages,
-            filter_thinking=filter_thinking,
+            display_config=display_config,
         )
         self.enabled = enabled
         self.bot_prefix = bot_prefix
@@ -353,9 +187,8 @@ class ConsoleChannel(BaseChannel):
         process: ProcessHandler,
         config: ConsoleChannelConfig,
         on_reply_sent: OnReplySent = None,
-        show_tool_details: bool = True,
-        filter_tool_messages: bool = False,
-        filter_thinking: bool = False,
+        display_config: ChannelDisplayConfig | None = None,
+        no_text_debounce: bool = True,
         workspace_dir: Optional[Union[str, Path]] = None,
     ) -> "ConsoleChannel":
         """Create ConsoleChannel from config.
@@ -364,9 +197,7 @@ class ConsoleChannel(BaseChannel):
             process: Handler for agent requests.
             config: Console channel configuration.
             on_reply_sent: Callback when reply is sent.
-            show_tool_details: Whether to show tool execution details.
-            filter_tool_messages: Whether to filter out tool messages.
-            filter_thinking: Whether to filter thinking/reasoning blocks.
+            display_config: Thinking and tool display settings.
             workspace_dir: Agent workspace directory for resolving uploads.
 
         Returns:
@@ -377,9 +208,8 @@ class ConsoleChannel(BaseChannel):
             enabled=config.enabled,
             bot_prefix=config.bot_prefix or "",
             on_reply_sent=on_reply_sent,
-            show_tool_details=show_tool_details,
-            filter_tool_messages=filter_tool_messages,
-            filter_thinking=filter_thinking,
+            display_config=display_config
+            or ChannelDisplayConfig.from_config(config),
             workspace_dir=workspace_dir,
             media_dir=config.media_dir or "",
         )
@@ -406,13 +236,6 @@ class ConsoleChannel(BaseChannel):
             return content_parts
 
         def resolve_one(part: Any) -> Optional[OutgoingContentPart]:
-            if isinstance(part, dict):
-                content_type = part.get("type")
-                if content_type == ContentType.TEXT:
-                    return TextContent(
-                        type=ContentType.TEXT,
-                        text=str(part.get("text") or ""),
-                    )
             content_type = getattr(part, "type", None)
             if content_type == ContentType.IMAGE:
                 url = getattr(part, "image_url", None)
@@ -474,7 +297,21 @@ class ConsoleChannel(BaseChannel):
             content_parts=content_parts,
             channel_meta=meta,
         )
+        message_metadata = payload.get("message_metadata")
+        if isinstance(message_metadata, dict) and request.input:
+            request.input[0].metadata = message_metadata
         request.channel_meta = meta
+        rc = meta.get("request_context")
+        if isinstance(rc, dict) and rc:
+            request.request_context = rc
+        mso = payload.get("model_slot_override")
+        if mso is not None:
+            request.model_slot_override = mso
+        request_attributes = payload.get("request_attributes")
+        if isinstance(request_attributes, dict):
+            for field in CONSOLE_REQUEST_ATTRIBUTE_FIELDS:
+                if field in request_attributes:
+                    setattr(request, field, request_attributes[field])
         return request
 
     async def _extract_media_message(self, message: Message) -> Message | None:
@@ -515,29 +352,23 @@ class ConsoleChannel(BaseChannel):
                     type=MessageType.MESSAGE,
                     role="assistant",
                     content=new_parts,
+                    status=RunStatus.Completed,
                 )
+                media_message.object = "message"
         return media_message
 
-    def _build_trailing_usage_sse(self, session_id: str) -> str | None:
-        """Return one trailing turn_usage SSE block for the console UI."""
-        from ....token_usage import get_pending_usage_for_stream
+    def _on_turn_usage_ready(
+        self,
+        turn: Optional[Dict[str, Any]],
+        ctx: Optional[Dict[str, Any]],
+    ) -> None:
+        """Print a one-line terminal summary when per-turn usage is staged.
 
-        turn, ctx = get_pending_usage_for_stream(session_id)
-        if turn is None and ctx is None:
-            return None
-
-        if turn:
-            logger.info("Usage for session %s: %s", session_id, turn)
-            if ctx:
-                self._print_status_line(turn, ctx)
-
-        payload: Dict[str, Any] = {
-            "type": "turn_usage",
-            "session_id": session_id,
-            "usage": turn,
-            "context_usage": ctx,
-        }
-        return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+        The shared SSE block is built by ``BaseChannel`` — the console only
+        adds the terminal status line on top of it.
+        """
+        if turn and ctx:
+            self._print_status_line(turn, ctx)
 
     def _print_status_line(
         self,
@@ -570,9 +401,7 @@ class ConsoleChannel(BaseChannel):
                 payload.get("sender_id") or "",
                 payload.get("meta"),
             )
-            content_parts = self._resolve_console_upload_refs(
-                payload.get("content_parts") or [],
-            )
+            content_parts = payload.get("content_parts") or []
             should_process, merged = self._apply_no_text_debounce(
                 session_id,
                 content_parts,
@@ -597,45 +426,40 @@ class ConsoleChannel(BaseChannel):
                 if merged and hasattr(request.input[0], "content"):
                     request.input[0].content = merged
         session_id = getattr(request, "session_id", "") or session_id
+        self._clear_session_turn_usage(session_id)
         user_id = getattr(request, "user_id", "") or ""
         channel_name = getattr(request, "channel", "") or self.channel
-        is_runtime_request = False
-        runtime_projector: RuntimeEventProjector | None = None
-        events: Any = None
-        try:
-            from ....token_usage import (
-                finalize_console_turn_usage,
-                reset_pending_usage_for_stream,
-            )
 
-            reset_pending_usage_for_stream(session_id)
+        # Refresh the chat's updated_at so the console session list surfaces
+        # this new message as the latest activity (issue #6131). stream_one is
+        # the single console executor for the web streaming, background-task,
+        # and terminal CLI paths, so touching here covers them all. We only
+        # touch an already-existing chat (never create one) to preserve the
+        # current behavior for sessions that have no ChatSpec yet.
+        if self._workspace is not None and session_id:
+            try:
+                chat_mgr = getattr(self._workspace, "chat_manager", None)
+                if chat_mgr is not None:
+                    await chat_mgr.touch_chat_by_session(
+                        session_id=session_id,
+                        channel=channel_name,
+                        user_id=user_id or None,
+                    )
+            except Exception:  # pylint: disable=broad-except
+                logger.debug(
+                    "failed to touch chat updated_at for session=%s",
+                    session_id[:30],
+                    exc_info=True,
+                )
+
+        try:
             send_meta = getattr(request, "channel_meta", None) or {}
             send_meta.setdefault("bot_prefix", self.bot_prefix)
-            is_runtime_request = should_project_runtime_events(
-                getattr(request, "channel", None),
-                send_meta,
-            )
-            if is_runtime_request:
-                runtime_projector = RuntimeEventProjector.from_environment()
             last_response = None
             event_count = 0
-            runtime_terminal_sent = False
+            headline_stream_states: dict[str, Any] = {}
 
-            native_events = self._process(request)
-            events = (
-                _with_runtime_projection_ticks(
-                    native_events,
-                    projector=runtime_projector,
-                )
-                if runtime_projector is not None
-                else native_events
-            )
-            async for event in events:
-                if event is _RUNTIME_PROJECTION_TICK:
-                    for projected in runtime_projector.flush_due():
-                        data = json.dumps(projected, ensure_ascii=False)
-                        yield f"data: {data}\n\n"
-                    continue
+            async for event in self._process(request):
                 event_count += 1
                 obj = getattr(event, "object", None)
                 status = getattr(event, "status", None)
@@ -650,8 +474,7 @@ class ConsoleChannel(BaseChannel):
                 )
 
                 if (
-                    runtime_projector is None
-                    and event.object == "response"
+                    event.object == "response"
                     and event.status == RunStatus.Completed
                 ):
                     event_output = event.output
@@ -659,85 +482,59 @@ class ConsoleChannel(BaseChannel):
                     if event_output is not None:
                         for message in event_output:
                             event.output.append(message)
-                            media_message = await self._extract_media_message(
-                                message,
-                            )
-                            if media_message:
-                                event.output.append(media_message)
 
-                if runtime_projector is not None:
-                    projected_events = runtime_projector.project(event)
-                    for projected in projected_events:
-                        data = json.dumps(projected, ensure_ascii=False)
-                        yield f"data: {data}\n\n"
-                    if runtime_projector.terminal_sent:
-                        if obj == "response":
-                            last_response = event
-                        break
-                else:
-                    data = self._serialize_event_for_sse(event)
-                    yield f"data: {data}\n\n"
-                    if obj == "response" and status == RunStatus.Completed:
-                        runtime_terminal_sent = True
+                if obj == "message" and status == RunStatus.Completed:
+                    msg_id = str(
+                        getattr(event, "msg_id", "")
+                        or getattr(event, "id", "")
+                        or "",
+                    )
+                    for pending_data in self._flush_headline_stream_states(
+                        headline_stream_states,
+                        msg_id=msg_id,
+                    ):
+                        yield f"data: {pending_data}\n\n"
+                elif obj == "response" and status == RunStatus.Completed:
+                    for pending_data in self._flush_headline_stream_states(
+                        headline_stream_states,
+                    ):
+                        yield f"data: {pending_data}\n\n"
 
-                if (
-                    obj == "message"
-                    and status == RunStatus.Completed
-                ):
-                    if runtime_projector is None:
-                        media_message = await self._extract_media_message(event)
-                        if media_message:
-                            media_json = self._serialize_event_for_sse(
-                                media_message,
-                            )
-                            yield f"data: {media_json}\n\n"
+                data = self._serialize_event_for_sse(
+                    event,
+                    headline_stream_states,
+                )
+                yield f"data: {data}\n\n"
+
+                if obj == "message" and status == RunStatus.Completed:
                     parts = self._message_to_content_parts(event)
                     self._print_parts(parts, ev_type)
 
                 elif obj == "response":
                     last_response = event
 
-            runner = getattr(self._workspace, "runner", None)
-            session = getattr(runner, "session", None) if runner else None
-            agent_id = (
-                getattr(self._workspace, "agent_id", "default")
-                if self._workspace is not None
-                else "default"
-            )
-            if session is not None and session_id:
-                await finalize_console_turn_usage(
-                    session=session,
-                    session_id=session_id,
-                    user_id=user_id,
-                    channel=channel_name,
-                    agent_id=agent_id,
-                )
+            for pending_data in self._flush_headline_stream_states(
+                headline_stream_states,
+            ):
+                yield f"data: {pending_data}\n\n"
 
-            if trailing := self._build_trailing_usage_sse(session_id):
-                yield trailing
+            err_msg = self._get_response_error_message(last_response)
+            if err_msg:
+                self._clear_session_turn_usage(session_id)
+                self._print_error(err_msg)
+            else:
+                for sse in await self._commit_turn_usage(
+                    request,
+                    session_id,
+                    emit_sse=True,
+                ):
+                    yield sse
 
             logger.info(
                 "console stream done: event_count=%s has_response=%s",
                 event_count,
                 last_response is not None,
             )
-
-            err_msg = self._get_response_error_message(last_response)
-            if err_msg:
-                self._print_error(err_msg)
-            if runtime_projector is not None:
-                for projected in runtime_projector.finish(
-                    success=not bool(err_msg),
-                ):
-                    data = json.dumps(projected, ensure_ascii=False)
-                    yield f"data: {data}\n\n"
-            elif is_runtime_request and not runtime_terminal_sent:
-                completed_payload = {
-                    "event": "completed",
-                    "chat_id": session_id,
-                }
-                data = json.dumps(completed_payload, ensure_ascii=False)
-                yield f"data: {data}\n\n"
 
             to_handle = request.user_id or ""
             if self._on_reply_sent:
@@ -747,34 +544,14 @@ class ConsoleChannel(BaseChannel):
                     request.session_id or f"{self.channel}:{to_handle}",
                 )
 
-        except RuntimeAttachmentPreparationError as e:
-            logger.warning(
-                "runtime attachment preparation failed reason_code=%s",
-                e.reason_code,
-            )
-            err_msg = "附件读取失败"
-            self._print_error(err_msg)
-            if runtime_projector is not None:
-                for projected in runtime_projector.finish(
-                    success=False,
-                    message=err_msg,
-                ):
-                    data = json.dumps(projected, ensure_ascii=False)
-                    yield f"data: {data}\n\n"
-            elif is_runtime_request:
-                failed_payload = {
-                    "event": "failed",
-                    "status": "failed",
-                    "chat_id": session_id,
-                    "error": err_msg,
-                    "reason_code": e.reason_code,
-                }
-                data = json.dumps(failed_payload, ensure_ascii=False)
-                yield f"data: {data}\n\n"
+        except asyncio.CancelledError:
+            self._clear_session_turn_usage(session_id)
+            raise
         except ModelQuotaExceededException as e:
+            self._clear_session_turn_usage(session_id)
             logger.warning("rate limit hit: %s", e)
             alternatives = self._get_free_model_alternatives()
-            rl_event = json.dumps(
+            rl_event = _json.dumps(
                 {
                     "type": "rate_limited",
                     "error": str(e).strip(),
@@ -784,15 +561,23 @@ class ConsoleChannel(BaseChannel):
             yield f"data: {rl_event}\n\n"
             self._print_error(str(e).strip())
         except Exception as e:
+            self._clear_session_turn_usage(session_id)
             logger.exception("console process/reply failed")
             err_msg = str(e).strip() or "An error occurred while processing."
             self._print_error(err_msg)
-            if runtime_projector is not None:
-                for projected in runtime_projector.finish(success=False):
-                    data = json.dumps(projected, ensure_ascii=False)
-                    yield f"data: {data}\n\n"
         finally:
-            await _aclose_safely(events, "console nested event stream")
+            try:
+                await self._on_response_cycle_end(session_id)
+            except Exception:  # pylint: disable=broad-except
+                logger.warning(
+                    "console response-cycle cleanup failed for session=%s",
+                    session_id[:30],
+                    exc_info=True,
+                )
+
+    async def _on_response_cycle_end(self, session_id: str) -> None:
+        """Delegate console streaming cleanup to the shared channel path."""
+        await self._finish_response_cycle(session_id)
 
     async def consume_one(self, payload: Any) -> None:
         """Process one payload; drain stream_one (queue/terminal)."""

@@ -8,7 +8,18 @@ export interface ModelInfo {
   is_free?: boolean;
   max_tokens: number;
   max_input_length: number;
+  max_input_length_configured?: boolean;
   generate_kwargs: Record<string, unknown>;
+  relay_reasoning: boolean;
+  thinking_enabled: boolean | null;
+  thinking_budget: number | null;
+  reasoning_effort: string | null;
+  /** Per-model override: 'budget' or 'effort'. Falls back to provider-level. */
+  thinking_param_style?: "budget" | "effort" | null;
+  /** Per-model override for reasoning_effort options. */
+  reasoning_effort_options?: string[] | null;
+  /** Per-model override for thinking_budget [min, max] range. */
+  thinking_budget_range?: [number, number] | null;
 }
 
 export interface ProviderInfo {
@@ -49,8 +60,16 @@ export interface ProviderInfo {
   provider_group_name?: string;
   /** Variant within a group (e.g. "coding_plan_cn"). */
   provider_variant?: string;
+  /** Which thinking-parameter UI to show: 'budget' or 'effort'. null = not supported. */
+  thinking_param_style?: "budget" | "effort" | null;
+  /** Valid reasoning_effort values for this provider. */
+  reasoning_effort_options?: string[];
+  /** [min, max] range for thinking_budget Slider. */
+  thinking_budget_range?: [number, number];
   /** Provider-specific metadata (e.g. base_url_options for region selection). */
   meta?: Record<string, unknown>;
+  /** Accepted API key prefixes. When present, validation accepts any prefix in this list. */
+  api_key_prefixes?: string[];
 }
 
 /** Predefined base URL option exposed via `ProviderInfo.meta.base_url_options`. */
@@ -62,6 +81,8 @@ export interface BaseUrlOption {
 export interface ProviderConfigRequest {
   api_key?: string;
   base_url?: string;
+  /** New display name. Only applied to custom providers. */
+  name?: string;
   chat_model?: string;
   generate_kwargs?: Record<string, unknown>;
   custom_headers?: Record<string, string>;
@@ -75,6 +96,7 @@ export interface ModelSlotConfig {
 
 export interface ActiveModelsInfo {
   active_llm?: ModelSlotConfig;
+  effective_max_input_length?: number | null;
 }
 
 export type ActiveModelScope = "effective" | "global" | "agent";
@@ -116,6 +138,10 @@ export interface ModelConfigRequest {
   max_tokens?: number;
   max_input_length?: number;
   generate_kwargs?: Record<string, unknown>;
+  relay_reasoning?: boolean;
+  thinking_enabled?: boolean | null;
+  thinking_budget?: number | null;
+  reasoning_effort?: string | null;
 }
 
 export interface LocalModelConfig {

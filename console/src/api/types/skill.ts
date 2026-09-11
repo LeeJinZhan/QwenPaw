@@ -8,37 +8,40 @@ export type SkillSyncStatus =
 export interface SkillSpec {
   name: string;
   description?: string;
-  version_text?: string;
-  content: string;
   source: string;
   enabled?: boolean;
   channels?: string[];
   tags?: string[];
-  config?: Record<string, unknown>;
   last_updated?: string;
   emoji?: string;
+}
+
+export interface SkillDetail extends SkillSpec {
+  content: string;
+  config?: Record<string, unknown>;
   installed_from?: string;
 }
 
 export interface PoolSkillSpec {
   name: string;
   description?: string;
-  version_text?: string;
-  content: string;
   source: string;
-  protected: boolean;
   external?: boolean;
   external_path?: string;
-  commit_text?: string;
   sync_status?: SkillSyncStatus | "";
-  latest_version_text?: string;
-  builtin_language?: string;
-  available_builtin_languages?: string[];
   tags?: string[];
-  config?: Record<string, unknown>;
   last_updated?: string;
   emoji?: string;
+  auto_update?: boolean;
+}
+
+export interface PoolSkillDetail extends PoolSkillSpec {
+  content: string;
+  config?: Record<string, unknown>;
   installed_from?: string;
+  builtin_language?: string;
+  available_builtin_languages?: string[];
+  auto_update_targets?: string[] | null;
 }
 
 export interface BuiltinLanguageSpec {
@@ -52,8 +55,7 @@ export interface BuiltinLanguageSpec {
 export interface WorkspaceSkillSummary {
   agent_id: string;
   agent_name?: string;
-  workspace_dir: string;
-  skills: SkillSpec[];
+  skill_names: string[];
 }
 
 export interface BuiltinImportSpec {

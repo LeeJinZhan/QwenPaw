@@ -1,3 +1,6 @@
+# Reme local data
+.reme/
+
 # Local issue tracking (not committed)
 .scratch/
 
@@ -21,6 +24,7 @@ htmlcov/
 htmlcov.zip
 htmlcov-integration/
 .integration_coverage/
+**/.creator-dev-runtime/
 
 # cookbook
 cookbook/_build
@@ -102,6 +106,9 @@ providers.json
 logs/
 *.log
 
+# Local runtime working data
+/data/
+
 # vibe coding
 AGENTS.md
 .claude
@@ -146,4 +153,7 @@ e2e/__pycache__/
 graphify-out/
 local-docs/
 docs-site/
-.omx/
+
+# Local review notes
+docs/reviews/
+tmp/

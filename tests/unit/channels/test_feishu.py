@@ -25,6 +25,7 @@ Run:
 # pylint: disable=broad-exception-raised,unused-import,unused-variable
 from __future__ import annotations
 
+
 import asyncio
 import json
 from pathlib import Path
@@ -32,6 +33,8 @@ from typing import Generator
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+
+from qwenpaw.app.channels.renderer import ChannelDisplayConfig
 from qwenpaw.app.channels.base import ContentType, OutgoingContentPart
 
 # =============================================================================
@@ -84,8 +87,10 @@ def feishu_channel(
         app_secret="test_app_secret_abcdef",
         bot_prefix="[TestBot] ",
         media_dir=str(temp_media_dir),
-        show_tool_details=False,
-        filter_tool_messages=True,
+        display_config=ChannelDisplayConfig(
+            show_tool_calls=False,
+            show_tool_results=False,
+        ),
     )
     yield channel
 
@@ -105,8 +110,10 @@ def feishu_channel_with_workspace(
         app_secret="test_app_secret_xyz",
         bot_prefix="[WorkspaceBot] ",
         workspace_dir=temp_workspace_dir,
-        show_tool_details=False,
-        filter_tool_messages=True,
+        display_config=ChannelDisplayConfig(
+            show_tool_calls=False,
+            show_tool_results=False,
+        ),
     )
     yield channel
 
@@ -1455,18 +1462,45 @@ class TestFeishuChannelOnMessageComplex:
         await feishu_channel._on_message(mock_message_data)
 
     @pytest.mark.asyncio
-    async def test_on_message_bot_sender_skipped(
+    async def test_on_message_self_bot_sender_skipped(
         self,
         feishu_channel,
         mock_message_data,
     ):
-        """Test bot messages are ignored."""
-        feishu_channel._process = AsyncMock()
+        """Test messages sent by the bot itself are ignored."""
+        captured = {}
+
+        def capture_enqueue(native):
+            captured["native"] = native
+
+        feishu_channel._enqueue = capture_enqueue
+        feishu_channel._bot_open_id = "user_open_id_123"
         mock_message_data.event.sender.sender_type = "bot"
 
         await feishu_channel._on_message(mock_message_data)
 
-        feishu_channel._process.assert_not_called()
+        assert "native" not in captured
+
+    @pytest.mark.asyncio
+    async def test_on_message_other_bot_sender_processed(
+        self,
+        feishu_channel,
+        mock_message_data,
+    ):
+        """Test messages sent by another bot are processed."""
+        captured = {}
+
+        def capture_enqueue(native):
+            captured["native"] = native
+
+        feishu_channel._enqueue = capture_enqueue
+        feishu_channel._bot_open_id = "self_bot_open_id"
+        mock_message_data.event.sender.sender_type = "bot"
+        mock_message_data.event.sender.sender_id.open_id = "other_bot_open_id"
+
+        await feishu_channel._on_message(mock_message_data)
+
+        assert "native" in captured
 
     @pytest.mark.asyncio
     async def test_on_message_empty_data_returns_early(self, feishu_channel):

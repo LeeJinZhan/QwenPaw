@@ -3,6 +3,7 @@ import type {
   IAgentScopeRuntimeWebUIRef,
   IAgentScopeRuntimeWebUIMessage,
 } from "@agentscope-ai/chat";
+import { useTurnUsageStore } from "./turnUsageStore";
 
 export const TURN_USAGE_META_KEY = "qwenpaw_turn_usage";
 
@@ -113,6 +114,20 @@ function getResponseCardData(
   return card?.data ?? null;
 }
 
+/** Latest turn usage snapshot from assistant response cards (newest first). */
+export function extractLatestSnapshotFromCards(
+  messages: IAgentScopeRuntimeWebUIMessage[],
+): TurnUsageSnapshot | null {
+  const assistants = messages.filter((m) => m.role === "assistant");
+  for (let i = assistants.length - 1; i >= 0; i--) {
+    const data = getResponseCardData(assistants[i].cards);
+    if (!data) continue;
+    const snap = readTurnUsageFromResponseCardData(data);
+    if (snap) return snap;
+  }
+  return null;
+}
+
 function findPatchTargetAssistant(
   messages: IAgentScopeRuntimeWebUIMessage[],
 ): IAgentScopeRuntimeWebUIMessage | undefined {
@@ -194,6 +209,74 @@ export function schedulePatchLastResponseCardUsage(
   window.setTimeout(retry, 0);
 }
 
+/** Re-calculate context ring denominator after model switch. */
+export function patchContextMaxInputLength(
+  chatRef: React.RefObject<IAgentScopeRuntimeWebUIRef | null>,
+  newMaxInputLength: number,
+): void {
+  const messagesApi = chatRef.current?.messages;
+  if (!messagesApi || newMaxInputLength <= 0) return;
+
+  const allMessages = messagesApi.getMessages() ?? [];
+  for (let i = allMessages.length - 1; i >= 0; i--) {
+    const msg = allMessages[i];
+    if (msg.role !== "assistant") continue;
+    const data = getResponseCardData(msg.cards);
+    if (!data) continue;
+    const snap = readTurnUsageFromResponseCardData(data);
+    if (!snap?.context_usage) continue;
+
+    const estimatedTokens = readNumber(snap.context_usage, "estimated_tokens");
+    if (
+      readNumber(snap.context_usage, "max_input_length") === newMaxInputLength
+    ) {
+      return;
+    }
+
+    const newRatio = Math.min((estimatedTokens / newMaxInputLength) * 100, 100);
+    const updatedMsg = JSON.parse(
+      JSON.stringify(msg),
+    ) as IAgentScopeRuntimeWebUIMessage;
+    const updatedData = getResponseCardData(updatedMsg.cards);
+    if (!updatedData) return;
+    const updatedContext: ContextUsage = {
+      estimated_tokens: estimatedTokens,
+      max_input_length: newMaxInputLength,
+      context_usage_ratio: newRatio,
+    };
+    updatedData.context_usage = updatedContext;
+    ReactDOM.flushSync(() => {
+      messagesApi.updateMessage(updatedMsg);
+    });
+    useTurnUsageStore.getState().setSnapshot({
+      usage: snap.usage,
+      context_usage: updatedContext,
+    });
+    return;
+  }
+
+  const storeSnap = useTurnUsageStore.getState().snapshot;
+  if (
+    storeSnap?.context_usage &&
+    readNumber(storeSnap.context_usage, "max_input_length") !==
+      newMaxInputLength
+  ) {
+    const estimatedTokens = readNumber(
+      storeSnap.context_usage,
+      "estimated_tokens",
+    );
+    const newRatio = Math.min((estimatedTokens / newMaxInputLength) * 100, 100);
+    useTurnUsageStore.getState().setSnapshot({
+      usage: storeSnap.usage,
+      context_usage: {
+        estimated_tokens: estimatedTokens,
+        max_input_length: newMaxInputLength,
+        context_usage_ratio: newRatio,
+      },
+    });
+  }
+}
+
 function parseSseDataLines(buffer: string): {
   events: string[];
   rest: string;
@@ -215,6 +298,9 @@ function parseSseDataLines(buffer: string): {
 }
 
 function snapshotFromSsePayload(raw: string): TurnUsageSnapshot | null {
+  // Fast path: skip the (second) JSON.parse for the vast majority of SSE
+  // events — only `type: "turn_usage"` payloads are relevant here.
+  if (!raw.includes("turn_usage")) return null;
   try {
     return parseTurnUsageSsePayload(JSON.parse(raw) as Record<string, unknown>);
   } catch {
@@ -259,6 +345,7 @@ export function wrapChatResponseUsageStream(
           if (snap) pendingUsage = snap;
         }
         if (pendingUsage) {
+          useTurnUsageStore.getState().setSnapshot(pendingUsage);
           schedulePatchLastResponseCardUsage(chatRef, pendingUsage);
         }
       },

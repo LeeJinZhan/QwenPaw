@@ -2,19 +2,21 @@ import { Button, Input, Select, Tooltip } from "@agentscope-ai/design";
 import { Badge } from "antd";
 import {
   AppstoreOutlined,
+  ArrowLeftOutlined,
   CloseOutlined,
   DeleteOutlined,
-  ImportOutlined,
-  PlusOutlined,
   ReloadOutlined,
   SendOutlined,
   SyncOutlined,
   UnorderedListOutlined,
-  UploadOutlined,
 } from "@ant-design/icons";
+import { useCallback } from "react";
 import { useTranslation } from "react-i18next";
+import { useSearchParams } from "react-router-dom";
 import { ImportHubModal } from "../../Agent/Skills/components/ImportHubModal";
 import { SkillFilterDropdown } from "../../Agent/Skills/components/SkillFilterDropdown";
+import { AddSkillDropdown } from "../../Agent/Skills/components/AddSkillDropdown";
+import { MarketPanel } from "../Market/MarketPanel";
 import {
   BroadcastModal,
   ImportBuiltinModal,
@@ -32,12 +34,56 @@ import styles from "./index.module.less";
 function SkillPoolPage() {
   const { t } = useTranslation();
   const pool = useSkillPool();
+  const { handleRefresh } = pool;
   const builtinNoticeLines = getBuiltinNoticeLines(pool.builtinNotice, t);
   const {
     visibleItems: visibleSkills,
     hasMore,
     sentinelRef,
   } = useProgressiveRender(pool.sortedSkills);
+
+  const [searchParams, setSearchParams] = useSearchParams();
+  const marketView = searchParams.get("view") === "market";
+
+  const openMarket = useCallback(() => {
+    setSearchParams((prev) => {
+      const next = new URLSearchParams(prev);
+      next.set("view", "market");
+      return next;
+    });
+  }, [setSearchParams]);
+
+  const closeMarket = useCallback(() => {
+    setSearchParams((prev) => {
+      const next = new URLSearchParams(prev);
+      next.delete("view");
+      return next;
+    });
+  }, [setSearchParams]);
+
+  const handleMarketInstalled = useCallback(() => {
+    void handleRefresh();
+  }, [handleRefresh]);
+
+  if (marketView) {
+    return (
+      <div className={styles.skillsPage}>
+        <PageHeader
+          items={[
+            { title: t("nav.settings") },
+            { title: t("nav.skillPool") },
+            { title: t("nav.market") },
+          ]}
+          extra={
+            <Button icon={<ArrowLeftOutlined />} onClick={closeMarket}>
+              {t("common.back")}
+            </Button>
+          }
+        />
+        <MarketPanel installTarget="pool" onInstalled={handleMarketInstalled} />
+      </div>
+    );
+  }
 
   return (
     <div className={styles.skillsPage}>
@@ -130,37 +176,15 @@ function SkillPoolPage() {
                   </Tooltip>
                 </div>
                 <div className={styles.headerActionsRight}>
-                  <Tooltip title={t("skillPool.uploadZipHint")}>
-                    <Button
-                      type="default"
-                      icon={<UploadOutlined />}
-                      onClick={() => pool.zipInputRef.current?.click()}
-                    >
-                      {t("skills.uploadZip")}
-                    </Button>
-                  </Tooltip>
-                  <Tooltip title={t("skillPool.importHubHint")}>
-                    <Button
-                      type="default"
-                      icon={<ImportOutlined />}
-                      onClick={() => pool.setImportModalOpen(true)}
-                    >
-                      {t("skills.importHub")}
-                    </Button>
-                  </Tooltip>
                   <Button type="primary" onClick={pool.toggleBatchMode}>
                     {t("skills.batchOperation")}
                   </Button>
-                  <Tooltip title={t("skills.createSkillHint")}>
-                    <Button
-                      type="primary"
-                      className={styles.primaryActionButton}
-                      icon={<PlusOutlined />}
-                      onClick={pool.openCreate}
-                    >
-                      {t("skills.createSkill")}
-                    </Button>
-                  </Tooltip>
+                  <AddSkillDropdown
+                    onCreate={pool.openCreate}
+                    onUploadZip={() => pool.zipInputRef.current?.click()}
+                    onFromUrl={() => pool.setImportModalOpen(true)}
+                    onBrowseMarket={openMarket}
+                  />
                 </div>
               </>
             )}
@@ -245,7 +269,7 @@ function SkillPoolPage() {
             </span>
           </div>
         ) : pool.viewMode === "card" ? (
-          <div className={styles.skillsGrid}>
+          <div className={`${styles.skillsGrid} responsive-grid`}>
             {visibleSkills.map((skill: PoolSkillSpec) => (
               <PoolSkillCard
                 key={skill.name}
@@ -256,6 +280,7 @@ function SkillPoolPage() {
                 onEdit={pool.openEdit}
                 onBroadcast={pool.openBroadcast}
                 onDelete={pool.handleDelete}
+                onToggleAutoUpdate={pool.handleToggleAutoUpdate}
               />
             ))}
             {hasMore && <div ref={sentinelRef} style={{ height: 1 }} />}
@@ -310,17 +335,24 @@ function SkillPoolPage() {
       <PoolSkillDrawer
         mode={pool.mode}
         activeSkill={pool.activeSkill}
+        loading={pool.detailLoading}
+        skillName={pool.detailSkillName}
         form={pool.form}
         drawerContent={pool.drawerContent}
         showMarkdown={pool.showMarkdown}
         configText={pool.configText}
         availableTags={pool.allTags}
+        workspaces={pool.workspaces}
+        autoUpdateEnabled={pool.autoUpdateEnabled}
+        autoUpdateTargets={pool.autoUpdateTargets}
         onClose={pool.closeDrawer}
         onSave={pool.handleSavePoolSkill}
         onContentChange={pool.handleDrawerContentChange}
         onShowMarkdownChange={pool.setShowMarkdown}
         onConfigTextChange={pool.setConfigText}
         onChangeBuiltinLanguage={pool.handleBuiltinLanguageSwitch}
+        onAutoUpdateEnabledChange={pool.setAutoUpdateEnabled}
+        onAutoUpdateTargetsChange={pool.setAutoUpdateTargets}
         validateFrontmatter={pool.validateFrontmatter}
       />
 

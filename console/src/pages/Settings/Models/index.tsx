@@ -21,7 +21,11 @@ import {
 import { PageHeader } from "@/components/PageHeader";
 import { useTranslation } from "react-i18next";
 import type { ProviderInfo } from "../../../api/types/provider";
-import { getIsConfigured, groupProviders } from "./utils";
+import {
+  countConfiguredProviders,
+  getIsConfigured,
+  groupProviders,
+} from "./utils";
 import { ProviderIcon } from "./components/ProviderIconComponent";
 import styles from "./index.module.less";
 
@@ -35,6 +39,10 @@ function ModelsPage() {
   const { providers, activeModels, loading, error, fetchAll } = useProviders();
   const [addProviderOpen, setAddProviderOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
+  // Prevent browsers from autofilling the search input with saved credentials
+  // (e.g. the username from the login page). Browsers skip read-only inputs
+  // during autofill, so we make it editable only after the user focuses it.
+  const [searchReadOnly, setSearchReadOnly] = useState(true);
 
   // Shared Modal state — only one instance each instead of N per card
   const [configModalProvider, setConfigModalProvider] =
@@ -65,7 +73,7 @@ function ModelsPage() {
   }, [providers, searchParams, setSearchParams]);
 
   const refreshProvidersSilently = useCallback(() => {
-    void fetchAll(false);
+    return fetchAll(false);
   }, [fetchAll]);
 
   const handleTabChange = useCallback((tab: "cloud" | "local") => {
@@ -117,7 +125,9 @@ function ModelsPage() {
 
     const isReady = (p: ProviderInfo) => {
       const hasModels = p.models.length + p.extra_models.length > 0;
-      if (p.is_local) return hasModels;
+      if (p.is_local) {
+        return hasModels || getIsConfigured(p);
+      }
       return getIsConfigured(p);
     };
 
@@ -252,6 +262,15 @@ function ModelsPage() {
     };
   }, [providers, deferredSearchQuery]);
 
+  const configuredCloudProviderCount = useMemo(
+    () =>
+      countConfiguredProviders([
+        ...cloudConfiguredGrouped.flatMap((g) => g.providers),
+        ...cloudConfiguredUngrouped,
+      ]),
+    [cloudConfiguredGrouped, cloudConfiguredUngrouped],
+  );
+
   const renderProviderCards = (list: ProviderInfo[]) =>
     list.map((provider) => (
       <ProviderCard
@@ -320,10 +339,13 @@ function ModelsPage() {
                       placeholder={t("models.searchPlaceholder")}
                       value={searchQuery}
                       onChange={(e) => setSearchQuery(e.target.value)}
+                      onFocus={() => setSearchReadOnly(false)}
                       className={styles.searchInput}
                       prefix={<SearchOutlined />}
                       allowClear
+                      readOnly={searchReadOnly}
                       autoComplete="off"
+                      name="models-provider-search-nofill"
                       data-form-type="other"
                     />
                     <Button
@@ -386,10 +408,7 @@ function ModelsPage() {
                       <span className={styles.panelDotGreen} />
                       {t("models.configuredGroup")}
                       <span className={styles.panelCount}>
-                        {cloudConfiguredGrouped.reduce(
-                          (n, g) => n + g.providers.length,
-                          0,
-                        ) + cloudConfiguredUngrouped.length}{" "}
+                        {configuredCloudProviderCount}{" "}
                         {t("models.configuredOnline")}
                       </span>
                     </div>
@@ -556,6 +575,7 @@ function ModelsPage() {
                 open={!!modelsModalProvider}
                 onClose={() => setModelsModalProvider(null)}
                 onSaved={refreshProvidersSilently}
+                onProviderUpdated={(p) => setModelsModalProvider(p)}
               />
             )}
 

@@ -12,10 +12,15 @@ Covers:
 """
 # pylint: disable=protected-access,unused-argument
 
+import base64
+from io import BytesIO
 from unittest.mock import MagicMock, patch
 
 import pytest
+from agentscope.message import Base64Source
+from PIL import Image
 
+from qwenpaw.agents.utils import image_freezing
 from qwenpaw.agents.tools.view_media import (
     _IMAGE_EXTENSIONS,
     _VIDEO_EXTENSIONS,
@@ -27,6 +32,7 @@ from qwenpaw.agents.tools.view_media import (
     view_image,
     view_video,
 )
+from qwenpaw.providers.capping_formatter import MAX_INLINE_MEDIA_BYTES
 
 
 # ---------------------------------------------------------------------------
@@ -73,7 +79,7 @@ class TestValidateUrlExtension:
             "image",
         )
         assert result is not None
-        assert "image" in result.content[0]["text"].lower()
+        assert "image" in result.content[0].text.lower()
 
     def test_url_without_extension_passes(self):
         result = _validate_url_extension(
@@ -98,7 +104,7 @@ class TestValidateUrlExtension:
             "video",
         )
         assert result is not None
-        assert "video" in result.content[0]["text"].lower()
+        assert "video" in result.content[0].text.lower()
 
 
 # ---------------------------------------------------------------------------
@@ -126,7 +132,7 @@ class TestValidateMediaPath:
             "image",
         )
         assert err is not None
-        assert "does not exist" in err.content[0]["text"]
+        assert "does not exist" in err.content[0].text
 
     def test_unsupported_extension(self, tmp_path):
         f = tmp_path / "data.xyz"
@@ -137,7 +143,7 @@ class TestValidateMediaPath:
             "image",
         )
         assert err is not None
-        assert "not a supported image" in err.content[0]["text"]
+        assert "not a supported image" in err.content[0].text
 
     def test_directory_not_file(self, tmp_path):
         _, err = _validate_media_path(
@@ -146,7 +152,7 @@ class TestValidateMediaPath:
             "image",
         )
         assert err is not None
-        assert "does not exist" in err.content[0]["text"]
+        assert "does not exist" in err.content[0].text
 
     def test_valid_video_file(self, tmp_path):
         vid = tmp_path / "clip.mp4"
@@ -261,32 +267,206 @@ class TestViewImage:
         mock_support.return_value = True
         result = await view_image("https://example.com/photo.jpg")
         assert result.content is not None
-        types = [b.get("type") for b in result.content]
-        assert "image" in types
+        types = [getattr(b, "type", None) for b in result.content]
+        assert "data" in types
 
     @pytest.mark.asyncio
     @patch("qwenpaw.agents.tools.view_media._check_multimodal_support")
     async def test_invalid_url_extension(self, mock_support):
         mock_support.return_value = True
         result = await view_image("https://example.com/doc.pdf")
-        assert "image" in result.content[0]["text"].lower()
+        assert "image" in result.content[0].text.lower()
 
     @pytest.mark.asyncio
     @patch("qwenpaw.agents.tools.view_media._check_multimodal_support")
     async def test_local_image_file(self, mock_support, tmp_path):
         mock_support.return_value = True
         img = tmp_path / "photo.png"
-        img.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 10)
+        Image.new("RGB", (2, 2), color="red").save(img)
         result = await view_image(str(img))
-        types = [b.get("type") for b in result.content]
-        assert "image" in types
+        types = [getattr(b, "type", None) for b in result.content]
+        assert "data" in types
+        image_block = next(
+            block for block in result.content if block.type == "data"
+        )
+        assert isinstance(image_block.source, Base64Source)
+        assert image_block.source.media_type == "image/png"
+        assert base64.b64decode(image_block.source.data) == img.read_bytes()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("suffix", "image_format"),
+        [(".bmp", "BMP"), (".tiff", "TIFF")],
+    )
+    @patch("qwenpaw.agents.tools.view_media._check_multimodal_support")
+    async def test_local_image_converts_to_png(
+        self,
+        mock_support,
+        tmp_path,
+        suffix,
+        image_format,
+    ):
+        mock_support.return_value = True
+        img = tmp_path / f"photo{suffix}"
+        Image.new("RGB", (2, 2), color="green").save(
+            img,
+            format=image_format,
+        )
+
+        result = await view_image(str(img))
+
+        image_block = next(
+            block for block in result.content if block.type == "data"
+        )
+        assert isinstance(image_block.source, Base64Source)
+        assert image_block.source.media_type == "image/png"
+        converted_bytes = base64.b64decode(image_block.source.data)
+        with Image.open(BytesIO(converted_bytes)) as converted:
+            assert converted.format == "PNG"
+
+    @pytest.mark.asyncio
+    @patch("qwenpaw.agents.tools.view_media._check_multimodal_support")
+    async def test_tiff_with_jpeg_suffix_converts_to_png(
+        self,
+        mock_support,
+        tmp_path,
+    ):
+        mock_support.return_value = True
+        img = tmp_path / "misleading.jpg"
+        Image.new("RGB", (2, 2), color="yellow").save(
+            img,
+            format="TIFF",
+        )
+
+        result = await view_image(str(img))
+
+        image_block = next(
+            block for block in result.content if block.type == "data"
+        )
+        assert image_block.source.media_type == "image/png"
+        converted_bytes = base64.b64decode(image_block.source.data)
+        with Image.open(BytesIO(converted_bytes)) as converted:
+            assert converted.format == "PNG"
+
+    @pytest.mark.asyncio
+    @patch("qwenpaw.agents.tools.view_media._check_multimodal_support")
+    async def test_local_image_uses_detected_mime(
+        self,
+        mock_support,
+        tmp_path,
+    ):
+        mock_support.return_value = True
+        img = tmp_path / "misleading.jpg"
+        Image.new("RGB", (2, 2), color="blue").save(img, format="PNG")
+
+        result = await view_image(str(img))
+
+        image_block = next(
+            block for block in result.content if block.type == "data"
+        )
+        assert image_block.source.media_type == "image/png"
+
+    @pytest.mark.asyncio
+    @patch("qwenpaw.agents.tools.view_media._check_multimodal_support")
+    async def test_invalid_local_image_returns_error(
+        self,
+        mock_support,
+        tmp_path,
+    ):
+        mock_support.return_value = True
+        img = tmp_path / "broken.png"
+        img.write_bytes(b"not-an-image")
+
+        result = await view_image(str(img))
+
+        assert len(result.content) == 1
+        assert "not a valid image" in result.content[0].text
+
+    @pytest.mark.asyncio
+    @patch("qwenpaw.agents.tools.view_media._check_multimodal_support")
+    async def test_oversized_local_image_is_rejected_before_decode(
+        self,
+        mock_support,
+        tmp_path,
+    ):
+        mock_support.return_value = True
+        img = tmp_path / "oversized.png"
+        img.write_bytes(b"x" * (MAX_INLINE_MEDIA_BYTES + 1))
+
+        result = await view_image(str(img))
+
+        assert len(result.content) == 1
+        assert "exceeds" in result.content[0].text
+        assert str(MAX_INLINE_MEDIA_BYTES) in result.content[0].text
+
+    @pytest.mark.asyncio
+    @patch("qwenpaw.agents.tools.view_media._check_multimodal_support")
+    async def test_converted_png_must_fit_image_limit(
+        self,
+        mock_support,
+        monkeypatch,
+        tmp_path,
+    ):
+        mock_support.return_value = True
+        img = tmp_path / "compressed.tiff"
+        channels = [Image.effect_noise((1000, 1000), 100) for _ in range(3)]
+        Image.merge("RGB", channels).save(
+            img,
+            format="TIFF",
+            compression="jpeg",
+            quality=75,
+        )
+        with Image.open(img) as image:
+            image.load()
+            converted = BytesIO()
+            image.convert("RGB").save(converted, format="PNG")
+        source_size = img.stat().st_size
+        converted_size = len(converted.getvalue())
+        assert source_size < converted_size
+        image_limit = (source_size + converted_size) // 2
+        monkeypatch.setattr(
+            image_freezing,
+            "MAX_INLINE_MEDIA_BYTES",
+            image_limit,
+        )
+
+        result = await view_image(str(img))
+
+        assert len(result.content) == 1
+        assert "converted" in result.content[0].text
+        assert "exceeds" in result.content[0].text
+
+    @pytest.mark.asyncio
+    @patch("qwenpaw.agents.tools.view_media._check_multimodal_support")
+    async def test_overwritten_path_preserves_each_version(
+        self,
+        mock_support,
+        tmp_path,
+    ):
+        mock_support.return_value = True
+        img = tmp_path / "preview.png"
+        Image.new("RGB", (2, 2), color="red").save(img)
+        first = await view_image(str(img))
+        first_block = next(
+            block for block in first.content if block.type == "data"
+        )
+        first_data = first_block.source.data
+
+        Image.new("RGB", (2, 2), color="blue").save(img)
+        second = await view_image(str(img))
+        second_block = next(
+            block for block in second.content if block.type == "data"
+        )
+
+        assert first_block.source.data == first_data
+        assert second_block.source.data != first_data
 
     @pytest.mark.asyncio
     @patch("qwenpaw.agents.tools.view_media._check_multimodal_support")
     async def test_nonexistent_local_file(self, mock_support):
         mock_support.return_value = True
         result = await view_image("/nonexistent/image.png")
-        assert "does not exist" in result.content[0]["text"]
+        assert "does not exist" in result.content[0].text
 
     @pytest.mark.asyncio
     @patch("qwenpaw.agents.tools.view_media._probe_multimodal_if_needed")
@@ -296,7 +476,9 @@ class TestViewImage:
         mock_probe.return_value = False
         result = await view_image("https://example.com/img.jpg")
         text_parts = [
-            b["text"] for b in result.content if b.get("type") == "text"
+            b.text
+            for b in result.content
+            if getattr(b, "type", None) == "text"
         ]
         assert any("multimodal" in t.lower() for t in text_parts)
 
@@ -314,15 +496,15 @@ class TestViewVideo:
     async def test_url_video(self, mock_support):
         mock_support.return_value = True
         result = await view_video("https://example.com/clip.mp4")
-        types = [b.get("type") for b in result.content]
-        assert "video" in types
+        types = [getattr(b, "type", None) for b in result.content]
+        assert "data" in types
 
     @pytest.mark.asyncio
     @patch("qwenpaw.agents.tools.view_media._check_multimodal_support")
     async def test_invalid_url_extension(self, mock_support):
         mock_support.return_value = True
         result = await view_video("https://example.com/doc.pdf")
-        assert "video" in result.content[0]["text"].lower()
+        assert "video" in result.content[0].text.lower()
 
     @pytest.mark.asyncio
     @patch("qwenpaw.agents.tools.view_media._check_multimodal_support")
@@ -331,12 +513,12 @@ class TestViewVideo:
         vid = tmp_path / "clip.mp4"
         vid.write_bytes(b"\x00" * 100)
         result = await view_video(str(vid))
-        types = [b.get("type") for b in result.content]
-        assert "video" in types
+        types = [getattr(b, "type", None) for b in result.content]
+        assert "data" in types
 
     @pytest.mark.asyncio
     @patch("qwenpaw.agents.tools.view_media._check_multimodal_support")
     async def test_nonexistent_local_file(self, mock_support):
         mock_support.return_value = True
         result = await view_video("/nonexistent/vid.mp4")
-        assert "does not exist" in result.content[0]["text"]
+        assert "does not exist" in result.content[0].text

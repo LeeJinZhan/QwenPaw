@@ -6,6 +6,7 @@ import type {
   ChatHistory,
   ChatDeleteResponse,
   ChatUpdateRequest,
+  BatchArchiveResult,
   Session,
 } from "../types";
 
@@ -17,6 +18,13 @@ export interface ChatUploadResponse {
 }
 
 const FILES_PREVIEW = "/files/preview";
+const RUNTIME_MANAGED_CHANNEL = "bank-runtime";
+
+export function filterConsoleVisibleChats<
+  T extends { channel?: string | null },
+>(chats: T[]): T[] {
+  return chats.filter((chat) => chat.channel !== RUNTIME_MANAGED_CHANNEL);
+}
 
 export const chatApi = {
   /** Upload a file for chat attachment. Returns URL path for content. */
@@ -54,12 +62,20 @@ export const chatApi = {
 
     return url;
   },
-  listChats: (params?: { user_id?: string; channel?: string }) => {
+  listChats: (params?: {
+    user_id?: string;
+    channel?: string;
+    archived?: boolean;
+  }) => {
     const searchParams = new URLSearchParams();
     if (params?.user_id) searchParams.append("user_id", params.user_id);
     if (params?.channel) searchParams.append("channel", params.channel);
+    if (params?.archived !== undefined)
+      searchParams.append("archived", String(params.archived));
     const query = searchParams.toString();
-    return request<ChatSpec[]>(`/chats${query ? `?${query}` : ""}`);
+    return request<ChatSpec[]>(`/chats${query ? `?${query}` : ""}`).then(
+      filterConsoleVisibleChats,
+    );
   },
 
   createChat: (chat: Partial<ChatSpec>) =>
@@ -68,8 +84,10 @@ export const chatApi = {
       body: JSON.stringify(chat),
     }),
 
-  getChat: (chatId: string) =>
-    request<ChatHistory>(`/chats/${encodeURIComponent(chatId)}`),
+  getChat: (chatId: string, options?: { signal?: AbortSignal }) =>
+    request<ChatHistory>(`/chats/${encodeURIComponent(chatId)}`, {
+      signal: options?.signal,
+    }),
 
   updateChat: (chatId: string, chat: ChatUpdateRequest) =>
     request<ChatSpec>(`/chats/${encodeURIComponent(chatId)}`, {
@@ -91,6 +109,28 @@ export const chatApi = {
       },
     ),
 
+  archiveChat: (chatId: string) =>
+    request<ChatSpec>(`/chats/${encodeURIComponent(chatId)}/archive`, {
+      method: "POST",
+    }),
+
+  unarchiveChat: (chatId: string) =>
+    request<ChatSpec>(`/chats/${encodeURIComponent(chatId)}/unarchive`, {
+      method: "POST",
+    }),
+
+  batchArchiveChats: (chatIds: string[]) =>
+    request<BatchArchiveResult>("/chats/actions/batch-archive", {
+      method: "POST",
+      body: JSON.stringify({ chat_ids: chatIds }),
+    }),
+
+  batchUnarchiveChats: (chatIds: string[]) =>
+    request<BatchArchiveResult>("/chats/actions/batch-unarchive", {
+      method: "POST",
+      body: JSON.stringify({ chat_ids: chatIds }),
+    }),
+
   stopChat: (chatId: string) =>
     request<void>(`/console/chat/stop?chat_id=${encodeURIComponent(chatId)}`, {
       method: "POST",
@@ -103,7 +143,9 @@ export const sessionApi = {
     if (params?.user_id) searchParams.append("user_id", params.user_id);
     if (params?.channel) searchParams.append("channel", params.channel);
     const query = searchParams.toString();
-    return request<Session[]>(`/chats${query ? `?${query}` : ""}`);
+    return request<Session[]>(`/chats${query ? `?${query}` : ""}`).then(
+      filterConsoleVisibleChats,
+    );
   },
 
   getSession: (sessionId: string) =>

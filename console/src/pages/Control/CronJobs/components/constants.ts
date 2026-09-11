@@ -31,12 +31,14 @@ export const DEFAULT_FORM_VALUES = {
       user_id: "",
       session_id: "",
     },
-    mode: "final" as const,
+    mode: "stream" as const,
+    silent: false,
   },
   runtime: {
     share_session: true,
     max_concurrency: 1,
     timeout_seconds: 120,
-    misfire_grace_seconds: 60,
+    misfire_grace_seconds: 600,
+    tool_safety: false,
   },
 };

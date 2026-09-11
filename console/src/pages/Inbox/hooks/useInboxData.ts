@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
+import type { TFunction } from "i18next";
 import api from "../../../api";
 import type { InboxEvent } from "../../../api/modules/console";
 import { useAgentStore } from "../../../stores/agentStore";
@@ -7,6 +8,11 @@ import {
   DEFAULT_AGENT_ID,
   getAgentDisplayName,
 } from "../../../utils/agentDisplayName";
+import {
+  INBOX_EVENT_QUERY_LIMIT,
+  PUSH_MESSAGE_SOURCES,
+  isPushMessageEvent,
+} from "../../../utils/inboxEvents";
 import type { HarvestInstance, InboxSummary, PushMessage } from "../types";
 
 const PUSH_POLLING_INTERVAL_MS = 6000;
@@ -37,31 +43,73 @@ const getHeartbeatSummary = (status?: string): string => {
   return "Heartbeat 执行失败";
 };
 
+const getSkillAutoUpdateSummary = (event: InboxEvent, t: TFunction): string => {
+  const payload = (event.payload || {}) as {
+    synced?: { skill?: string; agents?: string[] }[];
+    failed?: { skill?: string; agents?: string[] }[];
+  };
+  const parts: string[] = [];
+  for (const item of payload.synced || []) {
+    parts.push(
+      t("inbox.skillAutoUpdated", {
+        skill: item.skill,
+        agents: (item.agents || []).join(", "),
+      }),
+    );
+  }
+  for (const item of payload.failed || []) {
+    parts.push(
+      t("inbox.skillAutoUpdateFailed", {
+        skill: item.skill,
+        agents: (item.agents || []).join(", "),
+      }),
+    );
+  }
+  return parts.join("; ") || event.body;
+};
+
 const mapEventToPushMessage = (
   event: InboxEvent,
   resolveAgentName: (agentId: string) => string,
+  t: TFunction,
 ): PushMessage => ({
   id: event.id,
   channelType:
     event.source_type === "heartbeat"
       ? "heartbeat"
+      : event.source_type === "memory"
+      ? "memory"
       : event.source_type === "cron"
       ? "wechat"
+      : event.source_type === "skill_autoupdate"
+      ? "skill"
       : "email",
   channelName:
     event.source_type === "heartbeat"
       ? "Heartbeat"
+      : event.source_type === "memory"
+      ? "Memory"
       : event.source_type === "cron"
       ? "Cron"
+      : event.source_type === "skill_autoupdate"
+      ? "Auto Sync"
       : "System",
-  title: event.title,
+  title:
+    event.source_type === "skill_autoupdate"
+      ? t("inbox.skillAutoUpdateTitle")
+      : event.title,
   content:
     event.source_type === "heartbeat"
       ? getHeartbeatSummary(event.status)
+      : event.source_type === "skill_autoupdate"
+      ? getSkillAutoUpdateSummary(event, t)
       : stripExecutionTimeText(event.body),
   sender: {
     userId: event.agent_id || "default",
-    username: resolveAgentName(event.agent_id || DEFAULT_AGENT_ID),
+    username:
+      event.source_type === "skill_autoupdate"
+        ? t("inbox.skillPoolSender")
+        : resolveAgentName(event.agent_id || DEFAULT_AGENT_ID),
   },
   createdAt: new Date((event.created_at || Date.now() / 1000) * 1000),
   read: Boolean(event.read),
@@ -110,6 +158,8 @@ export const useInboxData = () => {
   );
   const resolveAgentNameRef = useRef(resolveAgentName);
   resolveAgentNameRef.current = resolveAgentName;
+  const tRef = useRef(t);
+  tRef.current = t;
   const [summary, setSummary] = useState<InboxSummary>({
     approvals: { total: 0, urgent: 0 },
     pushMessages: { total: 0, unread: 0 },
@@ -125,20 +175,21 @@ export const useInboxData = () => {
 
   const loadPushMessages = useCallback(async () => {
     try {
-      const res = await api.getInboxEvents({ limit: 200 });
-      const events = [...(res?.events || [])].filter((event) =>
-        ["cron", "heartbeat"].includes(event.source_type),
-      );
+      const res = await api.getInboxEvents({
+        limit: INBOX_EVENT_QUERY_LIMIT,
+        source_types: [...PUSH_MESSAGE_SOURCES],
+      });
+      const events = [...(res?.events || [])].filter(isPushMessageEvent);
       events.sort((a, b) => (b.created_at || 0) - (a.created_at || 0));
       const nextItems: PushMessage[] = events.map((event) =>
-        mapEventToPushMessage(event, resolveAgentNameRef.current),
+        mapEventToPushMessage(event, resolveAgentNameRef.current, tRef.current),
       );
       setPushMessages(nextItems);
       setSummary((prev) => ({
         ...prev,
         pushMessages: {
-          total: nextItems.length,
-          unread: nextItems.filter((m) => !m.read).length,
+          total: res?.total ?? nextItems.length,
+          unread: res?.unread_count ?? nextItems.filter((m) => !m.read).length,
         },
       }));
     } catch (error) {

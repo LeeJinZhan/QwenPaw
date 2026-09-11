@@ -121,6 +121,11 @@ if [ ! -d "${APP_PATH}" ]; then
     echo "ERROR: No Tauri macOS app found at ${APP_PATH}"
     exit 1
 fi
+HELPER_PATH="${APP_PATH}/Contents/MacOS/qwenpaw-computer-use-helper"
+if [ ! -x "${HELPER_PATH}" ]; then
+    echo "ERROR: Computer Use helper was not bundled at ${HELPER_PATH}"
+    exit 1
+fi
 
 echo "== Step 3b: Signing Final macOS App =="
 bash "${SIGN_MACOS_BUNDLE}" \
@@ -168,6 +173,18 @@ else
 fi
 echo ""
 
+UPDATER_NAME="${DIST_ROOT}/QwenPaw-Tauri-${VERSION}-macOS.app.tar.gz"
+case "$(uname -m)" in
+    arm64 | aarch64) UPDATER_TARGET="darwin-aarch64" ;;
+    *) UPDATER_TARGET="darwin-x86_64" ;;
+esac
+python "${REPO_ROOT}/scripts/pack-tauri/generate_update_manifest.py" stage \
+    --bundle-dir "${BUNDLE_DIR}/macos" \
+    --pattern '*.app.tar.gz' \
+    --target "${UPDATER_TARGET}" \
+    --output "${UPDATER_NAME}" \
+    --pubkey-config "${REPO_ROOT}/console/src-tauri/tauri.version.conf.json"
+
 echo ""
 echo "========================================="
 echo "Build Complete!"
@@ -175,6 +192,7 @@ echo "========================================="
 echo "App:          ${APP_PATH}"
 echo "Distribution: ${DIST_DIR}"
 echo "Archive:      ${ZIP_NAME}"
+echo "Updater:      ${UPDATER_NAME}"
 echo ""
 echo "Test: open \"${STAGED_APP_PATH}\""
 echo ""

@@ -27,6 +27,10 @@ on:
         description: "Override Dockerfile UV_IMAGE build-arg (for fork without ACR access)"
         type: string
         default: ""
+      ref:
+        description: "Git ref/SHA to checkout for docker/script verification (empty = default)"
+        type: string
+        default: ""
 
 jobs:
   # ── pip install wheel ──────────────────────────────────────────────────────
@@ -38,13 +42,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.10", "3.13"]
+        python-version: ["3.11", "3.13"]
         os: [ubuntu-latest]
         include:
           - os: macos-latest
-            python-version: "3.10"
+            python-version: "3.11"
           - os: windows-latest
-            python-version: "3.10"
+            python-version: "3.11"
 
     steps:
       - name: Download dist artifacts
@@ -166,6 +170,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
 
       - name: Log in to Aliyun ACR (when credentials available)
         if: env.ACR_USERNAME != ''
@@ -257,6 +263,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
 
       - name: Set up Node.js (for console build during from-source install)
         uses: actions/setup-node@v4

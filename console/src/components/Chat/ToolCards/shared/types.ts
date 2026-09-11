@@ -6,12 +6,18 @@
 
 export type ToolCallStatus = "calling" | "done" | "error";
 
+export interface ToolInputProgress {
+  preview: string;
+  truncated: boolean;
+}
+
 export interface ToolCallContent {
   type: "tool_call";
   id: string;
   name: string;
   serverLabel?: string;
   params: Record<string, unknown>;
+  inputProgress?: ToolInputProgress;
   result?: unknown;
   status: ToolCallStatus;
 }

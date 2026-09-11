@@ -14,6 +14,7 @@ import {
   Tag,
   Spin,
   Select,
+  Tooltip,
 } from "antd";
 import {
   BulbOutlined,
@@ -21,13 +22,15 @@ import {
   DownOutlined,
   ToolOutlined,
 } from "@ant-design/icons";
-import { PackageOpen, Bell } from "lucide-react";
+import { PackageOpen, Bell, BellRing } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { useTranslation } from "react-i18next";
 import { PageHeader } from "@/components/PageHeader";
+import { externalLinkMarkdownComponents } from "@/components/Markdown/externalLinkComponents";
 import { ApprovalCard as GlobalApprovalCard } from "../../components/ApprovalCard/ApprovalCard";
 import { useApprovalContext } from "../../contexts/ApprovalContext";
+import { useInboxWobble } from "../../hooks/useInboxWobble";
 import { commandsApi } from "../../api/modules/commands";
 import { chatApi } from "../../api/modules/chat";
 import sessionApi from "../Chat/sessionApi";
@@ -50,6 +53,12 @@ type TabKey = "approvals" | "messages";
 const INBOX_TAB_STORAGE_KEY = "qwenpaw.inbox.activeTab";
 const PUSH_MESSAGES_PAGE_SIZE = 5;
 
+const SOURCE_TYPE_LABEL_KEYS: Record<string, string> = {
+  cron: "inbox.sourceTypeCron",
+  heartbeat: "inbox.sourceTypeHeartbeat",
+  memory: "inbox.sourceTypeMemory",
+};
+
 const resolveInitialTab = (): TabKey => {
   if (typeof window === "undefined") {
     return "messages";
@@ -63,7 +72,12 @@ const resolveInitialTab = (): TabKey => {
 
 const renderMarkdownText = (text: string, className: string) => (
   <div className={className}>
-    <ReactMarkdown remarkPlugins={[remarkGfm]}>{text}</ReactMarkdown>
+    <ReactMarkdown
+      remarkPlugins={[remarkGfm]}
+      components={externalLinkMarkdownComponents}
+    >
+      {text}
+    </ReactMarkdown>
   </div>
 );
 
@@ -74,10 +88,14 @@ export default function InboxPage() {
   const [selectedAgentFilter, setSelectedAgentFilter] = useState<
     string | undefined
   >(undefined);
+  const [selectedSourceTypeFilter, setSelectedSourceTypeFilter] = useState<
+    string | undefined
+  >(undefined);
   const [messagesPage, setMessagesPage] = useState(1);
   const [selectedMessageIds, setSelectedMessageIds] = useState<string[]>([]);
   const [batchMode, setBatchMode] = useState(false);
   const agents = useAgentStore((state) => state.agents);
+  const [wobbleEnabled, toggleWobble] = useInboxWobble();
   const { approvals: pendingApprovals, setApprovals } = useApprovalContext();
   const {
     summary,
@@ -93,14 +111,22 @@ export default function InboxPage() {
     [agents, t],
   );
   const filteredPushMessages = useMemo(() => {
-    if (!selectedAgentFilter) {
-      return pushMessages;
-    }
-    return pushMessages.filter(
-      (message) =>
-        (message.metadata?.agentId || DEFAULT_AGENT_ID) === selectedAgentFilter,
-    );
-  }, [pushMessages, selectedAgentFilter]);
+    return pushMessages.filter((message) => {
+      if (
+        selectedAgentFilter &&
+        (message.metadata?.agentId || DEFAULT_AGENT_ID) !== selectedAgentFilter
+      ) {
+        return false;
+      }
+      if (
+        selectedSourceTypeFilter &&
+        message.metadata?.sourceType !== selectedSourceTypeFilter
+      ) {
+        return false;
+      }
+      return true;
+    });
+  }, [pushMessages, selectedAgentFilter, selectedSourceTypeFilter]);
   const pushMessageAgentOptions = useMemo(() => {
     const ids = new Set<string>(
       filteredPushMessages.map(
@@ -121,13 +147,20 @@ export default function InboxPage() {
       }));
     return options;
   }, [agentDisplayNameById, filteredPushMessages, pushMessages, t]);
-  const urgentApprovalCount = useMemo(
-    () =>
-      pendingApprovals.filter((item) =>
-        ["high", "critical"].includes(item.severity?.toLowerCase?.() || ""),
-      ).length,
-    [pendingApprovals],
-  );
+  const sourceTypeOptions = useMemo(() => {
+    const types = new Set<string>(
+      pushMessages
+        .map((m) => m.metadata?.sourceType)
+        .filter((v): v is string => Boolean(v)),
+    );
+    return Array.from(types)
+      .sort((a, b) => a.localeCompare(b))
+      .map((type) => ({
+        value: type,
+        label: t(SOURCE_TYPE_LABEL_KEYS[type] || type),
+      }));
+  }, [pushMessages, t]);
+  const approvalCount = pendingApprovals.length;
   const pagedPushMessages = useMemo(() => {
     const start = (messagesPage - 1) * PUSH_MESSAGES_PAGE_SIZE;
     return filteredPushMessages.slice(start, start + PUSH_MESSAGES_PAGE_SIZE);
@@ -150,8 +183,15 @@ export default function InboxPage() {
   const handleApproveRequest = async (
     requestId: string,
     rootSessionId: string,
+    scope?: "exact" | "similar",
   ) => {
-    await commandsApi.sendApprovalCommand("approve", requestId, rootSessionId);
+    await commandsApi.sendApprovalCommand(
+      "approve",
+      requestId,
+      rootSessionId,
+      undefined,
+      scope,
+    );
     setApprovals((prev) =>
       prev.filter((item) => item.request_id !== requestId),
     );
@@ -210,7 +250,7 @@ export default function InboxPage() {
 
   useEffect(() => {
     setMessagesPage(1);
-  }, [selectedAgentFilter]);
+  }, [selectedAgentFilter, selectedSourceTypeFilter]);
 
   const handleViewMessage = (messageId: string) => {
     const found = pushMessages.find((item) => item.id === messageId);
@@ -295,6 +335,15 @@ export default function InboxPage() {
                 options={pushMessageAgentOptions}
                 style={{ width: 180 }}
                 placeholder={t("inbox.filterByAgent")}
+              />
+              <Select
+                size="middle"
+                value={selectedSourceTypeFilter}
+                onChange={(value) => setSelectedSourceTypeFilter(value)}
+                allowClear
+                options={sourceTypeOptions}
+                style={{ width: 160 }}
+                placeholder={t("inbox.filterBySourceType")}
               />
             </div>
             <div className={styles.messagesSelectionTools}>
@@ -389,9 +438,7 @@ export default function InboxPage() {
         <span className={styles.tabLabel}>
           <PackageOpen size={16} />
           {t("inbox.tabApprovals")}
-          {urgentApprovalCount > 0 && (
-            <Badge count={urgentApprovalCount} color="#ff7f16" />
-          )}
+          {approvalCount > 0 && <Badge count={approvalCount} color="#ff7f16" />}
         </span>
       ),
       children: (
@@ -405,7 +452,8 @@ export default function InboxPage() {
                   agentId={approval.agent_id}
                   ownerAgentId={approval.owner_agent_id}
                   showInboxAgentContext
-                  toolName={approval.tool_name}
+                  toolName={approval.tool_display_name || approval.tool_name}
+                  toolSource={approval.tool_source}
                   severity={approval.severity}
                   findingsCount={approval.findings_count}
                   findingsSummary={approval.findings_summary}
@@ -414,10 +462,14 @@ export default function InboxPage() {
                   timeoutSeconds={approval.timeout_seconds}
                   sessionId={approval.session_id}
                   rootSessionId={approval.root_session_id}
-                  onApprove={() =>
+                  isGeneralized={approval.is_generalized}
+                  exactTarget={approval.exact_target}
+                  similarTarget={approval.similar_target}
+                  onApprove={(_reqId, scope) =>
                     handleApproveRequest(
                       approval.request_id,
                       approval.root_session_id,
+                      scope,
                     )
                   }
                   onDeny={() =>
@@ -464,6 +516,23 @@ export default function InboxPage() {
           onChange={(key) => setActiveTab(key as TabKey)}
           items={tabItems}
           className={styles.inboxTabs}
+          tabBarExtraContent={
+            <Tooltip
+              title={t(
+                wobbleEnabled ? "inbox.wobbleDisable" : "inbox.wobbleEnable",
+              )}
+            >
+              <Button
+                type="text"
+                size="small"
+                icon={<BellRing size={16} />}
+                onClick={toggleWobble}
+                className={
+                  wobbleEnabled ? styles.wobbleToggleActive : undefined
+                }
+              />
+            </Tooltip>
+          }
         />
       </div>
       <Modal

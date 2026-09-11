@@ -1,25 +1,21 @@
 import React, { useEffect, useMemo, useRef } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
-import {
-  useChatAnywhereSessionsState,
-  useChatAnywhereSessions,
-} from "@agentscope-ai/chat";
+import { useChatAnywhereSessionsState } from "@agentscope-ai/chat";
 import sessionApi from "../../sessionApi";
 import {
-  buildSessionPath,
+  buildChatPath,
   getSessionIdFromPath,
 } from "../../../../utils/sessionRoute";
-import { useCodingMode } from "../../../../stores/codingModeStore";
 import {
   useSessionListStore,
   type ExtendedSession,
 } from "../../../../stores/sessionListStore";
+import { useCreateNewSession } from "../../hooks/useCreateNewSession";
 
 /**
  * URL chatId → context currentSessionId (one direction of bidirectional sync).
  *
- * Extracts sessionId from both `/chat/<id>` and `/coding/<id>` URLs so that
- * Coding mode sessions survive page refreshes (issue #5142).
+ * Extracts the session ID from the canonical `/chat/<id>` URL.
  *
  * Only reacts to URL or session list changes. currentSessionId is read via ref
  * to avoid triggering the effect when the context changes from the other direction
@@ -36,10 +32,6 @@ import {
 const ChatSessionInitializer: React.FC = () => {
   const location = useLocation();
   const navigate = useNavigate();
-  const { codingMode } = useCodingMode();
-
-  // Issue #5142: Match both /chat/<id> and /coding/<id> so that Coding mode
-  // sessions are restored from the URL on page refresh, just like Chat mode.
   const chatId = useMemo(
     () => getSessionIdFromPath(location.pathname),
     [location.pathname],
@@ -47,7 +39,7 @@ const ChatSessionInitializer: React.FC = () => {
 
   const { sessions, currentSessionId, setCurrentSessionId, setSessions } =
     useChatAnywhereSessionsState();
-  const { createSession } = useChatAnywhereSessions();
+  const createNewSession = useCreateNewSession();
   const { syncFromLibrary } = useSessionListStore();
 
   // Sync library sessions → shared Zustand store whenever they change.
@@ -67,8 +59,11 @@ const ChatSessionInitializer: React.FC = () => {
   const sessionsRef = useRef(sessions);
   sessionsRef.current = sessions;
 
-  const codingModeRef = useRef(codingMode);
-  codingModeRef.current = codingMode;
+  const createNewSessionRef = useRef(createNewSession);
+  createNewSessionRef.current = createNewSession;
+
+  /** AbortController for embedded session switch — aborted when a new switch starts. */
+  const switchControllerRef = useRef<AbortController | null>(null);
 
   /** Track the last chatId for which we called setCurrentSessionId, so that
    *  subsequent sessions array reference changes (from polling in pinned drawer)
@@ -101,7 +96,23 @@ const ChatSessionInitializer: React.FC = () => {
       return;
     }
 
-    const matching = sessions.find((s) => s.id === chatId);
+    // Match by multiple criteria in order of specificity:
+    // 1) Library id (localId or UUID)
+    let matching = sessions.find((s) => s.id === chatId);
+
+    // 2) realId: URL contains a UUID but the session's library id is still a
+    //    local timestamp (e.g. during SSE before onSessionIdResolved fires).
+    if (!matching) {
+      matching = sessions.find((s) => (s as ExtendedSession).realId === chatId);
+    }
+
+    // 3) sessionId field: URL contains the backend session_id format
+    if (!matching) {
+      matching = sessions.find(
+        (s) => (s as ExtendedSession).sessionId === chatId,
+      );
+    }
+
     if (matching && currentSessionIdRef.current !== matching.id) {
       lastAppliedChatIdRef.current = chatId;
       setCurrentSessionId(matching.id);
@@ -111,7 +122,6 @@ const ChatSessionInitializer: React.FC = () => {
     }
     // Intentionally exclude currentSessionId from deps: only react to URL / session list changes.
     // currentSessionId is read via ref to avoid circular triggers.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [chatId, sessions, setCurrentSessionId]);
 
   // ── Sidebar event handlers ────────────────────────────────────────────────
@@ -128,42 +138,50 @@ const ChatSessionInitializer: React.FC = () => {
         .sessionId;
       if (!sessionId) return;
 
-      const mode = codingModeRef.current ? "coding" : "chat";
       const currentSessions = sessionsRef.current;
       const matching = currentSessions.find((s) => s.id === sessionId);
 
       if (matching) {
-        // Preload then navigate + sync, mirroring ChatSessionDrawer behaviour.
+        // Abort any previous embedded switch
+        switchControllerRef.current?.abort();
+        const controller = new AbortController();
+        switchControllerRef.current = controller;
+
         sessionApi.isSessionSwitching = true;
         sessionApi
-          .preloadSession(sessionId)
+          .preloadSession(sessionId, controller.signal)
           .then(({ realId }) => {
-            const effectiveId = realId || sessionId;
-            const targetUrl = buildSessionPath(mode, effectiveId);
-            sessionApi.lastNavigatedChatId = effectiveId;
+            if (controller.signal.aborted) return;
+            const effectiveId = sessionApi.getEffectiveSessionId(
+              sessionId,
+              realId,
+            );
+            const targetUrl = buildChatPath(effectiveId);
+            sessionApi.trackNavigatedSession(effectiveId);
+            sessionApi.preferredChatId = effectiveId;
             navigate(targetUrl, { replace: true });
             setCurrentSessionId(sessionId);
           })
-          .catch(() => {
-            // Fallback: just set the session id; URL sync via onSessionSelected
+          .catch((err) => {
+            if (err?.name === "AbortError") return;
             setCurrentSessionId(sessionId);
           })
           .finally(() => {
-            requestAnimationFrame(() => {
-              requestAnimationFrame(() => {
-                sessionApi.finishSessionSwitch();
-              });
-            });
+            if (!controller.signal.aborted) {
+              sessionApi.finishSessionSwitch();
+              window.dispatchEvent(
+                new CustomEvent("qwenpaw:sidebar-switch-done"),
+              );
+            }
           });
       }
     };
 
-    /**
-     * Handle new-chat request from sidebar.
-     * Creates a fresh session via the library's createSession().
-     */
     const handleNewChat = () => {
-      void createSession();
+      if (sessionApi.isSessionSwitching) {
+        sessionApi.finishSessionSwitch();
+      }
+      void createNewSessionRef.current();
     };
 
     window.addEventListener(
@@ -172,15 +190,33 @@ const ChatSessionInitializer: React.FC = () => {
     );
     window.addEventListener("qwenpaw:sidebar-new-chat", handleNewChat);
 
+    // Check for pending new-chat flag set by Sidebar when navigating from
+    // another page. Must be deferred so the library has initialized.
+    const pendingNewChat = sessionStorage.getItem("qwenpaw_pending_new_chat");
+    if (pendingNewChat) {
+      sessionStorage.removeItem("qwenpaw_pending_new_chat");
+      requestAnimationFrame(() => handleNewChat());
+    }
+
     return () => {
+      // Abort any in-flight embedded switch so a late preload result cannot
+      // navigate after this initializer (and its chat view) is gone. The
+      // aborted promise's finally skips finishSessionSwitch, and the ref
+      // always points at the newest switch started by this instance, so
+      // releasing the lock here cannot unlock someone else's switch.
+      const controller = switchControllerRef.current;
+      if (controller && !controller.signal.aborted) {
+        controller.abort();
+        sessionApi.finishSessionSwitch();
+      }
+      switchControllerRef.current = null;
       window.removeEventListener(
         "qwenpaw:sidebar-select-session",
         handleSelectSession,
       );
       window.removeEventListener("qwenpaw:sidebar-new-chat", handleNewChat);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [navigate, setCurrentSessionId, createSession]);
+  }, [navigate, setCurrentSessionId]);
 
   return null;
 };

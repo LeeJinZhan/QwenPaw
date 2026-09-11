@@ -265,6 +265,7 @@ interface ProviderConfigModalProps {
     name: string;
     api_key?: string;
     api_key_prefix?: string;
+    api_key_prefixes?: string[];
     base_url?: string;
     is_custom: boolean;
     freeze_url: boolean;
@@ -360,15 +361,27 @@ export function ProviderConfigModal({
     [provider.id, provider.chat_model, effectiveChatModel],
   );
 
+  const validApiKeyPrefixes = useMemo(() => {
+    if (provider.api_key_prefixes && provider.api_key_prefixes.length > 0) {
+      return provider.api_key_prefixes;
+    }
+    if (provider.api_key_prefix) {
+      return [provider.api_key_prefix];
+    }
+    return [];
+  }, [provider.api_key_prefix, provider.api_key_prefixes]);
+
   const apiKeyPlaceholder = useMemo(() => {
     if (provider.api_key) {
       return t("models.leaveBlankKeep");
     }
-    if (provider.api_key_prefix) {
-      return t("models.enterApiKey", { prefix: provider.api_key_prefix });
+    if (validApiKeyPrefixes.length > 0) {
+      return t("models.enterApiKey", {
+        prefix: validApiKeyPrefixes.join(", "),
+      });
     }
     return t("models.enterApiKeyOptional");
-  }, [provider.api_key, provider.api_key_prefix, t]);
+  }, [provider.api_key, validApiKeyPrefixes, t]);
 
   const apiKeyLabel =
     isAnthropicProvider && authMode === "auth_token"
@@ -448,6 +461,7 @@ export function ProviderConfigModal({
     if (open) {
       form.setFieldsValue({
         api_key: undefined,
+        name: provider.name,
         base_url: provider.base_url || undefined,
         chat_model: provider.chat_model || "OpenAIChatModel",
         generate_kwargs_text:
@@ -510,6 +524,7 @@ export function ProviderConfigModal({
 
       await api.configureProvider(provider.id, {
         api_key: values.api_key,
+        name: provider.is_custom ? values.name?.trim() : undefined,
         base_url: values.base_url,
         chat_model: values.chat_model,
         generate_kwargs: hasGenerateConfigInput ? generateConfig : {},
@@ -520,7 +535,11 @@ export function ProviderConfigModal({
       await onSaved();
       setFormDirty(false);
       onClose();
-      message.success(t("models.configurationSaved", { name: provider.name }));
+      message.success(
+        t("models.configurationSaved", {
+          name: (provider.is_custom && values.name?.trim()) || provider.name,
+        }),
+      );
     } catch (error) {
       if (error && typeof error === "object" && "errorFields" in error) return;
       const errMsg =
@@ -609,6 +628,7 @@ export function ProviderConfigModal({
   return (
     <Modal
       width={800}
+      className={styles.modelManageModal}
       title={t("models.configureProvider", { name: provider.name })}
       open={open}
       onCancel={onClose}
@@ -650,6 +670,7 @@ export function ProviderConfigModal({
         form={form}
         layout="vertical"
         initialValues={{
+          name: provider.name,
           base_url: provider.base_url || undefined,
           chat_model: provider.chat_model || "OpenAIChatModel",
           generate_kwargs_text:
@@ -660,6 +681,22 @@ export function ProviderConfigModal({
         }}
         onValuesChange={() => setFormDirty(true)}
       >
+        {provider.is_custom && (
+          <Form.Item
+            name="name"
+            label={t("models.providerNameLabel")}
+            rules={[
+              {
+                required: true,
+                whitespace: true,
+                message: t("models.providerNameLabel"),
+              },
+            ]}
+          >
+            <Input placeholder={t("models.providerNamePlaceholder")} />
+          </Form.Item>
+        )}
+
         {provider.is_custom && (
           <Form.Item
             name="chat_model"
@@ -678,6 +715,10 @@ export function ProviderConfigModal({
                 {
                   value: "OpenAIChatModel",
                   label: t("models.protocolOpenAI"),
+                },
+                {
+                  value: "OpenAIResponseModel",
+                  label: t("models.protocolOpenAIResponse"),
                 },
                 {
                   value: "AnthropicChatModel",
@@ -751,14 +792,16 @@ export function ProviderConfigModal({
               validator: (_, value) => {
                 if (
                   value &&
-                  provider.api_key_prefix &&
+                  validApiKeyPrefixes.length > 0 &&
                   authMode !== "auth_token" &&
-                  !value.startsWith(provider.api_key_prefix)
+                  !validApiKeyPrefixes.some((prefix) =>
+                    value.startsWith(prefix),
+                  )
                 ) {
                   return Promise.reject(
                     new Error(
                       t("models.apiKeyShouldStart", {
-                        prefix: provider.api_key_prefix,
+                        prefix: validApiKeyPrefixes.join(", "),
                       }),
                     ),
                   );

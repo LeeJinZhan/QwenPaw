@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 import aiohttp
 
-from agentscope_runtime.engine.schemas.agent_schemas import (
+from ....schemas import (
     AudioContent,
     ContentType,
     FileContent,
@@ -26,6 +26,7 @@ from agentscope_runtime.engine.schemas.agent_schemas import (
 
 from ....config.config import YuanbaoConfig as YuanbaoChannelConfig
 from ....constant import DEFAULT_MEDIA_DIR
+from ..renderer import ChannelDisplayConfig
 from ..base import (
     BaseChannel,
     OnReplySent,
@@ -77,7 +78,7 @@ from .media import (
 from .utils import download_media
 
 if TYPE_CHECKING:
-    from agentscope_runtime.engine.schemas.agent_schemas import AgentRequest
+    from ....schemas import AgentRequest
 
 logger = logging.getLogger(__name__)
 
@@ -136,13 +137,13 @@ class YuanbaoChannel(BaseChannel):
         app_id: str,
         app_secret: str,
         api_domain: str = DEFAULT_API_DOMAIN,
+        ws_url: str = "",
         bot_prefix: str = "",
         media_dir: str = "",
         workspace_dir: Path | None = None,
         on_reply_sent: OnReplySent = None,
-        show_tool_details: bool = True,
-        filter_tool_messages: bool = False,
-        filter_thinking: bool = False,
+        display_config: ChannelDisplayConfig | None = None,
+        no_text_debounce: bool = True,
         dm_policy: str = "open",
         group_policy: str = "open",
         allow_from: Optional[List[str]] = None,
@@ -155,9 +156,8 @@ class YuanbaoChannel(BaseChannel):
         super().__init__(
             process,
             on_reply_sent=on_reply_sent,
-            show_tool_details=show_tool_details,
-            filter_tool_messages=filter_tool_messages,
-            filter_thinking=filter_thinking,
+            display_config=display_config,
+            no_text_debounce=no_text_debounce,
             dm_policy=dm_policy,
             group_policy=group_policy,
             allow_from=allow_from,
@@ -171,7 +171,8 @@ class YuanbaoChannel(BaseChannel):
         self.enabled = enabled
         self.app_id = app_id
         self.app_secret = app_secret
-        self.api_domain = api_domain
+        self.api_domain = api_domain or DEFAULT_API_DOMAIN
+        self.ws_url = (ws_url or "").strip() or DEFAULT_WS_URL
         self.bot_prefix = bot_prefix
         self._workspace_dir = (
             Path(workspace_dir).expanduser() if workspace_dir else None
@@ -266,9 +267,8 @@ class YuanbaoChannel(BaseChannel):
         process: ProcessHandler,
         config: YuanbaoChannelConfig,
         on_reply_sent: OnReplySent = None,
-        show_tool_details: bool = True,
-        filter_tool_messages: bool = False,
-        filter_thinking: bool = False,
+        display_config: ChannelDisplayConfig | None = None,
+        no_text_debounce: bool = True,
         workspace_dir: Path | None = None,
     ) -> "YuanbaoChannel":
         if isinstance(config, dict):
@@ -281,12 +281,13 @@ class YuanbaoChannel(BaseChannel):
                     "api_domain",
                     DEFAULT_API_DOMAIN,
                 ),
+                ws_url=config.get("ws_url", ""),
                 bot_prefix=config.get("bot_prefix", ""),
                 media_dir=config.get("media_dir", ""),
                 on_reply_sent=on_reply_sent,
-                show_tool_details=show_tool_details,
-                filter_tool_messages=filter_tool_messages,
-                filter_thinking=filter_thinking,
+                display_config=display_config
+                or ChannelDisplayConfig.from_config(config),
+                no_text_debounce=no_text_debounce,
                 workspace_dir=workspace_dir,
                 dm_policy=config.get("dm_policy", "open"),
                 group_policy=config.get("group_policy", "open"),
@@ -310,12 +311,13 @@ class YuanbaoChannel(BaseChannel):
             app_id=config.app_id,
             app_secret=config.app_secret,
             api_domain=config.api_domain,
+            ws_url=getattr(config, "ws_url", "") or "",
             bot_prefix=config.bot_prefix,
             media_dir=getattr(config, "media_dir", "") or "",
             on_reply_sent=on_reply_sent,
-            show_tool_details=show_tool_details,
-            filter_tool_messages=filter_tool_messages,
-            filter_thinking=filter_thinking,
+            display_config=display_config
+            or ChannelDisplayConfig.from_config(config),
+            no_text_debounce=no_text_debounce,
             workspace_dir=workspace_dir,
             dm_policy=getattr(config, "dm_policy", "open"),
             group_policy=getattr(config, "group_policy", "open"),
@@ -445,7 +447,7 @@ class YuanbaoChannel(BaseChannel):
         self._session = aiohttp.ClientSession()
         try:
             self._ws = await self._session.ws_connect(
-                DEFAULT_WS_URL,
+                self.ws_url,
                 timeout=aiohttp.ClientWSTimeout(
                     ws_close=float(SEND_TIMEOUT),
                 ),

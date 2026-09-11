@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 import httpx
-from agentscope_runtime.engine.schemas.agent_schemas import (
+from qwenpaw.schemas import (
     AudioContent,
     FileContent,
     ImageContent,
@@ -39,6 +39,7 @@ from ....exceptions import ChannelError
 from ....config.config import FeishuConfig as FeishuChannelConfig
 from ....config.utils import get_config_path
 from ....constant import DEFAULT_MEDIA_DIR
+from ..renderer import ChannelDisplayConfig
 from ..base import (
     BaseChannel,
     ContentType,
@@ -71,7 +72,6 @@ from .utils import (
     sender_display_string,
     short_session_id_from_full_id,
 )
-from .cards import FeishuCardHandler
 
 
 # Compatibility for setuptools>=82 where pkg_resources may be absent.
@@ -119,6 +119,7 @@ class _EventLoopProxy:
 
 
 try:
+    from .cards import FeishuCardHandler
     import lark_oapi as lark
     from lark_oapi.api.contact.v3 import GetUserRequest
     from lark_oapi.api.im.v1 import (
@@ -174,7 +175,7 @@ finally:
             delattr(_pkg_resources_module, "declare_namespace")
 
 if TYPE_CHECKING:
-    from agentscope_runtime.engine.schemas.agent_schemas import AgentRequest
+    from qwenpaw.schemas import AgentRequest
 
 logger = logging.getLogger(__name__)
 
@@ -217,9 +218,8 @@ class FeishuChannel(BaseChannel):
         media_dir: str = "",
         workspace_dir: Path | None = None,
         on_reply_sent: OnReplySent = None,
-        show_tool_details: bool = True,
-        filter_tool_messages: bool = False,
-        filter_thinking: bool = False,
+        display_config: ChannelDisplayConfig | None = None,
+        no_text_debounce: bool = True,
         dm_policy: str = "open",
         group_policy: str = "open",
         allow_from: Optional[List[str]] = None,
@@ -234,9 +234,8 @@ class FeishuChannel(BaseChannel):
         super().__init__(
             process,
             on_reply_sent=on_reply_sent,
-            show_tool_details=show_tool_details,
-            filter_tool_messages=filter_tool_messages,
-            filter_thinking=filter_thinking,
+            display_config=display_config,
+            no_text_debounce=no_text_debounce,
             dm_policy=dm_policy,
             group_policy=group_policy,
             allow_from=allow_from,
@@ -252,7 +251,12 @@ class FeishuChannel(BaseChannel):
         self.bot_prefix = bot_prefix
         self.encrypt_key = encrypt_key or ""
         self.verification_token = verification_token or ""
-        self.domain = domain if domain in ("feishu", "lark") else "feishu"
+        # "feishu" / "lark", or a full http(s) base URL for custom /
+        # private gateways (e.g. a local mock in tests).
+        if domain in ("feishu", "lark") or str(domain).startswith("http"):
+            self.domain = domain
+        else:
+            self.domain = "feishu"
         self.share_session_in_group = share_session_in_group
         self._workspace_dir = (
             Path(workspace_dir).expanduser() if workspace_dir else None
@@ -294,6 +298,14 @@ class FeishuChannel(BaseChannel):
         # All interactive-card logic (outbound rendering + inbound
         # card.action.trigger dispatch) lives in the card handler.
         self._card_handler = FeishuCardHandler(self)
+
+    def _sdk_domain(self) -> str:
+        """SDK base URL: custom http(s) gateway, or the lark/feishu enum."""
+        if str(self.domain).startswith("http"):
+            return str(self.domain)
+        return (
+            lark.LARK_DOMAIN if self.domain == "lark" else lark.FEISHU_DOMAIN
+        )
 
     @classmethod
     def from_env(
@@ -339,9 +351,8 @@ class FeishuChannel(BaseChannel):
         process: ProcessHandler,
         config: FeishuChannelConfig,
         on_reply_sent: OnReplySent = None,
-        show_tool_details: bool = True,
-        filter_tool_messages: bool = False,
-        filter_thinking: bool = False,
+        display_config: ChannelDisplayConfig | None = None,
+        no_text_debounce: bool = True,
         workspace_dir: Path | None = None,
     ) -> "FeishuChannel":
         return cls(
@@ -355,9 +366,9 @@ class FeishuChannel(BaseChannel):
             media_dir=config.media_dir or "",
             workspace_dir=workspace_dir,
             on_reply_sent=on_reply_sent,
-            show_tool_details=show_tool_details,
-            filter_tool_messages=filter_tool_messages,
-            filter_thinking=filter_thinking,
+            display_config=display_config
+            or ChannelDisplayConfig.from_config(config),
+            no_text_debounce=no_text_debounce,
             dm_policy=config.dm_policy or "open",
             group_policy=config.group_policy or "open",
             allow_from=config.allow_from or [],
@@ -404,7 +415,7 @@ class FeishuChannel(BaseChannel):
         native_payload: Any,
     ) -> "AgentRequest":
         """Build AgentRequest from Feishu native dict (content_parts)."""
-        from agentscope_runtime.engine.schemas.agent_schemas import (
+        from qwenpaw.schemas import (
             AgentRequest,
         )
 
@@ -504,11 +515,7 @@ class FeishuChannel(BaseChannel):
             if not token:
                 logger.warning("feishu: failed to get access token")
                 return None
-            base_url = (
-                "https://open.larksuite.com"
-                if self.domain == "lark"
-                else "https://open.feishu.cn"
-            )
+            base_url = self._sdk_domain()
             url = f"{base_url}/open-apis/bot/v3/info"
             response = await self._http_client.get(
                 url,
@@ -681,16 +688,16 @@ class FeishuChannel(BaseChannel):
             while len(self._processed_message_ids) > FEISHU_PROCESSED_IDS_MAX:
                 self._processed_message_ids.popitem(last=False)
 
-            sender_type = getattr(sender, "sender_type", "") or ""
-            if sender_type == "bot":
-                return
-
             sender_id_obj = getattr(sender, "sender_id", None)
             sender_id = ""
             if sender_id_obj and getattr(sender_id_obj, "open_id", None):
                 sender_id = str(getattr(sender_id_obj, "open_id", "")).strip()
             if not sender_id:
                 sender_id = f"unknown_{message_id[:8]}"
+
+            sender_type = getattr(sender, "sender_type", "") or ""
+            if sender_type == "bot" and sender_id == self._bot_open_id:
+                return
 
             nickname = (
                 getattr(sender, "name", None)
@@ -1203,9 +1210,11 @@ class FeishuChannel(BaseChannel):
             quoted_lines.append(f"[quoted {label}]")
         for hint in error_hints:
             quoted_lines.append(
-                f"[quoted {hint[1:]}"
-                if hint.startswith("[")
-                else f"[quoted {hint}]",
+                (
+                    f"[quoted {hint[1:]}"
+                    if hint.startswith("[")
+                    else f"[quoted {hint}]"
+                ),
             )
         # Prepend all quoted lines before existing text_parts.
         text_parts[:0] = quoted_lines
@@ -2229,16 +2238,6 @@ class FeishuChannel(BaseChannel):
             )
             return False
 
-    def _is_card_event(self, event: Any) -> bool:
-        """Check if the event matches a registered interactive card kind."""
-        from .cards.context import extract_meta
-
-        meta = extract_meta(event)
-        if meta is None:
-            return False
-        message_type = str(meta.get("message_type") or "")
-        return message_type in self._card_handler._by_message_type
-
     # ------------------------------------------------------------------
     # Streaming hooks (CardKit card mode)
     # ------------------------------------------------------------------
@@ -2388,16 +2387,6 @@ class FeishuChannel(BaseChannel):
         message_id = card_state.get("message_id")
         if message_id:
             send_meta["_last_sent_message_id"] = message_id
-
-        # Card events (e.g. tool_guard) consumed by streaming need a
-        # compact interactive card sent after the streaming card.
-        if stream_type == "message" and self._is_card_event(event):
-            await self._card_handler.try_send_card_for_event(
-                to_handle,
-                event,
-                send_meta,
-                compact=True,
-            )
 
     # ------------------------------------------------------------------
     # Process lifecycle hooks
@@ -2552,11 +2541,7 @@ class FeishuChannel(BaseChannel):
                     self.app_secret,
                     event_handler=event_handler,
                     log_level=lark.LogLevel.INFO,
-                    domain=(
-                        lark.LARK_DOMAIN
-                        if self.domain == "lark"
-                        else lark.FEISHU_DOMAIN
-                    ),
+                    domain=self._sdk_domain(),
                 )
 
                 # Patch SDK to track last-received timestamp for
@@ -2777,9 +2762,7 @@ class FeishuChannel(BaseChannel):
         self._http_client = httpx.AsyncClient(
             timeout=30.0,
         )
-        sdk_domain = (
-            lark.LARK_DOMAIN if self.domain == "lark" else lark.FEISHU_DOMAIN
-        )
+        sdk_domain = self._sdk_domain()
         self._client = (
             lark.Client.builder()
             .app_id(self.app_id)

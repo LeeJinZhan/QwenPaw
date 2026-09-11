@@ -13,7 +13,6 @@ import {
 } from "@agentscope-ai/design";
 import api from "../../../api";
 import {
-  EyeOutlined,
   EyeInvisibleOutlined,
   ThunderboltOutlined,
   ClockCircleOutlined,
@@ -21,6 +20,7 @@ import {
 } from "@ant-design/icons";
 import { useTools } from "./useTools";
 import { useTranslation } from "react-i18next";
+import type { TFunction } from "i18next";
 import type { ToolInfo } from "../../../api/modules/tools";
 import { PageHeader } from "@/components/PageHeader";
 import styles from "./index.module.less";
@@ -60,6 +60,65 @@ function ToolIcon({ icon, name }: { icon: string; name: string }) {
   );
 }
 
+const BROWSER_TOOL_NAMES = new Set(["browser"]);
+
+function browserModeLabel(experimental: boolean, t: TFunction): string {
+  return experimental
+    ? t("tools.browserUnifiedMode")
+    : t("tools.browserLegacyMode");
+}
+
+function browserModeButtonLabel(experimental: boolean, t: TFunction): string {
+  return experimental
+    ? t("tools.browserUnifiedModeButton")
+    : t("tools.browserLegacyModeButton");
+}
+
+function browserTrackLabel(tool: ToolInfo, t: TFunction): string {
+  const effective = tool.config_values?.experimental_effective;
+  const shown =
+    effective === undefined
+      ? tool.config_values?.experimental !== false
+      : effective !== false;
+  return shown
+    ? t("tools.browserUnifiedDescription")
+    : t("tools.browserLegacyDescription");
+}
+
+function browserRestartPending(tool: ToolInfo): boolean {
+  const effective = tool.config_values?.experimental_effective;
+  return (
+    effective !== undefined &&
+    (tool.config_values?.experimental !== false) !== (effective !== false)
+  );
+}
+
+export function BrowserExperimentalToggle({
+  toolName,
+  experimental,
+  onChange,
+}: {
+  toolName: string;
+  experimental: boolean;
+  onChange: (experimental: boolean) => void;
+}) {
+  const { t } = useTranslation();
+
+  if (!BROWSER_TOOL_NAMES.has(toolName)) return null;
+
+  return (
+    <div className={styles.browserModeControl}>
+      <Button
+        className={`${styles.toggleButton} ${styles.browserModeButton}`}
+        onClick={() => onChange(!experimental)}
+        icon={experimental ? <ThunderboltOutlined /> : <ClockCircleOutlined />}
+      >
+        {browserModeButtonLabel(experimental, t)}
+      </Button>
+    </div>
+  );
+}
+
 /** Configuration modal for tools that require configuration */
 function ToolConfigModal({
   tool,
@@ -70,7 +129,7 @@ function ToolConfigModal({
   tool: ToolInfo;
   visible: boolean;
   onClose: () => void;
-  onSave: (values: Record<string, any>) => Promise<void>;
+  onSave: (values: Record<string, unknown>) => Promise<void>;
 }) {
   const [form] = Form.useForm();
   const [saving, setSaving] = useState(false);
@@ -219,29 +278,41 @@ export default function ToolsPage() {
   const [configModalVisible, setConfigModalVisible] = useState(false);
   const [currentTool, setCurrentTool] = useState<ToolInfo | null>(null);
 
-  const handleToggle = (tool: ToolInfo) => {
-    toggleEnabled(tool);
-  };
-
   const handleConfigure = (tool: ToolInfo) => {
     setCurrentTool(tool);
     setConfigModalVisible(true);
   };
 
-  const handleSaveConfig = async (values: Record<string, any>) => {
+  const handleSaveConfig = async (values: Record<string, unknown>) => {
     if (!currentTool) return;
     await saveToolConfig(currentTool.name, values);
     await loadTools();
   };
 
-  const hasDisabledTools = useMemo(
-    () => tools.some((tool) => !tool.enabled),
-    [tools],
-  );
-  const hasEnabledTools = useMemo(
-    () => tools.some((tool) => tool.enabled),
-    [tools],
-  );
+  const handleExperimentalChange = async (experimental: boolean) => {
+    // Keep the switch on the Browser card even when the currently registered
+    // implementation is the deprecated stable browser track.
+    await saveToolConfig("browser", { experimental });
+    await loadTools();
+  };
+
+  const { enabledTools, disabledTools } = useMemo(() => {
+    const enabled = tools.filter((tool) => tool.enabled);
+    const disabled = tools.filter((tool) => !tool.enabled);
+    return { enabledTools: enabled, disabledTools: disabled };
+  }, [tools]);
+
+  const isToolConfigured = (tool: ToolInfo) =>
+    !tool.requires_config ||
+    (tool.config_values && Object.keys(tool.config_values).length > 0);
+
+  const handleAvailableItemClick = (tool: ToolInfo) => {
+    if (tool.requires_config && !isToolConfigured(tool)) {
+      handleConfigure(tool);
+    } else {
+      toggleEnabled(tool);
+    }
+  };
 
   return (
     <div className={styles.toolsPage}>
@@ -250,8 +321,10 @@ export default function ToolsPage() {
         extra={
           <div className={styles.headerAction}>
             <Switch
-              checked={hasEnabledTools && !hasDisabledTools}
-              onChange={() => (hasDisabledTools ? enableAll() : disableAll())}
+              checked={enabledTools.length > 0 && disabledTools.length === 0}
+              onChange={() =>
+                disabledTools.length > 0 ? enableAll() : disableAll()
+              }
               disabled={batchLoading || loading}
               checkedChildren={t("tools.enableAll")}
               unCheckedChildren={t("tools.disableAll")}
@@ -267,91 +340,176 @@ export default function ToolsPage() {
         ) : tools.length === 0 ? (
           <Empty description={t("tools.emptyState")} />
         ) : (
-          <div className={styles.toolsGrid}>
-            {tools.map((tool) => (
-              <Card
-                key={tool.name}
-                className={`${styles.toolCard} ${
-                  tool.enabled ? styles.enabledCard : ""
-                }`}
-              >
-                <div className={styles.cardHeader}>
-                  <h3 className={styles.toolName}>
-                    <ToolIcon icon={tool.icon} name={tool.name} /> {tool.name}
-                  </h3>
-                  <div className={styles.statusContainer}>
-                    <span className={styles.statusDot} />
-                    <span className={styles.statusText}>
-                      {tool.enabled
-                        ? t("common.enabled")
-                        : t("common.disabled")}
-                    </span>
-                  </div>
+          <>
+            {/* Enabled Section */}
+            <div className={styles.panelSection}>
+              <div className={styles.panelTitle}>
+                <span className={styles.panelDotGreen} />
+                {t("common.enabled")}
+                <span className={styles.panelCount}>
+                  {enabledTools.length} {t("tools.active")}
+                </span>
+              </div>
+
+              {enabledTools.length > 0 ? (
+                <div className={styles.toolsGrid}>
+                  {enabledTools.map((tool) => (
+                    <Card
+                      key={tool.name}
+                      className={`${styles.toolCard} ${styles.enabledCard}`}
+                    >
+                      <div className={styles.cardHeader}>
+                        <h3 className={styles.toolName} title={tool.name}>
+                          <ToolIcon icon={tool.icon} name={tool.name} />{" "}
+                          <span className={styles.toolNameText}>
+                            {tool.name}
+                          </span>
+                        </h3>
+                        <div className={styles.statusContainer}>
+                          <span className={styles.statusDot} />
+                          <span className={styles.statusText}>
+                            {t("common.enabled")}
+                          </span>
+                        </div>
+                      </div>
+
+                      <p className={styles.toolDescription}>
+                        {tool.name === "browser"
+                          ? browserTrackLabel(tool, t)
+                          : tool.description}
+                        {tool.name === "browser" &&
+                          browserRestartPending(tool) && (
+                            <span
+                              className={styles.browserRestartPending}
+                              role="status"
+                            >
+                              {t("tools.browserRestartPending", {
+                                mode: browserModeLabel(
+                                  tool.config_values?.experimental !== false,
+                                  t,
+                                ),
+                              })}
+                            </span>
+                          )}
+                      </p>
+
+                      {/* Show config status */}
+                      {tool.requires_config && (
+                        <div className={styles.configStatus}>
+                          {tool.config_values &&
+                          Object.keys(tool.config_values).length > 0 ? (
+                            <span className={styles.configured}>
+                              ✓ {t("tools.configured")}
+                            </span>
+                          ) : (
+                            <span className={styles.notConfigured}>
+                              ⚠ {t("tools.requiresConfig")}
+                            </span>
+                          )}
+                        </div>
+                      )}
+
+                      <div className={styles.cardFooter}>
+                        {BROWSER_TOOL_NAMES.has(tool.name) && (
+                          <BrowserExperimentalToggle
+                            toolName={tool.name}
+                            experimental={
+                              tool.config_values?.experimental !== false
+                            }
+                            onChange={handleExperimentalChange}
+                          />
+                        )}
+                        {[
+                          "execute_shell_command",
+                          "delegate_external_agent",
+                        ].includes(tool.name) && (
+                          <Button
+                            className={styles.toggleButton}
+                            onClick={() => toggleAsyncExecution(tool)}
+                            disabled={!tool.enabled}
+                            icon={
+                              tool.async_execution ? (
+                                <ThunderboltOutlined />
+                              ) : (
+                                <ClockCircleOutlined />
+                              )
+                            }
+                          >
+                            {tool.async_execution
+                              ? t("tools.asyncExecutionEnabled")
+                              : t("tools.asyncExecutionDisabled")}
+                          </Button>
+                        )}
+                        {/* Add configure button */}
+                        {tool.requires_config && (
+                          <Button
+                            className={styles.toggleButton}
+                            onClick={() => handleConfigure(tool)}
+                            icon={<SettingOutlined />}
+                          >
+                            {t("tools.configure")}
+                          </Button>
+                        )}
+                        <Button
+                          className={styles.toggleButton}
+                          onClick={() => toggleEnabled(tool)}
+                          icon={<EyeInvisibleOutlined />}
+                        >
+                          {t("common.disable")}
+                        </Button>
+                      </div>
+                    </Card>
+                  ))}
                 </div>
-
-                <p className={styles.toolDescription}>{tool.description}</p>
-
-                {/* Show config status */}
-                {tool.requires_config && (
-                  <div className={styles.configStatus}>
-                    {tool.config_values &&
-                    Object.keys(tool.config_values).length > 0 ? (
-                      <span className={styles.configured}>
-                        ✓ {t("tools.configured")}
-                      </span>
-                    ) : (
-                      <span className={styles.notConfigured}>
-                        ⚠ {t("tools.requiresConfig")}
-                      </span>
-                    )}
-                  </div>
-                )}
-
-                <div className={styles.cardFooter}>
-                  {[
-                    "execute_shell_command",
-                    "delegate_external_agent",
-                  ].includes(tool.name) && (
-                    <Button
-                      className={styles.toggleButton}
-                      onClick={() => toggleAsyncExecution(tool)}
-                      disabled={!tool.enabled}
-                      icon={
-                        tool.async_execution ? (
-                          <ThunderboltOutlined />
-                        ) : (
-                          <ClockCircleOutlined />
-                        )
-                      }
-                    >
-                      {tool.async_execution
-                        ? t("tools.asyncExecutionEnabled")
-                        : t("tools.asyncExecutionDisabled")}
-                    </Button>
-                  )}
-                  {/* Add configure button */}
-                  {tool.requires_config && (
-                    <Button
-                      className={styles.toggleButton}
-                      onClick={() => handleConfigure(tool)}
-                      icon={<SettingOutlined />}
-                    >
-                      {t("tools.configure")}
-                    </Button>
-                  )}
+              ) : (
+                <div className={styles.emptyEnabled}>
+                  <p>{t("tools.noEnabled")}</p>
                   <Button
-                    className={styles.toggleButton}
-                    onClick={() => handleToggle(tool)}
-                    icon={
-                      tool.enabled ? <EyeInvisibleOutlined /> : <EyeOutlined />
-                    }
+                    type="primary"
+                    onClick={() => {
+                      document
+                        .getElementById("available-tools")
+                        ?.scrollIntoView({ behavior: "smooth" });
+                    }}
                   >
-                    {tool.enabled ? t("common.disable") : t("common.enable")}
+                    {t("tools.goEnableBtn")}
                   </Button>
                 </div>
-              </Card>
-            ))}
-          </div>
+              )}
+            </div>
+
+            {/* Available Section */}
+            {disabledTools.length > 0 && (
+              <div id="available-tools" className={styles.panelSectionDashed}>
+                <div className={styles.panelTitle}>
+                  <span className={styles.panelDotGray} />
+                  {t("tools.available")}
+                </div>
+                <div className={styles.availableGrid}>
+                  {disabledTools.map((tool) => (
+                    <div
+                      key={tool.name}
+                      className={styles.availableItem}
+                      onClick={() => handleAvailableItemClick(tool)}
+                    >
+                      <ToolIcon icon={tool.icon} name={tool.name} />
+                      <span
+                        className={styles.availableItemName}
+                        title={tool.name}
+                      >
+                        {tool.name}
+                      </span>
+                      <span className={styles.availableItemAction}>
+                        {tool.requires_config && !isToolConfigured(tool)
+                          ? t("tools.configureAction")
+                          : t("tools.enableAction")}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </>
         )}
       </div>
 

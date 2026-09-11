@@ -1,8 +1,23 @@
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
-import { Alert, Button, Input, Pagination, Spin, Tag, Typography } from "antd";
+import {
+  Alert,
+  Button,
+  Input,
+  Modal,
+  Pagination,
+  Select,
+  Spin,
+  Tag,
+  Tooltip,
+  Typography,
+} from "antd";
 import { Download, ExternalLink, Package, RefreshCw } from "lucide-react";
-import type { MarketPluginEntry } from "@/api/modules/pluginMarket";
+import type {
+  MarketPluginEntry,
+  MarketPluginSortBy,
+} from "@/api/modules/pluginMarket";
+import { openExternalLink } from "@/utils/openExternalLink";
 import { useMarketPlugins } from "../hooks/useMarketPlugins";
 import styles from "./OfficialPluginList.module.less";
 import marketStyles from "./MarketPluginList.module.less";
@@ -10,12 +25,22 @@ import marketStyles from "./MarketPluginList.module.less";
 const { Text } = Typography;
 
 const PLUGIN_CATEGORIES = [
+  { code: "app", zh: "应用", en: "App" },
   { code: "agent-tool", zh: "Agent 工具", en: "Agent Tool" },
   { code: "provider", zh: "模型接入", en: "Provider" },
   { code: "command", zh: "Slash 命令", en: "Slash Command" },
   { code: "hook", zh: "生命周期 Hook", en: "Lifecycle Hook" },
   { code: "frontend", zh: "UI 扩展", en: "UI Extension" },
   { code: "general", zh: "通用插件", en: "General" },
+];
+
+const MARKET_SORT_OPTIONS: Array<{
+  value: MarketPluginSortBy;
+  labelKey: string;
+}> = [
+  { value: "downloads", labelKey: "pluginManager.marketSortDownloads" },
+  { value: "updated_time", labelKey: "pluginManager.marketSortUpdated" },
+  { value: "fauvarate", labelKey: "pluginManager.marketSortFavorites" },
 ];
 
 function pickLocalizedDescription(
@@ -57,9 +82,13 @@ export function MarketPluginList({ onInstalled }: MarketPluginListProps) {
     page,
     pageSize,
     category,
+    sortBy,
     installingId,
+    qwenpawVersion,
+    isCompatible,
     handleSearch,
     handleCategoryChange,
+    handleSortChange,
     handlePageChange,
     handleRefresh,
     handleInstall,
@@ -115,6 +144,16 @@ export function MarketPluginList({ onInstalled }: MarketPluginListProps) {
           </div>
         )}
         <div className={marketStyles.toolbarRight}>
+          <Select<MarketPluginSortBy>
+            aria-label={t("pluginManager.marketSortLabel")}
+            value={sortBy}
+            onChange={handleSortChange}
+            options={MARKET_SORT_OPTIONS.map((option) => ({
+              value: option.value,
+              label: t(option.labelKey),
+            }))}
+            style={{ width: 168 }}
+          />
           <Input.Search
             placeholder={t("pluginManager.marketSearch")}
             allowClear
@@ -178,6 +217,15 @@ export function MarketPluginList({ onInstalled }: MarketPluginListProps) {
                       {entry.locales[lang].category}
                     </Tag>
                   )}
+                  {entry.qwenpaw_compat_labels &&
+                    entry.qwenpaw_compat_labels.length > 0 && (
+                      <Tag
+                        color={isCompatible(entry) ? "green" : "orange"}
+                        style={{ margin: 0, fontSize: 11 }}
+                      >
+                        {`QwenPaw ${entry.qwenpaw_compat_labels.join(", ")}`}
+                      </Tag>
+                    )}
                 </div>
                 {entry.locales && (
                   <div className={styles.catalogDescription}>
@@ -204,21 +252,60 @@ export function MarketPluginList({ onInstalled }: MarketPluginListProps) {
                     type="default"
                     size="small"
                     icon={<ExternalLink size={14} />}
-                    onClick={() => window.open(entry.details_url!, "_blank")}
+                    onClick={() => openExternalLink(entry.details_url!)}
                   >
                     {t("pluginManager.marketDetails")}
                   </Button>
                 )}
-                <Button
-                  type="primary"
-                  size="small"
-                  icon={<Download size={14} />}
-                  loading={installingId === entry.id}
-                  disabled={installingId !== null && installingId !== entry.id}
-                  onClick={() => void handleInstall(entry)}
+                <Tooltip
+                  title={
+                    !isCompatible(entry)
+                      ? `This plugin is labeled for QwenPaw ${
+                          entry.qwenpaw_compat_labels?.join(", ") ?? "unknown"
+                        }; compatibility with QwenPaw ${
+                          qwenpawVersion ?? "unknown"
+                        } is unverified.`
+                      : undefined
+                  }
                 >
-                  {t("pluginManager.catalogInstall")}
-                </Button>
+                  <Button
+                    type="primary"
+                    size="small"
+                    icon={<Download size={14} />}
+                    loading={installingId === entry.id}
+                    disabled={
+                      installingId !== null && installingId !== entry.id
+                    }
+                    onClick={() => {
+                      if (!isCompatible(entry)) {
+                        Modal.confirm({
+                          title: t(
+                            "pluginManager.compatWarningTitle",
+                            "Compatibility Warning",
+                          ),
+                          content: t("pluginManager.compatWarningContent", {
+                            defaultValue:
+                              "This plugin is labeled for QwenPaw {{labels}}. Your QwenPaw version is {{version}}. Installing it may cause errors. Are you sure you want to continue?",
+                            labels:
+                              entry.qwenpaw_compat_labels?.join(", ") ??
+                              "unknown",
+                            version: qwenpawVersion ?? "unknown",
+                          }),
+                          okText: t(
+                            "pluginManager.compatWarningConfirm",
+                            "Install anyway",
+                          ),
+                          cancelText: t("common.cancel", "Cancel"),
+                          onOk: () => void handleInstall(entry),
+                        });
+                      } else {
+                        void handleInstall(entry);
+                      }
+                    }}
+                  >
+                    {t("pluginManager.catalogInstall")}
+                  </Button>
+                </Tooltip>
               </div>
             </div>
           ))}
