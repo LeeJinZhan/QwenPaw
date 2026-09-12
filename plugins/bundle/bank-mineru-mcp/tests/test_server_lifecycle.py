@@ -9,6 +9,7 @@ import pytest
 
 from bank_mineru_mcp.config import MinerUSettings
 from bank_mineru_mcp.server import MinerUMcpService
+from bank_mineru_mcp.tools import ToolContractError
 
 
 class _Client:
@@ -82,3 +83,22 @@ async def test_service_exposes_exact_native_mcp_tools_and_stops_idempotently() -
     await service.stop()
     await service.stop()
     assert client.closes == 1
+
+
+@pytest.mark.asyncio
+async def test_native_mcp_failure_carries_only_structured_reason_not_private_exception():
+    class FailedTools(_Tools):
+        def read_document_chunks(self, document_ref, cursor=None, limit=5):
+            raise ToolContractError("DOCUMENT_REF_EXPIRED", "private /srv/files/token=secret")
+    service = MinerUMcpService(settings=_settings(_port()), tool_service=FailedTools(), mineru_client=_Client())
+    await service.start()
+    try:
+        async with streamablehttp_client(f"http://127.0.0.1:{service.settings.mcp_port}/mcp", timeout=5) as (read_stream, write_stream, _):
+            async with ClientSession(read_stream, write_stream, read_timeout_seconds=timedelta(seconds=5)) as session:
+                await session.initialize()
+                result = await session.call_tool("read_document_chunks", {"document_ref": "expired"})
+        assert result.structuredContent == {"status": "failed", "error_code": "DOCUMENT_REF_EXPIRED"}
+        assert "private" not in str(result)
+        assert "secret" not in str(result)
+    finally:
+        await service.stop()

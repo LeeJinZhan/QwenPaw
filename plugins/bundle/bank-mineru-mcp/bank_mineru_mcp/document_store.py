@@ -175,7 +175,7 @@ class DocumentStore:
         offset = 0
         if cursor:
             cursor_hash = self._token_hash("cur1", cursor)
-            cursor_entry = self._cursors.pop(cursor_hash, None)
+            cursor_entry = self._cursors.get(cursor_hash)
             if (
                 cursor_entry is None
                 or cursor_entry.document_hash != document_hash
@@ -195,7 +195,14 @@ class DocumentStore:
         has_more = next_offset < len(chunks)
         next_cursor = None
         if has_more:
-            cursor_nonce = secrets.token_bytes(32)
+            # A read retry must return the same continuation, without consuming
+            # its input cursor or allocating more cursor entries on every retry.
+            # The keyed value remains opaque and bound to this stored document.
+            cursor_nonce = hmac.new(
+                self.key,
+                f"chunk-cursor\0{document_hash}\0{next_offset}".encode(),
+                hashlib.sha256,
+            ).digest()
             self._cursors[hashlib.sha256(cursor_nonce).hexdigest()] = _CursorEntry(
                 document_hash=document_hash,
                 offset=next_offset,

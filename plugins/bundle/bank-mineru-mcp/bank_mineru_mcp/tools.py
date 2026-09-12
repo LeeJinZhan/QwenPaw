@@ -117,20 +117,7 @@ class MinerUToolService:
         for source in resolved:
             document = normalized[source.file_id]
             if document.error_code:
-                items.append(
-                    {
-                        "file_id": source.file_id,
-                        "status": "failed",
-                        "media_type": source.media_type,
-                        "page_count": None,
-                        "chunk_count": 0,
-                        "content_mode": None,
-                        "markdown": None,
-                        "document_ref": None,
-                        "preview": "",
-                        "error_code": document.error_code,
-                    }
-                )
+                items.append(_failed_document(source, document.error_code))
                 continue
             base = {
                 "file_id": source.file_id,
@@ -154,7 +141,8 @@ class MinerUToolService:
                 try:
                     handle = self.document_store.write(source, document)
                 except DocumentStoreError as exc:
-                    raise ToolContractError(exc.code, str(exc)) from exc
+                    items.append(_failed_document(source, exc.code))
+                    continue
                 items.append(
                     {
                         **base,
@@ -195,6 +183,21 @@ class MinerUToolService:
             "next_cursor": page.next_cursor,
             "has_more": page.has_more,
         }
+
+
+def _failed_document(source: Any, code: str) -> dict[str, Any]:
+    return {
+        "file_id": source.file_id,
+        "status": "failed",
+        "media_type": source.media_type,
+        "page_count": None,
+        "chunk_count": 0,
+        "content_mode": None,
+        "markdown": None,
+        "document_ref": None,
+        "preview": "",
+        "error_code": code,
+    }
 
 
 def _options(value: dict[str, Any] | None) -> dict[str, bool]:

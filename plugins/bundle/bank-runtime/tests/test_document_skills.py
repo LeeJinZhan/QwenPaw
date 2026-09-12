@@ -99,6 +99,14 @@ def test_real_native_viewer_returns_complete_document_rules_without_reference_re
         assert "材料" in asyncio.run(_read_native_skill(name))
 
 
+def test_table_completeness_rules_survive_native_skill_viewer():
+    import asyncio
+
+    content = asyncio.run(_read_native_skill("bank-document-qa"))
+    for required in ("next_cursor", "has_more=false", "chunk_count", "按 chunk index 去重", "日均活跃用户数", "未分类项", "生成报告文件也不能替代完整性核对"):
+        assert required in content
+
+
 def test_presentation_skill_is_readable_via_native_skill_viewer():
     import asyncio
     content = asyncio.run(_read_native_skill("bank-presentation"))

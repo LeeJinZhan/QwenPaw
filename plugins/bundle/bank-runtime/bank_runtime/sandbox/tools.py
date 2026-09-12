@@ -47,6 +47,13 @@ def reset_sandbox_tool_state(token) -> None:
     _STATE.reset(token)
 
 
+def attachment_read_error() -> str:
+    state = _STATE.get()
+    if state is None:
+        return ""
+    return next(iter(state.processor.read_failures.values()), "")
+
+
 async def runtime_sandbox_files_search(
     query: str = "",
     content_types: list[str] | None = None,

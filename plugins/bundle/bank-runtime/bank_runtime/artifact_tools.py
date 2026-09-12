@@ -100,6 +100,14 @@ class FileOperationsIncompleteError(ArtifactToolNotInvokedError):
         )
 
 
+class DocumentReadIncompleteError(FileOperationsIncompleteError):
+    def __init__(self, code="DOCUMENT_READ_INCOMPLETE") -> None:
+        AgentRuntimeErrorException.__init__(
+            self, error_code=code,
+            message="文件内容尚未完整读取，不能提供全量统计或生成完整分析报告。", details={},
+        )
+
+
 class ArtifactDeliveryErrorHook(LifecycleHook):
     """Expose the stable artifact error without leaking candidate model text."""
 

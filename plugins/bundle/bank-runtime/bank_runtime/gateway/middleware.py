@@ -27,6 +27,8 @@ from .client import GatewayClient, GatewayConfig, GatewayError
 from .protocol import canonical_payload_hash
 from .native_skills import NativeSkillReader
 from .completion import operation_keys, parse_outcomes
+from .document_reads import DocumentReadLedger, result_error, is_read_recovery_tool
+from ..artifact_tools import DocumentReadIncompleteError
 from ..artifact_tools import FileOperationsIncompleteError
 from ..presentation import artifact_model_result, failure_message
 from ..model_context import prepare_public_model_context
@@ -107,6 +109,8 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
         self.artifact_input_failures = 0
         self.unresolved_file_operations: set[str] = set()
         self.converted_sources: dict[str, str] = {}
+        self.document_reads = DocumentReadLedger()
+        self._read_guard_failed = False
         self.native_skills: NativeSkillReader | None = None
         self.allowed_tool_names: frozenset[str] | None = None
 
@@ -122,21 +126,36 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
         self.artifact_input_failures = 0
         self.unresolved_file_operations.clear()
         self.converted_sources.clear()
+        self.document_reads = DocumentReadLedger()
+        self._read_guard_failed = False
         if self.artifact_intent is None:
             async for item in next_handler(**input_kwargs):
                 yield item
-            if self.unresolved_file_operations:
-                raise FileOperationsIncompleteError()
+            self._check_file_completion()
             return
         previous_state = self._artifact_turn_state
         self._artifact_turn_state = _ArtifactTurnState(intent=self.artifact_intent)
         try:
             async for item in next_handler(**input_kwargs):
                 yield item
-            if self.unresolved_file_operations:
-                raise FileOperationsIncompleteError()
+            self._check_file_completion()
         finally:
             self._artifact_turn_state = previous_state
+
+    def _read_error(self):
+        from ..sandbox.tools import attachment_read_error
+        code = attachment_read_error() or (self.document_reads.error_code if self.document_reads.pending else "")
+        if code and any(key.startswith("artifact:") for key in self.unresolved_file_operations):
+            return "ARTIFACT_OUTPUT_MISSING"
+        return code
+
+    def _check_file_completion(self):
+        if any(key.startswith("artifact:") for key in self.unresolved_file_operations):
+            raise FileOperationsIncompleteError()
+        if self._read_error():
+            raise DocumentReadIncompleteError(self._read_error())
+        if self.unresolved_file_operations:
+            raise FileOperationsIncompleteError()
 
     async def on_model_call(
         self,
@@ -144,6 +163,12 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
         input_kwargs: dict[str, Any],
         next_handler: Callable[..., Any],
     ) -> Any:
+        read_error = self._read_error()
+        if self._read_guard_failed or read_error in {
+            "DOCUMENT_READ_NO_PROGRESS", "DOCUMENT_TEXT_TRUNCATED", "DOCUMENT_TEXT_ENCODING_UNSUPPORTED", "MINERU_SUBMIT_AMBIGUOUS"
+        }:
+            self._read_guard_failed = True
+            raise DocumentReadIncompleteError(read_error or "DOCUMENT_READ_INCOMPLETE")
         if self.artifact_input_failures >= 3:
             raise ArtifactInputRetryExhaustedError()
         if self.allowed_tool_names is not None:
@@ -201,6 +226,22 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
         # with public-answer guidance rather than a schema to recite.
         if input_kwargs.get("messages"):
             input_kwargs = prepare_public_model_context(input_kwargs)
+        if read_error:
+            # Only this incomplete-read model round is buffered. A complete
+            # file answer and ordinary conversation retain their normal stream.
+            response = await _capture_model_output(await next_handler(**input_kwargs))
+            names = _tool_call_names(response.final)
+            if not names or any(not is_read_recovery_tool(name) for name in names):
+                self._read_guard_failed = True
+                raise DocumentReadIncompleteError(read_error)
+            # Tool plans are allowed to recover the read, but their speculative
+            # prose must never escape into an answer or downloadable report.
+            chunks = []
+            for chunk in response.chunks:
+                safe = copy(chunk)
+                safe.content = [block for block in chunk.content if isinstance(block, ToolCallBlock)]
+                chunks.append(safe)
+            return _CapturedModelOutput(tuple(chunks), response.streamed).replay()
         state = self._artifact_turn_state
         if state is None or state.invoked:
             return await next_handler(**input_kwargs)
@@ -310,6 +351,8 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
                 yield item
         except asyncio.CancelledError:
             raise
+        except DocumentReadIncompleteError:
+            raise
         except Exception as exc:
             _logger.warning(
                 "Managed operation failed: error_type=%s", type(exc).__name__
@@ -344,7 +387,9 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
             tool_name, tool_input, self.artifact_intent
         )
         prepared = self.claim(tool_name, tool_input)
+        prior_operation_keys = self.unresolved_file_operations.intersection(operation_keys(tool_name, tool_input))
         self.unresolved_file_operations.update(operation_keys(tool_name, tool_input))
+        self.document_reads.start(tool_name, tool_input)
         if prepared.native_skill:
             reader = self.native_skills
             if (
@@ -364,6 +409,11 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
         started_at = time.monotonic()
         result_reported = False
         try:
+            if self._read_error() and not is_read_recovery_tool(tool_name):
+                # Even a directly requested physical or delegated tool cannot
+                # publish a result from known-incomplete input.
+                self.unresolved_file_operations.difference_update(operation_keys(tool_name, tool_input) - prior_operation_keys)
+                raise DocumentReadIncompleteError(self._read_error())
             if tool_name in _RUNTIME_EXECUTED_TOOLS:
                 result = await self.client.execute_runtime_tool(
                     prepared.preflight,
@@ -424,6 +474,7 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
                 return
             async for item in next_handler():
                 if isinstance(item, ToolResponse) and not result_reported:
+                    self.document_reads.observe(tool_name, tool_input, item.content, item.state == ToolResultState.SUCCESS)
                     keys = operation_keys(tool_name, tool_input)
                     if keys:
                         self.unresolved_file_operations.update(keys)
@@ -442,7 +493,12 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
                                     # Only older failures are superseded. A conflicting
                                     # failure in this response remains unresolved.
                                     self.unresolved_file_operations.difference_update(recovered - failed_keys)
+                                    self.document_reads.recover_sources({key.removeprefix("parse:") for key in recovered - failed_keys}, preserve_file_id=key.removeprefix("parse:"))
                     status, error_code = _result_status(item)
+                    if tool_name.endswith(("parse_documents", "read_document_chunks")):
+                        reason = result_error(item.content)
+                        if reason:
+                            status, error_code = "failed", reason
                     await self.client.report_result(
                         tool_call_id,
                         status,
@@ -479,7 +535,8 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
                 )
             raise
         except Exception as exc:
-            self.unresolved_file_operations.update(operation_keys(tool_name, tool_input))
+            if not isinstance(exc, DocumentReadIncompleteError):
+                self.unresolved_file_operations.update(operation_keys(tool_name, tool_input))
             if tool_name in _RUNTIME_EXECUTED_TOOLS and getattr(exc, "code", "") in {"INVALID_REQUEST", "BAD_REQUEST", "ARTIFACT_VALIDATION_FAILED"}:
                 self.artifact_input_failures += 1
             if not result_reported:
@@ -487,7 +544,7 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
                     tool_call_id,
                     "failed",
                     _duration_ms(started_at),
-                    "TOOL_EXECUTION_FAILED",
+                    getattr(exc, "error_code", "TOOL_EXECUTION_FAILED"),
                 )
             raise
         else:

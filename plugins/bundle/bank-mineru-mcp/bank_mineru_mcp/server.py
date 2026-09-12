@@ -80,11 +80,19 @@ class MinerUMcpService:
                     options=options,
                 )
             except ToolContractError as exc:
-                raise ValueError(f"{exc.code}: {exc}") from exc
+                return {"status": "failed", "error_code": exc.code, "items": []}
 
         @self.mcp.tool(
             name="read_document_chunks",
-            description="Read bounded chunks from an opaque task-local document_ref.",
+            description=(
+                "Read bounded chunks from an opaque task-local document_ref. "
+                "Start with cursor=null, then copy next_cursor exactly until "
+                "has_more=false. limit is 1-10 (default 5). An omitted cursor "
+                "restarts at the beginning. Retrying the same cursor and limit "
+                "returns the same page while the document remains valid; "
+                "deduplicate chunks by index. Do not infer full-table totals "
+                "from previews or incomplete pages."
+            ),
             structured_output=True,
         )
         async def read_document_chunks(
@@ -99,7 +107,7 @@ class MinerUMcpService:
                     limit=limit,
                 )
             except ToolContractError as exc:
-                raise ValueError(f"{exc.code}: {exc}") from exc
+                return {"status": "failed", "error_code": exc.code}
 
     async def start(self) -> None:
         if self._started:

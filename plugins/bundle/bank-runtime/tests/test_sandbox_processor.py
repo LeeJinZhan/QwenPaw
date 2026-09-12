@@ -17,6 +17,36 @@ from bank_runtime.sandbox.processor import AttachmentProcessor
 from bank_runtime.session import _sanitize_agent_state
 
 
+@pytest.mark.parametrize("encoding", ["utf-8", "utf-8-sig", "utf-16", "gb18030"])
+@pytest.mark.parametrize("text", ["中", "中文", "姓名,部门\n测试,运营\n"])
+def test_text_encoding_preserves_short_and_csv_content(tmp_path, encoding, text):
+    path = tmp_path / "table.csv"
+    path.write_bytes(text.encode(encoding))
+    block = AttachmentProcessor().process([_prepared(path, content_type="text/csv")])[0]
+    assert f"\n{text}\n</runtime_attachment>" in block.text
+    assert "truncated" not in block.text
+
+
+@pytest.mark.parametrize("encoding", ["utf-8", "utf-16", "gb18030"])
+def test_text_limit_preserves_characters_and_marks_incomplete(tmp_path, encoding):
+    path = tmp_path / "text.txt"
+    text = "中文内容测试" * 20
+    path.write_bytes(text.encode(encoding))
+    block = AttachmentProcessor(per_file_chars=3).process([_prepared(path, content_type="text/plain")])[0]
+    assert f"\n{text[:3]}\n</runtime_attachment>" in block.text
+    assert "truncated" in block.text
+
+
+def test_bom_marked_broken_text_is_rejected_not_trimmed(tmp_path):
+    path = tmp_path / "broken.txt"
+    path.write_bytes(b"\xef\xbb\xbfvalid\xff")
+    processor = AttachmentProcessor()
+    blocks = processor.process([_prepared(path, content_type="text/plain")])
+    assert processor.read_failures == {"file_001": "DOCUMENT_TEXT_ENCODING_UNSUPPORTED"}
+    assert "编码无法识别" in blocks[0].text
+    assert "valid" not in blocks[0].text
+
+
 def _prepared(path: Path, *, content_type: str) -> PreparedSandboxFile:
     return PreparedSandboxFile(
         file_id="file_001",

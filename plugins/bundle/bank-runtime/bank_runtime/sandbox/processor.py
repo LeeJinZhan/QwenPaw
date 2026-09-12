@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+import codecs
 import zipfile
 from xml.sax.saxutils import quoteattr
 
@@ -49,6 +50,7 @@ class AttachmentProcessor:
     ) -> None:
         self.per_file_chars = max(1, int(per_file_chars))
         self.task_chars = max(self.per_file_chars, int(task_chars))
+        self.read_failures: dict[str, str] = {}
 
     def process(
         self,
@@ -110,9 +112,18 @@ class AttachmentProcessor:
                 )
                 continue
             allowance = min(self.per_file_chars, remaining)
-            text, source_truncated = _read_text(prepared.local_path, allowance)
+            try:
+                text, source_truncated = _read_text(prepared.local_path, allowance)
+            except SandboxCacheError:
+                self.read_failures[prepared.file_id] = "DOCUMENT_TEXT_ENCODING_UNSUPPORTED"
+                blocks.append(self._status(prepared, "文件文本编码无法识别，正文尚未读取。"))
+                continue
             rendered = text[:allowance]
             truncated = source_truncated or len(text) > len(rendered)
+            if truncated:
+                self.read_failures[prepared.file_id] = "DOCUMENT_TEXT_TRUNCATED"
+            else:
+                self.read_failures.pop(prepared.file_id, None)
             remaining = max(remaining - len(rendered), 0)
             blocks.append(
                 TextBlock(
@@ -218,13 +229,21 @@ def _read_text(path, max_chars: int) -> tuple[str, bool]:
         value = handle.read(byte_limit + 1)
     truncated = len(value) > byte_limit
     value = value[:byte_limit]
-    for encoding in ("utf-8-sig", "utf-16", "gb18030"):
-        for trim in range(0, min(4, len(value)) + 1):
-            candidate = value if trim == 0 else value[:-trim]
-            try:
-                return candidate.decode(encoding), truncated or trim > 0
-            except UnicodeDecodeError:
-                continue
+    # Honor explicit BOMs. Trying BOM-less UTF-16 before GB18030 can turn a
+    # valid Chinese CSV into unrelated characters. Never trim a complete file
+    # merely to make the preferred decoder accept its remaining prefix.
+    if value.startswith(codecs.BOM_UTF8):
+        encodings = ("utf-8-sig",)
+    elif value.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)):
+        encodings = ("utf-16",)
+    else:
+        encodings = ("utf-8", "gb18030")
+    for encoding in encodings:
+        try:
+            decoder = codecs.getincrementaldecoder(encoding)(errors="strict")
+            return decoder.decode(value, final=not truncated), truncated
+        except UnicodeDecodeError:
+            continue
     raise SandboxCacheError("Attachment text encoding is unsupported")
 
 
