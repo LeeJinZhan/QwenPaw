@@ -63,21 +63,21 @@ description: 用于制作、修订 PPT/PPTX 演示文稿，包含经营汇报、
 {"theme":"steady_business","brand_name":"用户提供的机构名称","slides":[{"layout":"cover","title":"季度经营分析","subtitle":"用户提供的期间"},{"layout":"cards","title":"重点工作","items":[{"title":"客户服务","description":"用户提供的具体安排","icon":"people"},{"title":"风险管理","description":"用户提供的具体安排","icon":"shield"}]}]}
 ```
 
-示例中的机构和期间必须替换为真实信息，未提供则省略。仅支持 `theme`、可选 `image_policy`、可选 `brand_name`（最多 36 字）和 `slides`（1–100 页）。每页可用 title（44 字以内）、subtitle（100 字以内）、eyebrow（30 字以内）、source（150 字以内）、conclusion（100 字以内）、speaker_notes（20000 字以内）、tone（light/dark）；subtitle 用于封面、章节、结束、图文或无条目的正文页；section 的 subtitle 与 items 二选一。conclusion 用于正文/数据页，不与封面、章节、结束或图片页混用。同组字段别名只填一个。长解释放讲稿。渲染器会检查容量，出现溢出错误时缩短表述或拆页，保留所有必要事实与用户要求的总页数；无法兼顾时明确说明，不偷偷截断。
+示例中的机构和期间必须替换为真实信息，未提供则省略。仅支持 theme、可选 image_policy、可选 brand_name 和 slides（1–100 页）。每页可用 title、subtitle、eyebrow、source、conclusion、speaker_notes（20000 字以内）、tone（light/dark）。视觉文本没有逐字段的短字符硬上限，整体请求仍受 2 MiB 等资源预算约束。标题、短标签和指标值应简洁，正文和总结按内容需要表达；不要为满足原来的 100 字限制删除结论、事实或限定条件。渲染器先按主题测量并适配，放不下时增加可编辑的续页或完整说明页，保留原文；超长图表名称、表头可用编号与完整名称说明对应。subtitle 用于封面、章节、结束、图文或无条目的正文页；section 可同时提供 subtitle 与 items。conclusion 用于正文/数据页，不与封面、章节、结束或图片页混用。同组字段别名只填一个。讲稿用于演讲补充，不能作为隐藏用户要求可见内容的回退。建议页数不当作固定容量；用户明确要求精确页数时，优先组织简洁内容，交付前核对实际页数，超出时明确说明。
 
 | layout | 内容字段与建议 |
 | --- | --- |
 | cover / title | title、subtitle；可选 image；开场 |
-| section / closing | 章节 / 总结；section 最多 3 条短 items |
-| agenda | 最多 8 条短 items |
-| content | 最多 6 条 bullets，优先 3–4 条；每条简短 |
-| cards | 2–6 个 items 对象，title + description；根据主题采用主次分栏、并列模块、步骤或四/六项卡片，正文控制在 25–35 字 |
-| metrics | 1–4 个 items，每项 value（字符串，含单位，最多16字）、label 或 title、description；数字必须有依据 |
-| timeline / process | 最多 5 个 items，title 表示阶段/年份，description 表示事项；每项建议 20 字以内 |
+| section / closing | 章节 / 总结；section 建议少量短 items，长说明转换为内容页 |
+| agenda | 建议每页 8 条短 items，较多时自动续页 |
+| content | 建议每页 6 条 bullets，优先 3–4 条；每条简短 |
+| cards | 建议每页 2–6 个 items 对象，title + description；根据主题采用主次分栏、并列模块、步骤或四/六项卡片，正文控制在 25–35 字 |
+| metrics | 建议每页 1–4 个 items，每项 value（字符串，含单位，宜简洁）、label 或 title、description；数字必须有依据 |
+| timeline / process | 建议每页 5 个 items，title 表示阶段/年份，description 表示事项；每项建议 20 字以内 |
 | comparison | 恰好 2 个 items 对象，title + description |
 | chart | chart 对象，可加 conclusion；原生可编辑图表 |
 | chart_summary | chart 对象，可加 conclusion；可加总数据的“合计＋类别对比”，合计由渲染器计算，不传 summary 字段 |
-| table | table 对象，最多 5 列、7 行数据；长表拆页 |
+| table | table 对象，输入预算 32 列、1000 行；六列季度汇总可同页，宽表按列分组、长表自动续页 |
 | image | image 对象；可选 subtitle 和最多 3 条短 bullets |
 | gallery | images 数组，2–4 张图片与说明 |
 
@@ -90,15 +90,15 @@ description: 用于制作、修订 PPT/PPTX 演示文稿，包含经营汇报、
 | 页面 | 必需结构与不可混用项 |
 | --- | --- |
 | cover/title、closing | title，可选 subtitle；不要放 items/bullets、chart/table 或 conclusion；结束页的总结清单另用 content |
-| content | title + 最多 6 条 bullets；有 bullets/items 时禁止 subtitle，副标题意思合入要点或 speaker_notes；没有条目时才可用 subtitle |
-| section | subtitle 与最多 3 条 items 二选一；不放 conclusion |
+| content | title + 建议每页 6 条 bullets；有 bullets/items 时禁止 subtitle，副标题意思合入要点或 speaker_notes；没有条目时才可用 subtitle |
+| section | 可同时使用 subtitle 与 items；长章节说明自适应为内容页，不放 conclusion |
 | cards、metrics、timeline/process、comparison、agenda | 用 items；禁止 subtitle；不附 chart/table；cards 的 icon 放在 item 内，不放页面顶层 |
 | chart / chart_summary | title + chart，可选 source/conclusion；禁止 subtitle、items/bullets、table、summary；说明放 source、conclusion 或 speaker_notes |
 | table | title + table，可选 source/conclusion；禁止 subtitle、items/bullets、chart |
 | image | image 引用或自动配图，可用 subtitle 与最多 3 条 bullets；不放 conclusion |
 | gallery | images 或自动配图；禁止 subtitle、items/bullets、conclusion |
 
-每条字符串非空且不超过 120 字；item 的 title/name/label 不超过 30 字且只填一个，description/desc/content 不超过 120 字且只填一个。优先将卡片正文控制在 25–35 字。metrics.value 必须是含单位的字符串且不超过 16 字，不传数字；chart.series.values 则必须传数字数组，不把单位或百分号放进数值。chart 的分类名不超过 16 字、序列名不超过 24 字、unit 不超过 20 字；table 表头不超过 24 字、单元格不超过 60 字，均为字符串。
+可接收条目的版式每次最多 100 项（comparison 仍恰好两项），这是输入预算，不是单页容量。每条字符串非空；item 的 title/name/label 只填一个，description/desc/content 只填一个。卡片正文建议 25–35 字，这是视觉建议，超出不直接拒绝。metrics.value 必须是含单位的字符串，不传数字；chart.series.values 则必须传数字数组，不把单位或百分号放进数值。分类名、系列名、unit、表头、单元格及图片 caption 均保持字符串；长文本交由排版，不套用旧的逐字段字符上限。内容放不下时保持全文可见，不能静默截断或仅移入讲稿。
 
 title/subtitle/source 等非正文参数不写换行或制表符；长段落拆成条目，详细解释放 speaker_notes。不得删掉用户要求的事实、限制、来源或页数来换取校验通过。没有真实量化数据就选 content/cards/process，不构造图表或指标。
 
@@ -118,7 +118,7 @@ title/subtitle/source 等非正文参数不写换行或制表符；长段落拆�
 
 同一业务在整套图表中保持相同的 series 顺序，让主题按序列分配的颜色保持一致；不要为局部排名重排数据系列造成含义换色。
 
-chart.type 支持 bar/column/line/donut；1–8 个不同 categories，1–3 个 series，每个 values 与 categories 等长且为有限数值。donut 只允许一个非负且总和大于零的序列。不要填默认“图表标题”、空序列或补造数据。
+chart.type 支持 bar/column/line/donut；输入预算为 1–200 个不同 categories、1–24 个 series；四系列折线可同页，更多系列/分类由渲染器分组续页并保持统一刻度，每个 values 与 categories 等长且为有限数值。donut 只允许一个非负且总和大于零的序列；超过八个分类时转为条形图，避免分组改变占比分母。不要填默认“图表标题”、空序列或补造数据。
 
 总量与类别对比示例（测试数据，不作为真实业务事实）：
 

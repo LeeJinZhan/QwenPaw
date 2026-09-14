@@ -72,8 +72,14 @@ document_type 仅支持 letter、request、notice、report、work_plan、task_li
 普通 Word 完整参数示例（示例正文仅用于说明结构，实际用当前确认稿替换）：
 
 ```json
-{"artifact_type":"docx","title":"工作说明示例","content":{"sections":[{"heading":"工作安排","paragraphs":["测试完成后，各组汇总结果并提交测试记录。"]}]},"output_name":"工作说明示例.docx","delivery_plan":{"document_type":"article","target_format":"docx","layout_kind":"standard_document"}}
+{"artifact_type":"docx","title":"工作说明示例","content":{"sections":[{"heading":"工作安排","heading_level":1,"paragraphs":["测试完成后，各组汇总结果并提交测试记录。"]}]},"output_name":"工作说明示例.docx","delivery_plan":{"document_type":"article","target_format":"docx","layout_kind":"standard_document"}}
 ```
+
+普通 sections 可用 heading_level（1–6 的整数，默认 1）表达标题层级。tables 使用等列二维数组，首行为表头；普通 Word 宽表自动横向分节，过宽时分组并重复首列，长行允许跨页、表头重复。不要为容纳表格删列或把正文缩成摘要。
+
+公文保持固定纵向纸张及公文字体；宽表通过分组、重复首列处理，输入预算为 32 列、1000 数据行，仍受全文 100000 字符预算约束。
+
+直接 PDF 的 Markdown 表格支持按内容计算列宽、纵横混排、分组与重复表头；Office 导出 PDF 保留原文件版式。
 
 ## 公文 DOCX 交付
 

@@ -90,7 +90,8 @@ async def test_search_exposes_only_public_metadata_and_select_rejects_forgery() 
         reset_sandbox_tool_state(token)
 
 @pytest.mark.asyncio
-async def test_converted_result_issues_parser_reference_after_authorization(tmp_path, monkeypatch):
+@pytest.mark.parametrize("target", ["docx", "pdf"])
+async def test_converted_result_issues_parser_reference_after_authorization(tmp_path, monkeypatch, target):
     from datetime import datetime, timezone
     import hashlib
     import io
@@ -103,11 +104,12 @@ async def test_converted_result_issues_parser_reference_after_authorization(tmp_
     data = io.BytesIO()
     with zipfile.ZipFile(data, "w") as archive:
         archive.writestr("word/document.xml", "<document>source text</document>")
-    content = data.getvalue()
+    content = data.getvalue() if target == "docx" else b"%PDF-1.4\n%%EOF"
+    mime = "application/vnd.openxmlformats-officedocument.wordprocessingml.document" if target == "docx" else "application/pdf"
     class Broker:
         async def authorize_files(self, scope, ids, selection_records=None):
             assert ids == ["gfile_converted"] and scope.task_id == "task_001"
-            return {"authorized": [{"file_id":ids[0],"original_name":"converted.docx","content_type":"application/vnd.openxmlformats-officedocument.wordprocessingml.document","size_bytes":len(content),"content_hash":hashlib.sha256(content).hexdigest(),"expires_at":"2099-01-01T00:00:00Z"}], "denied":[]}
+            return {"authorized": [{"file_id":ids[0],"original_name":"converted." + target,"content_type":mime,"size_bytes":len(content),"content_hash":hashlib.sha256(content).hexdigest(),"expires_at":"2099-01-01T00:00:00Z"}], "denied":[]}
         def stream_locator(self, locator, write_chunk):
             write_chunk(content)
     state = _state()
@@ -119,7 +121,8 @@ async def test_converted_result_issues_parser_reference_after_authorization(tmp_
     monkeypatch.setattr(module, "get_file_ref_registry", lambda: registry)
     token = set_sandbox_tool_state(state)
     try:
-        blocks = await converted_attachment_blocks({"source_type":"session_file", "source_id":"file_old", "target_format":"docx"}, {"artifact_status":"succeeded", "generated_file_ids":["gfile_converted"]})
+        payload = {"source_type":"session_file", "source_id":"file_old", "target_format":"docx"} if target == "docx" else {"source_generated_file_id":"gfile_safe_docx", "target_format":"pdf", "purpose":"read"}
+        blocks = await converted_attachment_blocks(payload, {"artifact_status":"succeeded", "generated_file_ids":["gfile_converted"]})
         import re
         ref = re.search(r'file_ref="([^"]+)"', blocks[0].text).group(1)
         resolved = registry.resolve(ref, expected_task_id="task_001")

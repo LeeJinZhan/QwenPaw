@@ -100,11 +100,35 @@ class FileOperationsIncompleteError(ArtifactToolNotInvokedError):
         )
 
 
+class OfficeConversionFailureError(FileOperationsIncompleteError):
+    """Expose only a fixed diagnostic to Runtime's public failure translator."""
+
+    def __init__(self, reason: str) -> None:
+        from .conversion_reports import REASONS
+        if reason not in REASONS:
+            reason = "office_conversion_failed"
+        AgentRuntimeErrorException.__init__(
+            self, error_code="ARTIFACT_VALIDATION_FAILED",
+            message="OFFICE_CONVERSION|" + reason, details={},
+        )
+
+
 class DocumentReadIncompleteError(FileOperationsIncompleteError):
     def __init__(self, code="DOCUMENT_READ_INCOMPLETE") -> None:
         AgentRuntimeErrorException.__init__(
             self, error_code=code,
             message="文件内容尚未完整读取，不能提供全量统计或生成完整分析报告。", details={},
+        )
+
+
+class ArtifactLayoutFailureError(ArtifactToolNotInvokedError):
+    """A renderer exhausted its internal fitting; no model-generated test files."""
+
+    def __init__(self, location: tuple[int, str]) -> None:
+        page, element = location
+        AgentRuntimeErrorException.__init__(
+            self, error_code="ARTIFACT_VALIDATION_FAILED",
+            message=f"PPTX_LAYOUT_CAPACITY|{page}|{element}", details={},
         )
 
 
@@ -207,7 +231,7 @@ async def artifact_generate(
         title: User-visible artifact title.
         content: Complete artifact body. For DOCX, use a non-empty plain string
             or exactly ``{"paragraphs": ["正文"]}`` / ``{"sections":
-            [{"heading": "标题", "paragraphs": ["正文"]}]}``. Arrays must be
+            [{"heading": "标题", "heading_level": 1, "paragraphs": ["正文"]}]}``. Arrays must be
             JSON arrays; never wrap them in an ``{"item": ...}`` object. Pass
             structured content as an object; do not JSON-encode it as a string.
             For an official document draft, use ``{"kind": "official_document",
@@ -226,7 +250,13 @@ async def artifact_generate(
             For XLSX, use ``{"sheets": [{"name": "数据", "rows":
             [["表头1", "表头2"], ["内容", 1]]}]}``; ``{"headers":
             ["表头1", "表头2"]}`` may be supplied separately inside a sheet
-            and is prepended to ``rows``.
+            and is prepended to ``rows``. Explicit formula cells use
+            ``{"formula": "=SUM(B2:B5)"}``; only internal workbook references
+            and registered arithmetic/conditional functions are supported.
+            Never supply cached values, external links or executable functions.
+            Read bank-assistant-zh for the function list. Plain strings remain
+            escaped text. Word/PDF wide tables and PPT dense content reflow
+            automatically; preserve all data and verify actual page counts.
             For HTML, pass a static HTML string or ``{"text": "<h2>标题</h2><p>正文</p>"}``.
             Full html/head/body wrappers and static layout/CSS are supported.
             Do not include script, button, input, forms, event attributes,
@@ -304,23 +334,32 @@ async def artifact_convert(
     explicit_pdf_request: bool = False,
     source_type: str = "",
     source_id: str = "",
+    purpose: str = "delivery",
 ) -> str:
     """Convert an authorized source through an admitted worker.
 
     For uploaded .doc/.xls, set source_type=session_file, source_id to its file_id,
     target_format=docx/xlsx, and omit source_generated_file_id. For personal files
-    use workspace_file. Read the returned converted attachment before analysis.
+    use workspace_file. Modern Office may use the same target format with
+    purpose=read to prepare a safe structural copy; PDF can provide a visual
+    reading copy for charts/Visio. Read the returned attachment before analysis.
     A converted file alone is not a completed analysis or a revised deliverable.
+    Use purpose=read for internal recognition, including a supported PDF visual
+    derivative. Read every returned chunk; conversion_report coverage=partial
+    requires a scoped answer that names omitted content, never a complete report.
 
     Args:
         source_generated_file_id: Existing generated source; omit for uploaded files.
         source_type: session_file or workspace_file for uploaded sources.
         source_id: Authorized uploaded source file identifier.
+        purpose: delivery (default) for a requested downloadable conversion, or
+            read for internal document recognition. Internal PDF needs no user PDF
+            request and is not a deliverable. Runtime validates the purpose.
         target_format: Registered target format selected by Runtime.
         output_name: Optional safe output filename.
         explicit_pdf_request: Must be true only when the user asked for PDF.
     """
-    del source_generated_file_id, target_format, output_name, explicit_pdf_request, source_type, source_id
+    del source_generated_file_id, target_format, output_name, explicit_pdf_request, source_type, source_id, purpose
     return _UNMEDIATED
 
 

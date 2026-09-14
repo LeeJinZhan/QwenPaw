@@ -4,6 +4,13 @@ import re
 ROOT = Path(__file__).resolve().parents[1] / "skills"
 
 
+def test_presentation_text_guidance_uses_layout_capacity_not_short_character_caps():
+    content = (ROOT / "bank-presentation/SKILL.md").read_text()
+    for obsolete in ("conclusion（100 字以内）", "最多 36 字", "不超过 16 字", "单元格不超过 2000 字"):
+        assert obsolete not in content
+    assert "完整说明页" in content and "资源预算" in content
+
+
 def test_three_document_skills_are_packaged_with_valid_local_references():
     for name in ("bank-document-writing", "bank-document-review", "bank-document-qa"):
         entry = ROOT / name / "SKILL.md"

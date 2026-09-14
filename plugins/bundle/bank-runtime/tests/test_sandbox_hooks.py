@@ -154,6 +154,25 @@ async def test_current_attachments_are_prepared_before_execute_and_cleaned(
 
 
 @pytest.mark.asyncio
+async def test_cleanup_failure_preserves_answer_and_revokes_file_refs(tmp_path, monkeypatch, caplog):
+    events = []
+    cache = _Cache(tmp_path / 'task-files', events)
+    async def fail_cleanup(task_id):
+        raise OSError('private path must not enter logs')
+    cache.cleanup = fail_cleanup
+    monkeypatch.setenv('QWENPAW_SERVICE_TOKEN', 'service-secret')
+    monkeypatch.setattr(sandbox_hooks, '_CACHE', cache)
+    monkeypatch.setattr(sandbox_hooks, '_FILE_REFS', _FileRefs(events))
+    ctx = _ctx(tmp_path)
+    await BankRuntimeSandboxInstallHook().run(ctx)
+    await BankRuntimeSandboxCleanupHook().run(ctx)
+    assert events == ['revoke:task_001']
+    assert 'bank_runtime_sandbox_state_token' not in ctx.extras
+    assert 'task_cache.cleanup_failed' in caplog.text
+    assert 'private path' not in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_sandbox_install_does_not_expose_unbound_file_broker_tools(
     tmp_path,
     monkeypatch,

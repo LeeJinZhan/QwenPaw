@@ -645,3 +645,13 @@ async def test_cancelled_native_stream_cannot_report_completed():
         pass
     assert not any(e["event"] == "answer.completed" for e in output)
     assert any(e.get("error_code") == "QWENPAW_TASK_CANCELLED" for e in output)
+def test_only_registered_layout_marker_survives_error_projection():
+    from bank_runtime.events import CompactEventProjector
+    for message, expected in [
+        ("PPTX_LAYOUT_CAPACITY|5|chart_conclusion", "PPTX_LAYOUT_CAPACITY|5|chart_conclusion"),
+        ("PPTX_LAYOUT_CAPACITY|0|text", "回答生成失败"),
+        ("PPTX_LAYOUT_CAPACITY|5|text\nprivate", "回答生成失败"),
+        ("/private/source", "回答生成失败"),
+    ]:
+        result = CompactEventProjector("t").project({"event": "error", "error": {"code": "ARTIFACT_VALIDATION_FAILED", "message": message}})
+        assert result[0]["message"] == expected

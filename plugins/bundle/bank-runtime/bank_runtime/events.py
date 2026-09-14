@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from collections.abc import AsyncIterable, AsyncIterator
 from typing import Any
 from .public_thinking import PublicThinkingStream
@@ -126,6 +127,7 @@ class CompactEventProjector:
                 self._terminal_event(
                     "answer.failed",
                     error_code=error_code,
+                    diagnostic=str(error.get("message") or ""),
                 )
             ]
 
@@ -225,6 +227,7 @@ class CompactEventProjector:
         event: str,
         raw_status: str = "",
         error_code: str = "",
+        diagnostic: str = "",
     ) -> dict[str, Any]:
         self._terminal = True
         if event == "answer.completed":
@@ -234,6 +237,10 @@ class CompactEventProjector:
                 "message": "回答完成",
             }
         message = "已停止生成" if raw_status == "cancelled" else "回答生成失败"
+        if not raw_status and error_code == "ARTIFACT_VALIDATION_FAILED" and re.fullmatch(
+            r"PPTX_LAYOUT_CAPACITY\|([1-9][0-9]?|100)\|(text|title|chart_conclusion)", diagnostic
+        ):
+            message = diagnostic
         failed = {
             "event": "answer.failed",
             "status": "failed",

@@ -203,6 +203,8 @@ class DocumentReadLedger:
 
     def recover_sources(self, file_ids, *, preserve_file_id=""):
         for file_id in file_ids:
+            if self.failures.get("parse:" + file_id) in {"FILE_ACCESS_DENIED", "FILE_REF_INVALID", "FILE_REF_EXPIRED"}:
+                continue
             self.failures.pop("parse:" + file_id, None)
             for ref, doc in list(self.documents.items()):
                 if doc.file_id == file_id and file_id != preserve_file_id:
