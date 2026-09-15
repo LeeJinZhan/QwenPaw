@@ -275,3 +275,16 @@ async def test_static_only_markdown_does_not_prove_chart_visual_understanding(ta
     assert middleware.conversion_coverage.reports["converted"]["coverage"] == "complete"
     with pytest.raises(DocumentReadIncompleteError):
         await invoke(middleware, "artifact_generate", {"artifact_type": "docx", "title": "完整流程图分析"})
+
+
+def test_partial_conversion_failure_survives_public_event_projection():
+    from bank_runtime.events import CompactEventProjector
+
+    events = CompactEventProjector("task-partial").project({
+        "object": "response", "status": "failed",
+        "error": {"code": "DOCUMENT_CONVERSION_PARTIAL", "message": "private source content"},
+    })
+
+    assert events[-1]["event"] == "answer.failed"
+    assert events[-1]["error_code"] == "DOCUMENT_CONVERSION_PARTIAL"
+    assert "private source content" not in str(events)
