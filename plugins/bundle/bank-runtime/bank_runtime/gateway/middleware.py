@@ -22,6 +22,7 @@ from agentscope.tool import ToolChoice, ToolChunk, ToolResponse
 from qwenpaw.hooks.base import LifecycleHook
 from qwenpaw.runtime.hooks import HookContext, HookResult
 from qwenpaw.runtime.phases import Phase
+from ..model_timing import observed_model_handler
 
 from .client import GatewayClient, GatewayConfig, GatewayError
 from .protocol import canonical_payload_hash
@@ -214,6 +215,7 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
         input_kwargs: dict[str, Any],
         next_handler: Callable[..., Any],
     ) -> Any:
+        next_handler = observed_model_handler(next_handler)
         read_error = self._read_error()
         if self.conversion_failures and any(key.startswith("artifact:") for key in self.unresolved_file_operations):
             raise OfficeConversionFailureError(next(iter(self.conversion_failures.values())))
