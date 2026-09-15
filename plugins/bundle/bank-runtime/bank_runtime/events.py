@@ -8,7 +8,6 @@ import re
 from collections.abc import AsyncIterable, AsyncIterator
 from typing import Any
 from .public_thinking import PublicThinkingStream
-from .model_timing import ModelTimingCollector, current_collector
 
 _TERMINAL_EVENTS = {"answer.completed", "answer.failed"}
 _RECOVERABLE_SESSION_ERROR_CODES = {
@@ -270,27 +269,7 @@ def _decode_sse_block(block: str) -> list[dict[str, Any]]:
     return events
 
 
-async def project_sse_stream(source: AsyncIterable[str], runtime_task_id: str) -> AsyncIterator[str]:
-    """Keep model call clocks scoped to this producer, including its child tasks."""
-    collector = ModelTimingCollector()
-    token = current_collector.set(collector)
-    iterator = _project_sse_stream(source, runtime_task_id)
-    try:
-        async for item in iterator:
-            for record in collector.drain():
-                yield _encode({'event':'model.timing', 'runtime_task_id':runtime_task_id, **record})
-            if collector.calls and any(event.get('event') in _TERMINAL_EVENTS for event in _decode_sse_block(item)):
-                yield _encode({'event':'model.timing.coverage', 'runtime_task_id':runtime_task_id,
-                    'observed_calls':collector.calls-collector.omitted_calls, 'omitted_calls':collector.omitted_calls})
-            yield item
-    finally:
-        try:
-            await iterator.aclose()
-        finally:
-            current_collector.reset(token)
-
-
-async def _project_sse_stream(
+async def project_sse_stream(
     source: AsyncIterable[str],
     runtime_task_id: str,
 ) -> AsyncIterator[str]:
