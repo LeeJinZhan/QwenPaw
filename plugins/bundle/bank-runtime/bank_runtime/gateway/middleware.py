@@ -23,6 +23,7 @@ from qwenpaw.hooks.base import LifecycleHook
 from qwenpaw.runtime.hooks import HookContext, HookResult
 from qwenpaw.runtime.phases import Phase
 from qwenpaw.exceptions import ModelExecutionException
+from ..model_timing import observed_model_handler
 
 from .client import GatewayClient, GatewayConfig, GatewayError
 from .protocol import canonical_payload_hash
@@ -255,6 +256,7 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
         input_kwargs: dict[str, Any],
         next_handler: Callable[..., Any],
     ) -> Any:
+        next_handler = observed_model_handler(next_handler)
         # Inspect completed model calls before AgentScope sanitizes malformed
         # JSON into synthetic tool errors (which never enter the Gateway).
         input_kwargs = dict(input_kwargs)
