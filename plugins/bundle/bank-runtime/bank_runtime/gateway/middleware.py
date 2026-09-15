@@ -22,6 +22,7 @@ from agentscope.tool import ToolChoice, ToolChunk, ToolResponse
 from qwenpaw.hooks.base import LifecycleHook
 from qwenpaw.runtime.hooks import HookContext, HookResult
 from qwenpaw.runtime.phases import Phase
+from qwenpaw.exceptions import ModelExecutionException
 
 from .client import GatewayClient, GatewayConfig, GatewayError
 from .protocol import canonical_payload_hash
@@ -33,6 +34,8 @@ from ..artifact_tools import FileOperationsIncompleteError, OfficeConversionFail
 from ..presentation import artifact_model_result, failure_message
 from ..conversion_reports import (ConversionCoverage, validate_conversion_report, conversion_reason, REASONS)
 from ..model_context import prepare_public_model_context
+from ..artifact_schema import describe_docx_tools, docx_retry_schema_hint
+from ..docx_draft import controlled_docx_call, draft_request
 from ..artifact_tools import (
     ARTIFACT_WORKER_TOOL_NAMES,
     ArtifactDeliveryIntent,
@@ -108,6 +111,8 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
         )
         self._artifact_turn_state: _ArtifactTurnState | None = None
         self.artifact_input_failures = 0
+        self._docx_draft_attempted = False
+        self._artifact_schema_hint: ArtifactDeliveryIntent | None = None
         self.layout_failure = None
         self.unresolved_file_operations: set[str] = set()
         self.converted_sources: dict[str, str] = {}
@@ -128,6 +133,8 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
         next_handler: Callable[..., AsyncGenerator[Any, None]],
     ) -> AsyncGenerator[Any, None]:
         self.artifact_input_failures = 0
+        self._docx_draft_attempted = False
+        self._artifact_schema_hint = None
         self.layout_failure = None
         self.unresolved_file_operations.clear()
         self.converted_sources.clear()
@@ -164,7 +171,11 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
         if any(key.startswith("artifact:") for key in self.unresolved_file_operations):
             if self.conversion_failures:
                 raise OfficeConversionFailureError(next(iter(self.conversion_failures.values())))
+            if self.artifact_input_failures:
+                raise ArtifactInputRetryExhaustedError()
             raise FileOperationsIncompleteError()
+        if self.artifact_input_failures:
+            raise ArtifactInputRetryExhaustedError()
         if self._read_error():
             raise DocumentReadIncompleteError(self._read_error())
         if self.unresolved_file_operations:
@@ -208,12 +219,85 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
             chunks.append(safe)
         return _CapturedModelOutput(tuple(chunks), response.streamed).replay()
 
+    def _record_malformed_artifact_arguments(self, response: ChatResponse) -> None:
+        for block in response.content:
+            if not isinstance(block, ToolCallBlock) or block.name not in ARTIFACT_WORKER_TOOL_NAMES:
+                continue
+            raw = block.input
+            if not isinstance(raw, str):
+                continue  # Typed objects still pass through Runtime validation.
+            try:
+                json.loads(raw)
+            except (ValueError, RecursionError):
+                # Match the core's supported trailing-text recovery; do not
+                # repair missing document content or guess unescaped quotes.
+                try:
+                    leading, _ = json.JSONDecoder().raw_decode(raw.lstrip())
+                    if isinstance(leading, dict):
+                        continue
+                except (ValueError, RecursionError):
+                    pass
+                self.artifact_input_failures += 1
+                _logger.warning(
+                    "Artifact arguments malformed before Gateway: tool=%s bytes=%d failures=%d",
+                    block.name, len(raw.encode("utf-8")), self.artifact_input_failures,
+                )
+
+    def _record_artifact_input_failure(self, tool_name, payload) -> None:
+        self.artifact_input_failures += 1
+        hint = docx_retry_schema_hint(tool_name, payload)
+        if hint is not None:
+            self._artifact_schema_hint = hint
+
     async def on_model_call(
         self,
         agent: Any,
         input_kwargs: dict[str, Any],
         next_handler: Callable[..., Any],
     ) -> Any:
+        # Inspect completed model calls before AgentScope sanitizes malformed
+        # JSON into synthetic tool errors (which never enter the Gateway).
+        input_kwargs = dict(input_kwargs)
+        input_kwargs["tools"] = describe_docx_tools(
+            input_kwargs.get("tools"), self.artifact_intent or self._artifact_schema_hint,
+        )
+        original_handler = next_handler
+        async def checked_handler(**kwargs):
+            value = await original_handler(**kwargs)
+            if isinstance(value, ChatResponse):
+                self._record_malformed_artifact_arguments(value)
+                return value
+            if not hasattr(value, "__aiter__"):
+                return value
+            async def checked_stream():
+                last = None
+                observed_final = False
+                async for chunk in value:
+                    last = chunk
+                    if chunk.is_last:
+                        self._record_malformed_artifact_arguments(chunk)
+                        observed_final = True
+                    yield chunk
+                if last is not None and not observed_final:
+                    self._record_malformed_artifact_arguments(last)
+            return checked_stream()
+        if self.artifact_intent is not None or self.artifact_input_failures or _visible_artifact_tool_schemas(input_kwargs.get("tools")):
+            next_handler = checked_handler
+        if self.artifact_input_failures:
+            input_kwargs = dict(input_kwargs)
+            input_kwargs["messages"] = [
+                *list(input_kwargs.get("messages") or []),
+                SystemMsg(name="system", content=(
+                    "文件工具参数未通过校验。本轮只允许一次修正重试：提交完整 JSON 对象，"
+                    "确保全部括号闭合；生成或修订须包含完整 content，转换按其工具字段提交。DOCX 正文直接使用对象，例如 "
+                    '{"paragraphs":["正文"]}，不要把 sections/paragraphs 再编码成 JSON 字符串。'
+                    "公文必须直接提交含 kind=official_document、layout_version、document 的完整对象，"
+                    "document 内保留 title、recipients、blocks；公文不得改成普通 sections/paragraphs 结构，"
+                    "delivery_plan 与正文版式必须一致。"
+                    "正文中的英文双引号须正确转义；保留原事实与版式要求及 delivery_plan。"
+                    "不要只提交文件名，不重复宣告准备生成，也不要改用脚本或绕过受控工具。"
+                )),
+            ]
         read_error = self._read_error()
         if self.conversion_failures and any(key.startswith("artifact:") for key in self.unresolved_file_operations):
             raise OfficeConversionFailureError(next(iter(self.conversion_failures.values())))
@@ -223,7 +307,7 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
             self._read_guard_failed = True
             raise DocumentReadIncompleteError(read_error or "DOCUMENT_READ_INCOMPLETE")
         self._raise_layout_failure()
-        if self.artifact_input_failures >= 3:
+        if self.artifact_input_failures >= 2:
             raise ArtifactInputRetryExhaustedError()
         if self.allowed_tool_names is not None:
             allowed = set(self.allowed_tool_names)
@@ -313,7 +397,9 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
         if state.failed:
             raise ArtifactToolNotInvokedError()
 
-        response = await _capture_model_output(await next_handler(**input_kwargs))
+        response = await self._capture_artifact_proposal(
+            input_kwargs, next_handler, original_handler, state,
+        )
         tool_names = _tool_call_names(response.final)
         if tool_names & ARTIFACT_WORKER_TOOL_NAMES:
             state.invoked = True
@@ -349,13 +435,58 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
                 ),
             ),
         ]
-        replacement = await _capture_model_output(await next_handler(**retry))
+        replacement = await self._capture_artifact_proposal(
+            retry, next_handler, original_handler, state,
+        )
         replacement_names = _tool_call_names(replacement.final)
         if replacement_names & ARTIFACT_WORKER_TOOL_NAMES:
             state.invoked = True
             return replacement.replay()
         state.failed = True
         raise ArtifactToolNotInvokedError()
+
+    async def _capture_artifact_proposal(
+        self, input_kwargs, next_handler, original_handler, state,
+    ) -> _CapturedModelOutput:
+        try:
+            return await _capture_model_output(await next_handler(**input_kwargs))
+        except ModelExecutionException as exc:
+            intent = self.artifact_intent
+            names = {
+                schema.get("function", {}).get("name")
+                for schema in _visible_artifact_tool_schemas(input_kwargs.get("tools"))
+            }
+            if (
+                exc.details.get("finish_reason") != "error"
+                or self._docx_draft_attempted
+                or intent is None
+                or intent.operation != "generate"
+                or intent.target_format != "docx"
+                or intent.layout_kind == "official_document"
+                or intent.source_refs
+                or self.unresolved_file_operations
+                or self.artifact_input_failures
+                or "artifact_generate" not in names
+            ):
+                raise
+            self._docx_draft_attempted = True
+            try:
+                draft = await _capture_model_output(
+                    await original_handler(**draft_request(input_kwargs))
+                )
+                result = controlled_docx_call(draft.final)
+            except Exception as draft_error:
+                state.failed = True
+                _logger.warning(
+                    "DOCX text draft recovery failed: error_type=%s",
+                    type(draft_error).__name__,
+                )
+                raise exc
+            # This is a new argument proposal, not an executed artifact.
+            # AgentScope still sends it through the ordinary permission engine
+            # and Gateway preflight/permit/execution/publication pipeline.
+            _logger.info("Recovered ordinary DOCX parameters from a completed text draft")
+            return _CapturedModelOutput((result,), draft.streamed)
 
     def prepare(
         self,
@@ -508,7 +639,7 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
                     self._remember_conversion_failure(tool_name, tool_input, conversion_reason(result))
                 code = str(result.get("error_code") or "")
                 if code in {"INVALID_REQUEST", "BAD_REQUEST", "ARTIFACT_VALIDATION_FAILED"}:
-                    self.artifact_input_failures += 1
+                    self._record_artifact_input_failure(tool_name, tool_input)
                 delivered = result.get("result") or {}
                 if tool_name == "artifact_convert" and result.get("status") == "success":
                     report = validate_conversion_report(delivered.get("conversion_report"))
@@ -631,7 +762,7 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
             if not isinstance(exc, DocumentReadIncompleteError):
                 self.unresolved_file_operations.update(operation_keys(tool_name, tool_input))
             if tool_name in _RUNTIME_EXECUTED_TOOLS and getattr(exc, "code", "") in {"INVALID_REQUEST", "BAD_REQUEST", "ARTIFACT_VALIDATION_FAILED"}:
-                self.artifact_input_failures += 1
+                self._record_artifact_input_failure(tool_name, tool_input)
             if not result_reported:
                 await self.client.report_result(
                     tool_call_id,
@@ -678,7 +809,7 @@ class GatewayPermissionEngine:
             self.middleware.prepare("Skill", tool_input, {}, native_skill=True)
             return decision
         tool_name = str(getattr(tool, "name", "") or "")
-        if tool_name in _RUNTIME_EXECUTED_TOOLS and self.middleware.artifact_input_failures >= 3:
+        if tool_name in _RUNTIME_EXECUTED_TOOLS and self.middleware.artifact_input_failures >= 2:
             return _deny("文件连续校验失败，已停止本轮重试。")
         tool_input = complete_artifact_tool_input(
             tool_name, tool_input, self.middleware.artifact_intent
@@ -701,7 +832,7 @@ class GatewayPermissionEngine:
             if tool_name in _RUNTIME_EXECUTED_TOOLS and getattr(exc, "code", "") in {
                 "INVALID_REQUEST", "BAD_REQUEST", "ARTIFACT_VALIDATION_FAILED",
             }:
-                self.middleware.artifact_input_failures += 1
+                self.middleware._record_artifact_input_failure(tool_name, tool_input)
             _logger.warning(
                 "Runtime tool preflight failed: task_id=%s tool=%s error_type=%s",
                 getattr(getattr(self.middleware.client, "config", None), "task_id", ""),

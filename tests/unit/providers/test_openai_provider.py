@@ -687,3 +687,25 @@ async def test_update_config_does_not_update_base_url_when_frozen() -> None:
     assert provider.api_key == "sk-frozen"
     assert info.base_url == "https://mock-openai.local/v1"
     assert info.api_key == "sk-frozen"
+
+
+async def test_legacy_model_sends_only_configured_output_token_parameter(monkeypatch):
+    import openai
+    class CapturedRequest(Exception):
+        pass
+    requests = []
+    async def create(**kwargs):
+        requests.append(kwargs)
+        raise CapturedRequest()
+    monkeypatch.setattr(openai, 'AsyncClient', lambda **kwargs: SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create))))
+    provider = _make_provider()
+    provider.generate_kwargs = {'max_tokens': 8192}
+    model = provider.get_chat_model_instance('kilo-auto/free')
+    for override in ({}, {'max_tokens': 4096}):
+        try:
+            await model._call_api('kilo-auto/free', [], **override)
+        except CapturedRequest:
+            pass
+    assert requests[0].get('max_tokens') == 8192
+    assert requests[1].get('max_tokens') == 4096
+    assert all('max_completion_tokens' not in request for request in requests)

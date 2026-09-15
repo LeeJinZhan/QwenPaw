@@ -498,6 +498,11 @@ class OpenAIProvider(Provider):
                     max_tokens,
                 )
             max_tokens = None
+        elif max_tokens is not None:
+            # AgentScope emits Parameters.max_tokens as max_completion_tokens.
+            # Legacy compatible providers require the max_tokens wire field.
+            gen_kwargs.setdefault("max_tokens", max_tokens)
+            max_tokens = None
         parameters = OpenAIChatModel.Parameters(
             max_tokens=max_tokens,
             temperature=gen_kwargs.pop("temperature", None),

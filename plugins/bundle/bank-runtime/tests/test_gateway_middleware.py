@@ -705,11 +705,11 @@ async def test_repeated_artifact_input_rejections_stop_before_next_model_call():
 async def test_admission_does_not_reset_parameter_failure_streak():
     client = _Client()
     middleware = BankRuntimeGatewayMiddleware(client)
-    middleware.artifact_input_failures = 2
+    middleware.artifact_input_failures = 1
     engine = GatewayPermissionEngine(_DelegateEngine(PermissionBehavior.ALLOW, client.events), middleware)
     decision = await engine.check_permission(SimpleNamespace(name="artifact_generate"), {"artifact_type": "docx"})
     assert decision.behavior == PermissionBehavior.ALLOW
-    assert middleware.artifact_input_failures == 2
+    assert middleware.artifact_input_failures == 1
 
 
 @pytest.mark.asyncio
@@ -737,12 +737,12 @@ async def test_execution_validation_failures_share_the_preflight_budget():
     async def forbidden(**kwargs):
         raise AssertionError("local execution forbidden")
         yield
-    for i in range(3):
+    for i in range(2):
         payload = {"artifact_type": "docx"}
         await engine.check_permission(SimpleNamespace(name="artifact_generate"), payload)
         call = ToolCallBlock(id=f"call-{i}", name="artifact_generate", input=json.dumps(payload))
         _ = [item async for item in middleware.on_acting(SimpleNamespace(), {"tool_call": call}, forbidden)]
-    assert middleware.artifact_input_failures == 3
+    assert middleware.artifact_input_failures == 2
     with pytest.raises(Exception) as error:
         await middleware.on_model_call(None, {}, None)
     assert getattr(error.value, "error_code", "") == "ARTIFACT_VALIDATION_FAILED"
