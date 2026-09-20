@@ -155,7 +155,7 @@ async def test_native_mcp_call_uses_fake_mineru_and_reads_large_result(
             ) as (read_stream, write_stream, _):
                 async with ClientSession(read_stream, write_stream) as session:
                     await session.initialize()
-                    parsed = await session.call_tool(
+                    parsed = await authorized_call(session,
                         "parse_documents",
                         {
                             "documents": [
@@ -180,7 +180,7 @@ async def test_native_mcp_call_uses_fake_mineru_and_reads_large_result(
                     assert item["page_count"] == 12
                     assert item["markdown"] is None
 
-                    chunks = await session.call_tool(
+                    chunks = await authorized_call(session,
                         "read_document_chunks",
                         {"document_ref": item["document_ref"], "limit": 2},
                     )
@@ -193,3 +193,9 @@ async def test_native_mcp_call_uses_fake_mineru_and_reads_large_result(
     assert requests == (["/health", "/file_parse"] if submit_mode == "file_parse" else [
         "/health", "/tasks", "/tasks/synthetic_task", "/tasks/synthetic_task/result",
     ])
+
+
+async def authorized_call(session, name, arguments):
+    from bank_runtime.gateway.document_access import approved_document_call
+    with approved_document_call("task_001", name, arguments) as metadata:
+        return await session.call_tool(name, arguments, meta=metadata)

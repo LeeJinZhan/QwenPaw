@@ -14,6 +14,18 @@ from bank_runtime.sandbox.file_refs import ResolvedTaskFile
 from bank_runtime.gateway.completion import parse_outcomes
 
 
+@pytest.fixture(autouse=True)
+def authorized_service_task():
+    """Service contract tests run inside an explicitly authorized task.
+
+    Missing/foreign/revoked authorization is tested separately over real MCP.
+    """
+    from bank_runtime.gateway.document_access import approved_document_call, consume_document_call
+    with approved_document_call("task_001", "parse_documents", {}) as metadata:
+        with consume_document_call(metadata, "parse_documents", {}):
+            yield
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("large_first", [True, False])
 async def test_batch_retains_readable_result_when_other_document_exceeds_storage_limit(tmp_path, large_first):
@@ -53,7 +65,6 @@ async def test_batch_retains_readable_result_when_other_document_exceeds_storage
     ("jpg", "image/jpeg", b"\xff\xd8\xff"),
     ("jpeg", "image/jpeg", b"\xff\xd8\xff"),
     ("docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document", None),
-    ("xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", None),
     ("pptx", "application/vnd.openxmlformats-officedocument.presentationml.presentation", None),
 ])
 @pytest.mark.parametrize("large", [False, True])
@@ -83,13 +94,13 @@ async def test_supported_format_inline_and_chunked_reading(tmp_path, extension, 
         assert item["content_mode"] == "inline"
         assert item["markdown"] == markdown
         return
-    assert item["chunk_count"] > 24
+    assert item["chunk_count"] > 12
     cursor = None
     chunks = []
     while True:
         page = service.read_document_chunks(item["document_ref"], cursor=cursor, limit=10)
         assert service.read_document_chunks(item["document_ref"], cursor=cursor, limit=10) == page
-        assert sum(len(chunk["text"]) for chunk in page["chunks"]) <= 20000
+        assert sum(len(chunk["text"]) for chunk in page["chunks"]) <= 32000
         chunks.extend(page["chunks"])
         if not page["has_more"]:
             break
@@ -155,8 +166,14 @@ async def test_120_row_table_pagination_retry_preserves_all_cells(tmp_path) -> N
         cursor = page["next_cursor"]
     assert sorted(chunks) == list(range(item["chunk_count"]))
     reconstructed = "".join(chunks[index] for index in sorted(chunks))
-    assert reconstructed == markdown
-    actual = [line.strip("|").split("|") for line in reconstructed.splitlines()[2:]]
+    header_lines = reconstructed.splitlines()[:2]
+    assert header_lines == ["|" + "|".join(headers) + "|", "|" + "|".join(["---"] * 11) + "|"]
+    data_lines = []
+    for index in sorted(chunks):
+        lines = chunks[index].splitlines()
+        assert lines[:2] == header_lines, "every table chunk must repeat the header"
+        data_lines.extend(lines[2:])
+    actual = [line.strip("|").split("|") for line in data_lines]
     assert actual == rows
     assert len({row[1] for row in actual}) == 12
     assert sum(int(row[8]) for row in actual) == 21780

@@ -120,6 +120,7 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
         self.conversion_failures: dict[str, str] = {}
         self.document_reads = DocumentReadLedger()
         self._read_guard_failed = False
+        self._reply_text: list[str] = []
         self.native_skills: NativeSkillReader | None = None
         self.allowed_tool_names: frozenset[str] | None = None
 
@@ -142,8 +143,10 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
         self.conversion_failures.clear()
         self.document_reads = DocumentReadLedger()
         self._read_guard_failed = False
+        self._reply_text: list[str] = []
         if self.artifact_intent is None:
             async for item in next_handler(**input_kwargs):
+                self._collect_reply_text(item)
                 yield item
             self._raise_layout_failure()
             self._check_file_completion()
@@ -152,11 +155,25 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
         self._artifact_turn_state = _ArtifactTurnState(intent=self.artifact_intent)
         try:
             async for item in next_handler(**input_kwargs):
+                self._collect_reply_text(item)
                 yield item
             self._raise_layout_failure()
             self._check_file_completion()
         finally:
             self._artifact_turn_state = previous_state
+            self._reply_text = []
+
+    def _collect_reply_text(self, item) -> None:
+        content = getattr(item, "content", None)
+        if not isinstance(content, list):
+            return
+        for block in content:
+            kind = block.get("type") if isinstance(block, Mapping) else getattr(block, "type", "")
+            if kind != "text":
+                continue
+            text = block.get("text") if isinstance(block, Mapping) else getattr(block, "text", "")
+            if isinstance(text, str):
+                self._reply_text.append(text)
 
     def _read_error(self):
         from ..sandbox.tools import attachment_read_error
@@ -178,6 +195,9 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
             raise ArtifactInputRetryExhaustedError()
         if self._read_error():
             raise DocumentReadIncompleteError(self._read_error())
+        conflict = self.document_reads.declaration_conflict("".join(self._reply_text or []))
+        if conflict:
+            raise DocumentReadIncompleteError(conflict)
         if self.unresolved_file_operations:
             raise FileOperationsIncompleteError()
 
@@ -520,6 +540,21 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
         prepared.claimed = True
         return prepared
 
+    async def _authorized_native_call(self, tool_name, tool_input, next_handler):
+        from .document_access import DOCUMENT_TOOLS, DocumentAccessError, approved_document_call
+
+        raw_name = tool_name.removeprefix("MinerU__")
+        if tool_name != "MinerU__" + raw_name or raw_name not in DOCUMENT_TOOLS:
+            async for item in next_handler():
+                yield item
+            return
+        task_id = getattr(getattr(self.client, "config", None), "task_id", "")
+        if raw_name != "parse_documents" and tool_input.get("document_ref") not in self.document_reads.documents:
+            raise DocumentAccessError()
+        with approved_document_call(task_id, raw_name, tool_input):
+            async for item in next_handler():
+                yield item
+
     async def on_acting(
         self,
         agent: Any,
@@ -695,7 +730,7 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
                 result_reported = True
                 yield response
                 return
-            async for item in next_handler():
+            async for item in self._authorized_native_call(tool_name, tool_input, next_handler):
                 if isinstance(item, ToolResponse) and not result_reported:
                     self.document_reads.observe(tool_name, tool_input, item.content, item.state == ToolResultState.SUCCESS)
                     keys = operation_keys(tool_name, tool_input)
@@ -718,7 +753,9 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
                                     self.unresolved_file_operations.difference_update(recovered - failed_keys)
                                     self.document_reads.recover_sources({key.removeprefix("parse:") for key in recovered - failed_keys}, preserve_file_id=key.removeprefix("parse:"))
                     status, error_code = _result_status(item)
-                    if tool_name.endswith(("parse_documents", "read_document_chunks")):
+                    if tool_name.endswith((
+                        "parse_documents", "read_document_chunks", "read_range", "aggregate", "search",
+                    )):
                         reason = result_error(item.content)
                         if reason:
                             status, error_code = "failed", reason

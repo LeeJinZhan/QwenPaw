@@ -1,3 +1,4 @@
+from types import SimpleNamespace
 import json
 
 import pytest
@@ -9,6 +10,7 @@ from bank_runtime.artifact_tools import FileOperationsIncompleteError
 
 
 class Client:
+    config = SimpleNamespace(task_id="task_001")
     def __init__(self):
         self.reports = []
         self.executions = []

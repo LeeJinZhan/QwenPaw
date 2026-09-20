@@ -34,13 +34,6 @@ class _DocumentEntry:
     expires_at: datetime
 
 
-@dataclass(frozen=True)
-class _CursorEntry:
-    document_hash: str
-    offset: int
-    expires_at: datetime
-
-
 class DocumentStore:
     def __init__(
         self,
@@ -53,15 +46,14 @@ class DocumentStore:
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self.root = Path(root).expanduser().resolve()
-        self.key = process_start_key or secrets.token_bytes(32)
-        if len(self.key) < 32:
-            raise ValueError("process_start_key must contain at least 32 bytes")
+        self.key = process_start_key or _load_key(self.root / ".bank-mineru-layout.key")
         self.max_document_bytes = max(1, int(max_document_bytes))
         self.max_task_bytes = max(self.max_document_bytes, int(max_task_bytes))
         self.ttl_seconds = max(60, min(int(ttl_seconds), 604_800))
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         self._documents: dict[str, _DocumentEntry] = {}
-        self._cursors: dict[str, _CursorEntry] = {}
+        self._verified: dict[str, tuple[int, int]] = {}
+        self._recover()
 
     def write(self, source, document: NormalizedDocument) -> DocumentHandle:
         now = _utc(self.clock())
@@ -110,7 +102,9 @@ class DocumentStore:
         nonce = secrets.token_bytes(32)
         document_hash = hashlib.sha256(nonce).hexdigest()
         target = derived_root / f"{document_hash}.chunks.jsonl"
+        offsets_target = derived_root / f"{document_hash}.offsets.json"
         temporary = derived_root / f".{document_hash}.{uuid.uuid4().hex}.part"
+        offsets = _line_offsets(payload)
         try:
             with temporary.open("xb") as handle:
                 os.chmod(temporary, 0o600)
@@ -119,9 +113,12 @@ class DocumentStore:
                 os.fsync(handle.fileno())
             os.replace(temporary, target)
             os.chmod(target, 0o600)
+            offsets_target.write_text(json.dumps(offsets), encoding="ascii")
+            os.chmod(offsets_target, 0o600)
         except BaseException:
             temporary.unlink(missing_ok=True)
             target.unlink(missing_ok=True)
+            offsets_target.unlink(missing_ok=True)
             raise
         entry = _DocumentEntry(
             task_id=source.task_id,
@@ -133,6 +130,9 @@ class DocumentStore:
             expires_at=expiry,
         )
         self._documents[document_hash] = entry
+        stat = target.stat()
+        self._verified[document_hash] = (stat.st_size, stat.st_mtime_ns)
+        _write_manifest(target, entry, document_hash, offsets_target.name)
         document_ref = self._token("dr1", nonce)
         return DocumentHandle(
             document_ref=document_ref,
@@ -164,57 +164,95 @@ class DocumentStore:
             raise DocumentStoreError(
                 "DOCUMENT_REF_EXPIRED", "Document reference expired"
             )
-        body = path.read_bytes()
-        if len(body) > self.max_document_bytes or not hmac.compare_digest(
-            hashlib.sha256(body).hexdigest(),
-            entry.sha256,
-        ):
-            raise DocumentStoreError(
-                "FILE_REF_INVALID", "Document result integrity failed"
-            )
-        offset = 0
-        if cursor:
-            cursor_hash = self._token_hash("cur1", cursor)
-            cursor_entry = self._cursors.get(cursor_hash)
-            if (
-                cursor_entry is None
-                or cursor_entry.document_hash != document_hash
-                or cursor_entry.expires_at <= _utc(self.clock())
+        stat = path.stat()
+        stamp = (stat.st_size, stat.st_mtime_ns)
+        if self._verified.get(document_hash) != stamp:
+            body = path.read_bytes()
+            if len(body) > self.max_document_bytes or not hmac.compare_digest(
+                hashlib.sha256(body).hexdigest(),
+                entry.sha256,
             ):
                 raise DocumentStoreError(
-                    "DOCUMENT_REF_EXPIRED", "Document cursor expired"
+                    "FILE_REF_INVALID", "Document result integrity failed"
                 )
-            offset = cursor_entry.offset
-        chunks = tuple(
-            NormalizedChunk(**json.loads(line))
-            for line in body.decode("utf-8").splitlines()
-            if line
-        )
-        page_chunks = chunks[offset : offset + int(limit)]
+            self._verified[document_hash] = stamp
+        offsets_path = path.with_name(path.name.replace(".chunks.jsonl", ".offsets.json"))
+        try:
+            offsets = json.loads(offsets_path.read_text(encoding="ascii"))
+            total = len(offsets)
+        except (OSError, json.JSONDecodeError):
+            offsets = None
+            total = entry.chunk_count
+        offset = 0
+        if cursor:
+            offset = self._cursor_offset("cur1", cursor, document_hash)
+        page_chunks = self._read_page(path, offsets, offset, int(limit), total)
+        # Bound the serialized UTF-8 page, including metadata and cursor overhead.
+        while page_chunks and len(json.dumps([asdict(c) for c in page_chunks], ensure_ascii=False, indent=2).encode("utf-8")) > 30000:
+            page_chunks = page_chunks[:-1]
+        if not page_chunks and offset < total:
+            raise DocumentStoreError("DOCUMENT_RESULT_TOO_LARGE", "A document block exceeds the response budget")
         next_offset = offset + len(page_chunks)
-        has_more = next_offset < len(chunks)
-        next_cursor = None
-        if has_more:
-            # A read retry must return the same continuation, without consuming
-            # its input cursor or allocating more cursor entries on every retry.
-            # The keyed value remains opaque and bound to this stored document.
-            cursor_nonce = hmac.new(
-                self.key,
-                f"chunk-cursor\0{document_hash}\0{next_offset}".encode(),
-                hashlib.sha256,
-            ).digest()
-            self._cursors[hashlib.sha256(cursor_nonce).hexdigest()] = _CursorEntry(
-                document_hash=document_hash,
-                offset=next_offset,
-                expires_at=entry.expires_at,
-            )
-            next_cursor = self._token("cur1", cursor_nonce)
+        has_more = next_offset < total
+        next_cursor = (
+            self._cursor_token("cur1", document_hash, next_offset) if has_more else None
+        )
         return ChunkPage(
             document_ref=document_ref,
             chunks=page_chunks,
             next_cursor=next_cursor,
             has_more=has_more,
+            coverage=(next_offset, total),
         )
+
+    def _read_page(self, path: Path, offsets, offset: int, limit: int, total: int):
+        chunks = []
+        if offsets is None:
+            body = path.read_bytes()
+            all_chunks = tuple(
+                NormalizedChunk(**json.loads(line))
+                for line in body.decode("utf-8").splitlines()
+                if line
+            )
+            return all_chunks[offset : offset + limit]
+        with path.open("rb") as handle:
+            handle.seek(offsets[min(offset, len(offsets) - 1)])
+            for position, line in enumerate(handle):
+                if position + offset >= offset + limit:
+                    break
+                if position + offset >= total:
+                    break
+                if line.strip():
+                    chunks.append(NormalizedChunk(**json.loads(line)))
+        return tuple(chunks)
+
+    def _recover(self) -> None:
+        if not self.root.is_dir() or self.root.is_symlink():
+            return
+        for task_root in self.root.iterdir():
+            derived = task_root / ".mineru"
+            if not task_root.is_dir() or derived.is_symlink() or not derived.is_dir():
+                continue
+            for manifest in derived.glob("*.manifest.json"):
+                try:
+                    payload = json.loads(manifest.read_text(encoding="utf-8"))
+                    expires = datetime.fromisoformat(payload["expires_at"])
+                    if expires <= _utc(self.clock()):
+                        continue
+                    chunks_path = manifest.with_name(payload["chunks_file"])
+                    if not chunks_path.is_file():
+                        continue
+                    self._documents[payload["document_hash"]] = _DocumentEntry(
+                        task_id=payload["task_id"],
+                        path=chunks_path,
+                        title=payload["title"],
+                        page_count=payload["page_count"],
+                        chunk_count=payload["chunk_count"],
+                        sha256=payload["sha256"],
+                        expires_at=expires,
+                    )
+                except (OSError, ValueError, KeyError, json.JSONDecodeError):
+                    continue
 
     def delete_task(self, task_id: str) -> None:
         normalized = str(task_id or "").strip()
@@ -237,15 +275,11 @@ class DocumentStore:
         ]
         for key in expired:
             self._expire_document(key)
-        self._cursors = {
-            key: value for key, value in self._cursors.items() if value.expires_at > now
-        }
         return len(expired)
 
     def clear_all(self) -> None:
         for document_hash in list(self._documents):
             self._expire_document(document_hash)
-        self._cursors.clear()
         if not self.root.is_dir() or self.root.is_symlink():
             return
         for task_root in self.root.iterdir():
@@ -260,13 +294,39 @@ class DocumentStore:
 
     def _expire_document(self, document_hash: str) -> None:
         entry = self._documents.pop(document_hash, None)
+        self._verified.pop(document_hash, None)
         if entry is not None:
             entry.path.unlink(missing_ok=True)
-        self._cursors = {
-            key: value
-            for key, value in self._cursors.items()
-            if value.document_hash != document_hash
-        }
+            entry.path.with_name(entry.path.name.replace(".chunks.jsonl", ".offsets.json")).unlink(
+                missing_ok=True
+            )
+            entry.path.with_name(entry.path.name.replace(".chunks.jsonl", ".manifest.json")).unlink(
+                missing_ok=True
+            )
+
+    def _cursor_token(self, prefix: str, document_hash: str, offset: int) -> str:
+        message = f"{prefix}\0{document_hash}\0{offset}".encode()
+        nonce = hmac.new(self.key, message, hashlib.sha256).digest()[:16]
+        mac = hmac.new(self.key, message + nonce, hashlib.sha256).digest()
+        return f"{prefix}_{offset}_{nonce.hex()}_{mac.hex()}"
+
+    def _cursor_offset(self, prefix: str, cursor: str, document_hash: str) -> int:
+        parts = str(cursor or "").split("_")
+        if len(parts) != 4 or parts[0] != prefix:
+            raise DocumentStoreError("FILE_REF_INVALID", "Document cursor is invalid")
+        try:
+            offset = int(parts[1])
+            nonce = bytes.fromhex(parts[2])
+            supplied = bytes.fromhex(parts[3])
+        except ValueError as exc:
+            raise DocumentStoreError(
+                "FILE_REF_INVALID", "Document cursor is invalid"
+            ) from exc
+        message = f"{prefix}\0{document_hash}\0{offset}".encode()
+        expected = hmac.new(self.key, message + nonce, hashlib.sha256).digest()
+        if not hmac.compare_digest(supplied, expected):
+            raise DocumentStoreError("FILE_REF_INVALID", "Document cursor is invalid")
+        return max(0, offset)
 
     def _token(self, prefix: str, nonce: bytes) -> str:
         mac = hmac.new(
@@ -301,6 +361,48 @@ def _utc(value: datetime) -> datetime:
     if value.tzinfo is None:
         raise ValueError("datetime must be timezone-aware")
     return value.astimezone(timezone.utc)
+
+
+def _load_key(path: Path) -> bytes:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.is_file():
+        os.chmod(path, 0o600)
+        token = path.read_bytes()
+        if len(token) >= 32:
+            return token
+        path.unlink()
+    token = secrets.token_bytes(32)
+    with path.open("xb") as handle:
+        os.chmod(path, 0o600)
+        handle.write(token)
+    return token
+
+
+def _line_offsets(payload: bytes) -> list[int]:
+    offsets = []
+    position = 0
+    for line in payload.splitlines(keepends=True):
+        if line.strip():
+            offsets.append(position)
+        position += len(line)
+    return offsets
+
+
+def _write_manifest(path: Path, entry: _DocumentEntry, document_hash: str, offsets_file: str) -> None:
+    manifest = {
+        "document_hash": document_hash,
+        "task_id": entry.task_id,
+        "title": entry.title,
+        "page_count": entry.page_count,
+        "chunk_count": entry.chunk_count,
+        "sha256": entry.sha256,
+        "expires_at": entry.expires_at.isoformat(),
+        "chunks_file": path.name,
+        "offsets_file": offsets_file,
+    }
+    target = path.with_name(path.name.replace(".chunks.jsonl", ".manifest.json"))
+    target.write_text(json.dumps(manifest, ensure_ascii=False), encoding="utf-8")
+    os.chmod(target, 0o600)
 
 
 __all__ = ["DocumentStore", "DocumentStoreError"]

@@ -39,6 +39,7 @@ class ChunkPage:
     chunks: tuple[NormalizedChunk, ...]
     next_cursor: str | None
     has_more: bool
+    coverage: tuple[int, int] | None = None
 
 
 __all__ = [

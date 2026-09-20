@@ -21,6 +21,7 @@ PAYLOAD = {"source_type": "session_file", "source_id": "source", "target_format"
 
 
 class Client:
+    config = SimpleNamespace(task_id="task_001")
     def __init__(self, report=REPORT):
         self.executions = []
         self.reports = []

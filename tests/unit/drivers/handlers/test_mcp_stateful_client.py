@@ -532,3 +532,23 @@ async def test_reload_raises_when_not_connected():
     c = _client()
     with pytest.raises(RuntimeError, match="not connected"):
         await c.reload()
+
+
+@pytest.mark.asyncio
+async def test_call_metadata_is_scoped_and_never_added_to_tool_arguments():
+    from qwenpaw.drivers.mcp_context import mcp_call_metadata, current_mcp_metadata
+    c = _client()
+    c.is_connected = True
+    calls = []
+    class Session:
+        async def call_tool(self, name, arguments, **kwargs):
+            calls.append((name, arguments, kwargs))
+            return "ok"
+    c.session = Session()
+    arguments = {"document_ref": "opaque"}
+    with mcp_call_metadata({"opaque_grant": "nonce"}):
+        assert await c.call_tool("read", arguments) == "ok"
+    assert current_mcp_metadata() is None
+    await c.call_tool("read", arguments)
+    assert calls == [("read", arguments, {"meta": {"opaque_grant": "nonce"}}), ("read", arguments, {})]
+    assert arguments == {"document_ref": "opaque"}

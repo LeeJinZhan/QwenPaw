@@ -24,3 +24,19 @@ def test_normalization_marks_missing_per_file_result_as_failed() -> None:
         upload_stems={"file_001": "file_file_001"},
     )
     assert result["file_001"].error_code == "MINERU_PARSE_FAILED"
+
+
+def test_empty_tables_and_pipe_prefixed_prose_are_never_discarded():
+    for markdown in ['| 姓名 | 金额 |\n| --- | --- |\n', '|这是原文的一行\n',
+                     '开头\n|原文1\n|原文2\n正文\n', '```\n| a | b |\n| --- | --- |\n```\n']:
+        doc = normalize_mineru_result({'results':{'x':{'md_content':markdown}}}, upload_stems={'f':'x'})['f']
+        assert ''.join(chunk.text for chunk in doc.chunks) == markdown
+
+
+def test_table_pages_repeat_only_a_valid_header_and_preserve_every_row():
+    header = '| 姓名 | 金额 |\n| :--- | ---: |\n'
+    rows = [f'| 员工{i} | {i} |\n' for i in range(20)]
+    doc = normalize_mineru_result({'results':{'x':{'md_content':header+''.join(rows)}}}, upload_stems={'f':'x'},chunk_chars=70)['f']
+    assert len(doc.chunks) > 1
+    assert all(c.text.startswith(header) for c in doc.chunks)
+    assert ''.join(c.text[len(header):] for c in doc.chunks) == ''.join(rows)

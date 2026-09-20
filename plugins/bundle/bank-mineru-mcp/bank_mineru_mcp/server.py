@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import os
 from pathlib import Path
 from typing import Any
@@ -14,7 +15,9 @@ import uvicorn
 from .config import MinerUSettings
 from .document_store import DocumentStore
 from .mineru_client import build_mineru_client
+from .structured_store import StructuredStore
 from .tools import MinerUToolService, ToolContractError
+from .recovery import recovery_hint
 
 
 class RuntimeDocumentRef(BaseModel):
@@ -56,11 +59,26 @@ class MinerUMcpService:
         self._started = False
         self._closed = False
 
+    async def _authorized_call(self, name, arguments):
+        from bank_runtime.gateway.document_access import consume_document_call, DocumentAccessError
+
+        try:
+            metadata = self.mcp.get_context().request_context.meta
+        except ValueError as exc:
+            # Direct invocation outside an MCP request is not authorized.
+            raise ToolContractError("FILE_ACCESS_DENIED", "Current task authorization is required") from exc
+        try:
+            with consume_document_call(metadata, name, arguments):
+                result = getattr(self.tool_service, name)(**arguments)
+                return await result if inspect.isawaitable(result) else result
+        except DocumentAccessError as exc:
+            raise ToolContractError(exc.code, str(exc)) from exc
+
     def _register_tools(self) -> None:
         @self.mcp.tool(
             name="parse_documents",
             description=(
-                "Parse 1-5 Runtime-authorized documents with MinerU. "
+                "Parse 1-5 Runtime-authorized documents. XLSX/CSV/TSV use local structured extraction; other formats use MinerU. For structured results use read_range/aggregate/search. "
                 "Each document must contain both file_id and its paired opaque "
                 "file_ref from the current attachment; never pass paths or URLs."
             ),
@@ -73,14 +91,12 @@ class MinerUMcpService:
             options: dict[str, bool] | None = None,
         ) -> dict[str, Any]:
             try:
-                return await self.tool_service.parse_documents(
-                    [document.model_dump() for document in documents],
-                    parse_method=parse_method,
-                    language=language,
-                    options=options,
-                )
+                return await self._authorized_call("parse_documents", {
+                    "documents": [document.model_dump() for document in documents],
+                    "parse_method": parse_method, "language": language, "options": options,
+                })
             except ToolContractError as exc:
-                return {"status": "failed", "error_code": exc.code, "items": []}
+                return {"status": "failed", "error_code": exc.code, "recovery_hint": recovery_hint(exc.code), "items": []}
 
         @self.mcp.tool(
             name="read_document_chunks",
@@ -91,7 +107,8 @@ class MinerUMcpService:
                 "restarts at the beginning. Retrying the same cursor and limit "
                 "returns the same page while the document remains valid; "
                 "deduplicate chunks by index. Do not infer full-table totals "
-                "from previews or incomplete pages."
+                "from previews or incomplete pages. Supports layout and structured results; "
+                "structured workbooks use read_range/aggregate/search."
             ),
             structured_output=True,
         )
@@ -101,13 +118,74 @@ class MinerUMcpService:
             limit: int = 5,
         ) -> dict[str, Any]:
             try:
-                return self.tool_service.read_document_chunks(
-                    document_ref,
-                    cursor=cursor,
-                    limit=limit,
-                )
+                return await self._authorized_call("read_document_chunks", {"document_ref": document_ref, "cursor": cursor, "limit": limit})
             except ToolContractError as exc:
-                return {"status": "failed", "error_code": exc.code}
+                return {"status": "failed", "error_code": exc.code, "recovery_hint": recovery_hint(exc.code)}
+
+        @self.mcp.tool(
+            name="read_range",
+            description=(
+                "Read a bounded row range from one sheet of a structured "
+                "document_ref (xlsx/csv/tsv). Pass sheet name, rows=[start,end] "
+                "or continue with next_row_cursor; optional columns projection; "
+                "format markdown (header repeated) or records. Pages are capped "
+                "at 32000 UTF-8 bytes including metadata; echo fields report the served range and sheet "
+                "totals. Never infer values outside the echoed range."
+            ),
+            structured_output=True,
+        )
+        async def read_range(
+            document_ref: str,
+            sheet: str | None = None,
+            rows: list[int] | None = None,
+            row_cursor: int | None = None,
+            columns: list[str] | None = None,
+            format: str = "markdown",
+            include_header: bool = True,
+        ) -> dict[str, Any]:
+            try:
+                return await self._authorized_call("read_range", {"document_ref": document_ref, "sheet": sheet, "rows": rows, "row_cursor": row_cursor, "columns": columns, "format": format, "include_header": include_header})
+            except ToolContractError as exc:
+                return {"status": "failed", "error_code": exc.code, "recovery_hint": recovery_hint(exc.code)}
+
+        @self.mcp.tool(
+            name="aggregate",
+            description=(
+                "Compute bounded server-side statistics over structured sheets: "
+                "ops with sheet, optional group_by, metrics (sum/avg/count/"
+                "count_distinct/min/max/median), optional filter and row_range, "
+                "or cross_sheet_union by a shared key column. Results include "
+                "rows_scanned/rows_matched/full_range so scope can be stated "
+                "honestly. Use this instead of reading every row for totals."
+            ),
+            structured_output=True,
+        )
+        async def aggregate(document_ref: str, ops: list[dict[str, Any]]) -> dict[str, Any]:
+            try:
+                return await self._authorized_call("aggregate", {"document_ref": document_ref, "ops": ops})
+            except ToolContractError as exc:
+                return {"status": "failed", "error_code": exc.code, "recovery_hint": recovery_hint(exc.code)}
+
+        @self.mcp.tool(
+            name="search",
+            description=(
+                "Locate rows containing a substring (or simple pattern) across "
+                "sheets of a structured document_ref; returns sheet, row number "
+                "and values, capped at limit (<=100). Use to find relevant rows "
+                "before reading ranges."
+            ),
+            structured_output=True,
+        )
+        async def search(
+            document_ref: str,
+            query: str,
+            sheet: str | None = None,
+            limit: int = 100,
+        ) -> dict[str, Any]:
+            try:
+                return await self._authorized_call("search", {"document_ref": document_ref, "query": query, "sheet": sheet, "limit": limit})
+            except ToolContractError as exc:
+                return {"status": "failed", "error_code": exc.code, "recovery_hint": recovery_hint(exc.code)}
 
     async def start(self) -> None:
         if self._started:
@@ -189,10 +267,16 @@ def build_mineru_mcp_service(
         max_task_bytes=settings.task_result_max_bytes,
         ttl_seconds=settings.temp_ttl_seconds,
     )
+    structured = StructuredStore(
+        root=root,
+        max_task_bytes=settings.task_result_max_bytes,
+        ttl_seconds=settings.temp_ttl_seconds,
+    )
     tools = MinerUToolService(
         file_resolver=file_resolver,
         mineru_client=client,
         document_store=store,
+        structured_store=structured,
         inline_max_chars=settings.inline_max_chars,
     )
     return MinerUMcpService(
