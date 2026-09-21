@@ -268,3 +268,18 @@ async def test_parse_documents_rejects_mismatched_file_id_and_forbidden_shape(
                 {"file_id": "file_001", "file_ref": "fr1", "url": "http://forbidden"}
             ],
         )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('kwargs,reason', [
+    ({'parse_method':'unsupported'},'PARSE_METHOD'),
+    ({'language':'unsupported'},'PARSE_LANGUAGE'),
+    ({'options':{'url':'private'}},'PARSE_OPTIONS'),
+])
+async def test_parse_parameter_errors_are_not_misreported_as_invalid_file_refs(tmp_path,kwargs,reason):
+    service=MinerUToolService(file_resolver=None,mineru_client=None,document_store=DocumentStore(root=tmp_path))
+    with pytest.raises(ToolContractError) as error:
+        await service.parse_documents([{'file_id':'file_001','file_ref':'token'}],**kwargs)
+    assert error.value.code=='DOCUMENT_ARGUMENT_INVALID'
+    assert error.value.argument_error['reason']==reason
+    assert 'private' not in str(error.value.argument_error)

@@ -69,9 +69,11 @@ class _Read:
     no_progress: int = 0
     error: str = ""
     inventory: dict[str, int] = field(default_factory=dict)
+    inventory_complete: bool = True
     column_names: set[str] = field(default_factory=set)
     covered: dict[str, list] = field(default_factory=dict)
     aggregates: list[dict] = field(default_factory=list)
+    aggregate_pages: dict[str, list[list[int]]] = field(default_factory=dict)
     touched: set = field(default_factory=set)
 
     @property
@@ -83,7 +85,7 @@ class _Read:
         if self.error:
             return False
         if self.structured:
-            return all(self.sheet_full(name) for name in self.inventory)
+            return self.inventory_complete and all(self.sheet_full(name) for name in self.inventory)
         return self.terminal and len(self.chunks) == self.total
 
     def sheet_full(self, name: str) -> bool:
@@ -112,14 +114,21 @@ class _Read:
 class DocumentReadLedger:
     def __init__(self):
         self.documents: dict[str, _Read] = {}
+        self.source_refs: dict[str, str] = {}
         self.failures: dict[str, str] = {}
         self.attempts: dict[str, int] = {}
+        self.argument_failures: dict[str, int] = {}
 
     @property
     def pending(self):
         return bool(self.failures) or any(
             not doc.complete for doc in self.documents.values() if not doc.structured
         )
+
+    @property
+    def argument_retry_exhausted(self):
+        return any(self.argument_failures.get(key, 0) >= 2
+                   for key, code in self.failures.items() if code == "DOCUMENT_ARGUMENT_INVALID")
 
     @property
     def error_code(self):
@@ -129,6 +138,8 @@ class DocumentReadLedger:
             return "ARTIFACT_OUTPUT_MISSING"
         if "MINERU_SUBMIT_AMBIGUOUS" in self.failures.values():
             return "MINERU_SUBMIT_AMBIGUOUS"
+        if "DOCUMENT_ARGUMENT_INVALID" in self.failures.values():
+            return "DOCUMENT_ARGUMENT_INVALID"
         if any(self.attempts.get(key, 0) >= 3 for key in self.failures):
             return "DOCUMENT_READ_NO_PROGRESS"
         for doc in self.documents.values():
@@ -156,6 +167,10 @@ class DocumentReadLedger:
     def observe(self, name, payload, content, success):
         values = result_objects(content)
         code = result_error(content)
+        if code == "DOCUMENT_ARGUMENT_INVALID" and name.endswith(("parse_documents", "read_range", "aggregate", "read_document_chunks")):
+            keys = ["parse:" + str(item.get("file_id") or "") for item in payload.get("documents", []) if isinstance(item, Mapping)] if name.endswith("parse_documents") else ["read:" + str(payload.get("document_ref") or "")]
+            for key in keys:
+                self.argument_failures[key] = self.argument_failures.get(key, 0) + 1
         if name.endswith("read_range"):
             return self._observe_read_range(name, payload, values, code, success)
         if name.endswith("aggregate"):
@@ -183,6 +198,12 @@ class DocumentReadLedger:
                     continue
                 item = items[0]
                 mode, ref, count = next(iter(signatures))
+                if isinstance(ref, str) and ref:
+                    sources = {entry.get("file_ref") for entry in payload.get("documents", [])
+                               if isinstance(entry, Mapping) and entry.get("file_id") == file_id
+                               and isinstance(entry.get("file_ref"), str)}
+                    if len(sources) == 1:
+                        self.source_refs[ref] = next(iter(sources))
                 if mode not in (None, "inline", "chunked", "structured"):
                     continue
                 if mode == "structured":
@@ -201,6 +222,7 @@ class DocumentReadLedger:
                             self.failures.pop("read:" + old_ref, None)
                     self.documents[ref] = _Read(
                         file_id, sum(inventory.values()), inventory=inventory,
+                        inventory_complete=raw_inventory.get("inventory_complete", True) is True,
                         column_names={column["name"] for sheet in raw_inventory.get("sheets", [])
                                       if isinstance(sheet, Mapping) for column in sheet.get("columns", [])
                                       if isinstance(column, Mapping) and isinstance(column.get("name"), str)}
@@ -280,6 +302,7 @@ class DocumentReadLedger:
             doc.terminal = True
         self.failures.pop(key, None)
         self.attempts.pop(key, None)
+        self.argument_failures.pop(key, None)
         return
 
     def _observe_structured_chunks(self, payload, values, doc, key):
@@ -324,6 +347,7 @@ class DocumentReadLedger:
         doc.error = ""
         self.failures.pop(key, None)
         self.attempts.pop(key, None)
+        self.argument_failures.pop(key, None)
 
     def _observe_read_range(self, name, payload, values, code, success):
         ref = str(payload.get("document_ref") or "")
@@ -337,6 +361,31 @@ class DocumentReadLedger:
         value = values[0]
         if any(v != value for v in values) or value.get("document_ref") != ref:
             self.failures[key] = "DOCUMENT_READ_INCOMPLETE"
+            return
+        if payload.get("format") == "cell" and value.get("content_mode") == "cell":
+            if value.get("sheet") in doc.inventory and isinstance(value.get("text"), str):
+                doc.touched.add(value["sheet"])
+                doc.no_progress = 0
+                self.failures.pop(key, None)
+                self.attempts.pop(key, None)
+                self.argument_failures.pop(key, None)
+            return  # A cell fragment does not prove whole-row coverage.
+        if payload.get("format") == "inventory" and value.get("content_mode") == "inventory":
+            inventory = value.get("inventory")
+            if isinstance(inventory, Mapping):
+                for meta in inventory.get("sheets", []):
+                    if isinstance(meta, Mapping) and isinstance(meta.get("name"), str) and type(meta.get("rows")) is int:
+                        doc.inventory[meta["name"]] = meta["rows"]
+                        doc.column_names.update(c["name"] for c in meta.get("columns", []) if isinstance(c, Mapping) and isinstance(c.get("name"), str))
+                # All sheet names must be known, including earlier pages.
+                doc.inventory_complete = len(doc.inventory) == inventory.get("sheet_count")
+            for meta in value.get("metadata", []):
+                if isinstance(meta, Mapping) and meta.get("kind") == "column" and isinstance(meta.get("name"), str):
+                    doc.column_names.add(meta["name"])
+            doc.no_progress = 0
+            self.failures.pop(key, None)
+            self.attempts.pop(key, None)
+            self.argument_failures.pop(key, None)
             return
         sheet = value.get("sheet")
         echoed = value.get("rows_returned")
@@ -359,6 +408,7 @@ class DocumentReadLedger:
         doc.error = ""
         self.failures.pop(key, None)
         self.attempts.pop(key, None)
+        self.argument_failures.pop(key, None)
 
     def _observe_aggregate(self, name, payload, values, code, success):
         ref = str(payload.get("document_ref") or "")
@@ -371,7 +421,7 @@ class DocumentReadLedger:
             return
         value = values[0]
         if (any(v != value for v in values) or value.get("document_ref") != ref
-                or value.get("truncated") is not False):
+                or type(value.get("truncated")) is not bool):
             self.failures[key] = "DOCUMENT_READ_INCOMPLETE"
             return
         results = value.get("results")
@@ -383,7 +433,12 @@ class DocumentReadLedger:
         if not isinstance(ops, list) or len(ops) != len(results):
             self.failures[key] = "DOCUMENT_READ_INCOMPLETE"
             return
+        if value['truncated'] and not any(isinstance(result, Mapping) and result.get('groups_complete') is False
+                                          and 'group_cursor' in op for op, result in zip(ops, results) if isinstance(op, Mapping)):
+            self.failures[key] = 'DOCUMENT_READ_INCOMPLETE'
+            return
         evidence = []
+        pages = []
         for op, result in zip(ops, results):
             sources = result.get("sources") if isinstance(result, Mapping) else None
             if (not isinstance(op, Mapping) or not isinstance(sources, list) or not sources
@@ -408,7 +463,35 @@ class DocumentReadLedger:
                     (len(names) != 1 or (op.get("sheet") and names != {op["sheet"]}))):
                 self.failures[key] = "DOCUMENT_READ_INCOMPLETE"
                 return
-            evidence.append(dict(result))
+            if 'group_cursor' in op:
+                offset, total, groups = op['group_cursor'], result.get('group_count'), result.get('groups')
+                if (type(offset) is not int or type(total) is not int or offset < 0 or total < 0
+                        or not isinstance(groups, list) or offset + len(groups) > total
+                        or (not groups and (total != 0 or offset != 0))
+                        or result.get('next_group_cursor') != (offset + len(groups) if offset + len(groups) < total else None)
+                        or result.get('groups_complete') is not (offset == 0 and len(groups) == total)):
+                    self.failures[key] = 'DOCUMENT_READ_INCOMPLETE'
+                    return
+                identity = json.dumps({'op': {k: v for k, v in op.items() if k != 'group_cursor'},
+                                       'sources': sources, 'total': total}, sort_keys=True, ensure_ascii=False)
+                pages.append((identity, offset, offset + len(groups), total, dict(result)))
+            else:
+                evidence.append(dict(result))
+        for identity, start, end, total, result in pages:
+            intervals = sorted([*doc.aggregate_pages.get(identity, []), [start, end]])
+            merged = []
+            for lower, upper in intervals:
+                if merged and lower <= merged[-1][1]:
+                    merged[-1][1] = max(merged[-1][1], upper)
+                else:
+                    merged.append([lower, upper])
+            doc.aggregate_pages[identity] = merged
+            doc.touched.update(source['sheet'] for source in result['sources'])
+            if merged == [[0, total]]:
+                # All result pages were observed; this still proves statistics,
+                # never raw row/text coverage. Do not retain every group's data.
+                result.update(groups=[], groups_complete=True, next_group_cursor=None)
+                evidence.append(result)
         for item in evidence:
             if item not in doc.aggregates:
                 doc.aggregates.append(item)
@@ -418,6 +501,7 @@ class DocumentReadLedger:
         doc.error = ""
         self.failures.pop(key, None)
         self.attempts.pop(key, None)
+        self.argument_failures.pop(key, None)
 
     def _observe_search(self, payload, values, success):
         ref = str(payload.get("document_ref") or "")
@@ -436,6 +520,8 @@ class DocumentReadLedger:
         for doc in self.documents.values():
             if not doc.structured:
                 continue
+            if claim_all and not doc.inventory_complete:
+                return "DOCUMENT_READ_INCOMPLETE"
             named = _mentioned_names(doc.inventory, text)
             required = set(doc.inventory) if claim_all else (named or doc.touched)
             if not required:

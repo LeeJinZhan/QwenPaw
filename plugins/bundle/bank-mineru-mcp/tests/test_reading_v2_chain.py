@@ -104,3 +104,74 @@ async def test_five_sheet_excel_wire_pagination_and_coverage(tmp_path):
                 assert restarted.read_range(ref, sheet="年度规划", rows=[1, 3])["rows_scanned"] == 3
     finally:
         await server.stop()
+
+
+@pytest.mark.asyncio
+async def test_merged_multirow_workbook_short_refs_and_metric_alias_through_gateway(tmp_path, monkeypatch):
+    from copy import deepcopy
+    from agentscope.message import ToolCallBlock, ToolResultState
+    from agentscope.permission import PermissionBehavior, PermissionDecision
+    from agentscope.tool import ToolResponse
+    from bank_runtime.gateway.middleware import BankRuntimeGatewayMiddleware, GatewayPermissionEngine
+    from bank_runtime.sandbox import file_refs
+    from bank_runtime.sandbox.file_refs import FileRefRegistry
+    from bank_runtime.sandbox.cache import PreparedSandboxFile
+    from qwenpaw.drivers.mcp_context import current_mcp_metadata
+
+    root=tmp_path/'task_report'; root.mkdir(); path=root/'report.xlsx'
+    book=Workbook(); book.remove(book.active)
+    for name, values in [('本期',[10,20]),('上期',[3,4])]:
+        sheet=book.create_sheet(name); sheet.append(['经营报表',None]); sheet.merge_cells('A1:B1')
+        sheet.append(['部门','金额'])
+        for i,v in enumerate(values): sheet.append([f'部门{i}',v])
+    book.save(path)
+    registry=FileRefRegistry(root=tmp_path); monkeypatch.setattr(file_refs,'_REGISTRY',registry)
+    registry.issue(PreparedSandboxFile(file_id='file_report',local_path=path,
+        content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        size_bytes=path.stat().st_size,original_name=path.name,expires_at='',task_id='task_report'),
+        expires_at=datetime.now(timezone.utc)+timedelta(minutes=10))
+    parser=NoLayoutClient()
+    service=MinerUToolService(file_resolver=registry,mineru_client=parser,document_store=DocumentStore(root=tmp_path),
+        structured_store=StructuredStore(root=tmp_path))
+    with socket.socket() as sock:
+        sock.bind(('127.0.0.1',0)); port=sock.getsockname()[1]
+    server=MinerUMcpService(settings=MinerUSettings(base_url='http://unused.test',submit_mode='file_parse',token='test',mcp_port=port),
+        tool_service=service,mineru_client=parser)
+    class Gateway:
+        config=SimpleNamespace(task_id='task_report')
+        admitted=None
+        async def preflight(self,name,args,**kw): self.admitted=deepcopy(args); return {'tool_call_id':'call'}
+        async def report_guard(self,*args): pass
+        async def report_result(self,*args): pass
+    class Guard:
+        async def check_permission(self,*args): return PermissionDecision(behavior=PermissionBehavior.ALLOW,message='allow')
+    gateway=Gateway(); middleware=BankRuntimeGatewayMiddleware(gateway); engine=GatewayPermissionEngine(Guard(),middleware)
+    await server.start()
+    try:
+        async with streamablehttp_client(f'http://127.0.0.1:{port}/mcp') as (read,write,_):
+            async with ClientSession(read,write) as session:
+                await session.initialize()
+                async def invoke(name,args):
+                    tool='MinerU__'+name
+                    assert (await engine.check_permission(SimpleNamespace(name=tool),args)).behavior==PermissionBehavior.ALLOW
+                    async def handler(**kw):
+                        actual=json.loads(kw['tool_call'].input) if kw else args
+                        assert actual==gateway.admitted
+                        result=await session.call_tool(name,actual,meta=current_mcp_metadata())
+                        yield ToolResponse(id='call',state=ToolResultState.SUCCESS,content=_blocks_from_value(result))
+                    output=[item async for item in middleware.on_acting(None,{'tool_call':ToolCallBlock(id='call',name=tool,input=json.dumps(args))},handler)]
+                    return json.loads(output[0].content[0].text)
+                result=await invoke('parse_documents',{'documents':[{'file_id':'file_report'}]})
+                item=result['items'][0]; assert item['status']=='completed'
+                for meta,expected in zip(item['inventory']['sheets'],[30,7]):
+                    name=meta['name']; column=meta['columns'][1]['name']
+                    first=await invoke('read_range',{'document_ref':'file_report','sheet':name,'rows':['1','1']})
+                    assert first.get('status')!='failed'
+                    stats=await invoke('aggregate',{'document_ref':'file_report','ops':[{'sheet':name,'row_range':[1,meta['rows']],
+                        'metrics':[{'column':column,'op':'sum'}]}]})
+                    assert stats['results'][0]['groups'][0][column+':sum']==expected
+                    assert not middleware.document_reads.pending
+                # Scoped statistics cannot claim all raw cells were read.
+                assert not middleware.document_reads.documents[item['document_ref']].complete
+    finally:
+        await server.stop()

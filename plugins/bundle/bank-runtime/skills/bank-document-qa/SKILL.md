@@ -88,5 +88,30 @@ description: 用于本行制度、业务流程、办理条件、内部产品规�
 ### Reading v2 参数与公式恢复
 
 - `DOCUMENT_ARGUMENT_INVALID` 表示读取参数需要修正：根据 `inventory` 使用精确 sheet/column 名称，列名不得重复，行范围为正整数且起点不大于终点。可以保留有效 document_ref 修正参数后重试；不视为获得更多文件权限。
-- `DOCUMENT_FORMULA_CACHE_MISSING` 表示 XLSX 公式缓存缺失或为错误值，本文件解析失败。请用户在 Excel 中重新计算并保存后重新上传；不得把公式当空值、零或已知数值补算，也不得宣称已完整读取或统计。
+- `DOCUMENT_FORMULA_CACHE_MISSING` 表示 XLSX 公式缓存缺失或为错误值，当前查询依赖不可用的公式值。若 inventory 标记 formula_cache_status=partial，可继续查询不受影响的列/范围，并明确缺口；涉及这些公式的统计须请用户在 Excel 中重新计算并保存后重新上传；不得把公式当空值、零或已知数值补算，也不得宣称已完整读取或统计。
 - `DOCUMENT_RESULT_TOO_LARGE` 也可能表示任务派生结果累计配额不足。不要反复解析同一文件消耗配额，按固定 recovery_hint 缩小读取范围或等待受控清理；不得改走任意路径或外部工具。
+
+
+### Reading 容量补丁的有界查询
+
+- XLSX/CSV/TSV 始终使用结构化解析，不因返回页过大改转 PDF。文件解析完成后，按问题选择服务端 aggregate、search 或 read_range，不把整份50 MiB文件逐段送入模型。
+- 首次 inventory 是目录摘要。inventory_complete=false 时，使用同一 document_ref 调用 read_range(format="inventory", row_cursor=next_inventory_cursor)，直到工作表目录取全；未取全不能声称覆盖全部 Sheet。列名或合并区域需要详情时，增加 sheet 参数，从 row_cursor=0 开始分页。
+- 单个单元格内容过长时，使用 read_range(format="cell", sheet=实际表名, rows=[r,r], columns=[实际列名])，把返回的 next_cell_cursor 作为 row_cursor 继续。单元格分段或投影列不代表整行/整表已读完。
+- 高基数分组使用 aggregate 的 op.group_cursor=0，按 next_group_cursor 获取后续组。truncated=true 或 groups_complete=false 时不能把当前页当成全部分组；需要全表总计时另做无分组聚合并核对口径。
+- 重试解析同一授权文件会复用已发布结果。引用过期或服务重启后，通过当前任务有效 file_id/file_ref 重新解析以恢复授权；不构造引用，不通过转换工具绕过拒绝。
+- 质量为 partial 的读取可能包含不可用公式值，不把它们当零；只对明确可用范围作结论。合并单元格的展示展开不表示金额重复出现，不对预览结果再次盲目求和。
+
+### 表格统计的精确参数与纠错
+
+- `aggregate` 的 `ops` 为操作数组。先从所选工作表 inventory 复制精确列名；多工作表必须指定 sheet。示例结构：`{"sheet":"实际工作表名","metrics":[{"column":"实际列名","fn":"count"}]}`。示例名称不是可直接调用的真实名称。
+- 每个 metric 只使用 `column` 和 `fn`；`fn` 支持 sum/avg/count/count_distinct/min/max/median，不能写成 `op`。count 也必须指定已有列，不使用 `*`。统计 count 表示匹配行数。
+- `group_by` 为列名数组；`filter` 才使用 `{"column":"实际列名","op":"eq","value":"筛选值"}`；in 的 value 为数组。row_range 为正整数闭区间，起点不大于终点。
+- 参数错误时按工具返回的 `argument_error.field/reason/hint` 修正，保留有效 document_ref，最多一次修正重试；不原样重复失败请求，不重新解析或转换文件。工具字段错误不能归因于文件过大或损坏，也不要求用户拆分、重传或填写内部参数。
+- 修正后仍失败时说明文件分析暂未完成；已有结果仅用于其已验证范围，不输出未经统计验证的全量结论。
+
+### 当前任务的引用与复杂报表参数
+
+- 首次解析优先提交当前附件的真实 `file_id`，省略 `file_ref`，由银行 Gateway 在准入前补全本任务已准备的引用；不得猜文件编号、复制其他任务引用或自动选择未授权文件。已提供的非空引用不会被静默替换。
+- 同轮后续读取可使用解析返回的 `document_ref`，也可在 `document_ref` 字段使用已成功解析的真实 `file_id`；仅本轮唯一映射有效。分页游标仍必须原样复制，不得从文件编号推导。
+- 复杂报表先读取各工作表 inventory，必要时读取表头附近行，区分展示标题和工具实际列名；多行表头、合并区域不自动构成跨表列映射。统计前明确 sheet 与实际 column，不猜列名、不以预览代替全量统计。
+- Gateway 可在准入前将无歧义的 metric.op 别名转为 fn，并将读取行号的十进制字符串转为整数；仍优先提交标准 schema。fn/op 同时存在、未知函数、未知列名或工作表不自动纠正。

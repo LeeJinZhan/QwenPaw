@@ -124,3 +124,42 @@ async def test_no_tools_does_not_block_model_only_answers_after_old_refusal(ques
     reminder = calls[0]['messages'][-1].get_text_content()
     assert '不以拥有对应工具或联网为前提' in reminder
     assert '不代表本轮已尝试' in reminder
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('layout', [None, 'standard_document', 'official_document'])
+async def test_real_bank_context_reaches_strict_provider_with_one_leading_system(monkeypatch, layout):
+    from unittest.mock import AsyncMock
+    from agentscope.credential._openai import OpenAICredential
+    from openai.types.chat import ChatCompletion
+    from qwenpaw.providers.openai_chat_model_compat import OpenAIChatModelCompat
+    intent = None if layout is None else ArtifactDeliveryIntent(
+        'generate', 'docx', layout_kind=layout, layout_resolution='skill')
+    middleware = BankRuntimeGatewayMiddleware(None, artifact_intent=intent)
+    history = [SystemMsg('system', 'base policy'), UserMsg('user', '分析Excel'),
+               AssistantMsg('assistant', '先前未完成'), UserMsg('user', '可以生成一份docx文件给我吗')]
+    before = copy.deepcopy(history)
+    response = ChatCompletion(id='test', created=0, model='strict-test', object='chat.completion',
+        choices=[{'index': 0, 'finish_reason': 'stop',
+                  'message': {'role': 'assistant', 'content': '测试回答'}}])
+    seen = []
+    async def strict_api(*, messages, **kwargs):
+        assert messages[0]['role'] == 'system'
+        assert all(m['role'] != 'system' for m in messages[1:])
+        assert '本轮回答约定' in str(messages[0]['content'])
+        if layout:
+            assert 'delivery_plan' in str(messages[0]['content'])
+        seen.append(messages)
+        return response
+    monkeypatch.setattr('openai.AsyncClient', lambda **kwargs: SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=AsyncMock(side_effect=strict_api)))))
+    model = OpenAIChatModelCompat(
+        credential=OpenAICredential(id='strict-probe', api_key='unused', base_url='http://127.0.0.1:1/v1'),
+        model='strict-test', stream=False)
+    async def call(**kwargs):
+        return await model._call_api('strict-test', kwargs['messages'], kwargs.get('tools'))
+    result = await middleware.on_model_call(None, {'messages': history, 'tools': []}, call)
+    assert result.content[0].text == '测试回答'
+    assert history == before
+    assert len(seen) == 1
+    assert [m['role'] for m in seen[0]] == ['system', 'user', 'assistant', 'user']

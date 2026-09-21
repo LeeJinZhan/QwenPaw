@@ -36,7 +36,7 @@ def _digest(name, arguments):
     return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode()).digest()
 
 @contextmanager
-def approved_document_call(task_id, name, arguments):
+def approved_document_grant(task_id, name, arguments):
     if not isinstance(task_id, str) or not task_id:
         raise DocumentAccessError()
     now = time.monotonic()
@@ -47,10 +47,16 @@ def approved_document_call(task_id, name, arguments):
     _grants[nonce] = (task_id, name, _digest(name, arguments), now + 60)
     metadata = {_KEY: nonce}
     try:
-        with mcp_call_metadata(metadata):
-            yield metadata
+        yield metadata
     finally:
         _grants.pop(nonce, None)
+
+
+@contextmanager
+def approved_document_call(task_id, name, arguments):
+    with approved_document_grant(task_id, name, arguments) as metadata:
+        with mcp_call_metadata(metadata):
+            yield metadata
 
 @contextmanager
 def consume_document_call(metadata, name, arguments):

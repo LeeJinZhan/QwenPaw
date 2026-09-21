@@ -29,6 +29,9 @@ class MinerUSettings:
     inline_max_chars: int = 20_000
     result_max_bytes: int = 32 * 1024 * 1024
     task_result_max_bytes: int = 64 * 1024 * 1024
+    structured_document_max_bytes: int = 2 * 1024**3
+    structured_task_max_bytes: int = 8 * 1024**3
+    extract_memory_bytes: int = 4 * 1024**3
     temp_ttl_seconds: int = 604_800
     backend: str = ""
     server_url: str = ""
@@ -123,6 +126,9 @@ class MinerUSettings:
             inline_max_chars=inline,
             result_max_bytes=result_max,
             task_result_max_bytes=task_max,
+            structured_document_max_bytes=_integer("BANK_READING_DOCUMENT_MAX_BYTES", 2 * 1024**3, 1024, 16 * 1024**3, "structured document quota"),
+            structured_task_max_bytes=_integer("BANK_READING_TASK_MAX_BYTES", 8 * 1024**3, 1024, 32 * 1024**3, "structured task quota"),
+            extract_memory_bytes=_integer("BANK_READING_PROCESS_MEMORY_BYTES", 4 * 1024**3, 256 * 1024**2, 16 * 1024**3, "extraction memory"),
             temp_ttl_seconds=ttl,
         )
 

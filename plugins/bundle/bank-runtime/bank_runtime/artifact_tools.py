@@ -117,7 +117,8 @@ class DocumentReadIncompleteError(FileOperationsIncompleteError):
     def __init__(self, code="DOCUMENT_READ_INCOMPLETE") -> None:
         AgentRuntimeErrorException.__init__(
             self, error_code=code,
-            message="文件内容尚未完整读取，不能提供全量统计或生成完整分析报告。", details={},
+            message=("文件分析参数校验未通过，暂时无法完成分析。" if code == "DOCUMENT_ARGUMENT_INVALID"
+                     else "文件内容尚未完整读取，不能提供全量统计或生成完整分析报告。"), details={},
         )
 
 

@@ -275,3 +275,41 @@ def test_filtered_statistic_requires_explicit_filter_but_does_not_need_raw_read(
     aggregate_evidence(ledger, filtered=True)
     assert ledger.declaration_conflict("支行01姓名为甲的金额合计为3") == ""
     assert not ledger.documents[REF].sheet_full("支行01")
+
+
+def test_paged_groups_are_progress_and_only_complete_after_all_pages():
+    ledger = DocumentReadLedger()
+    observe_parse(ledger)
+    metrics = [{'column':'金额','fn':'sum'}]
+    def page(offset):
+        op = {'sheet':'支行01','group_by':['类别'],'metrics':metrics,'group_cursor':offset}
+        result = {'sources':[{'sheet':'支行01','range':[1,20],'rows_scanned':20}],
+            'metrics':metrics,'group_by':['类别'],'filter':None,'group_count':3,
+            'groups':[{'group':{'类别':str(offset)},'金额:sum':1}],
+            'groups_complete':False,'next_group_cursor':offset+1 if offset<2 else None}
+        payload={'document_ref':REF,'ops':[op]}
+        ledger.start('MinerU__aggregate',payload)
+        ledger.observe('MinerU__aggregate',payload,blocks({'document_ref':REF,'results':[result],'truncated':True}),True)
+    page(0)
+    assert not ledger.pending
+    assert not ledger.documents[REF].aggregates
+    page(2)
+    assert not ledger.documents[REF].aggregates
+    page(0)  # a replay must not fill the missing middle page
+    assert not ledger.documents[REF].aggregates
+    page(1)
+    assert len(ledger.documents[REF].aggregates)==1
+    assert not ledger.documents[REF].sheet_full('支行01')
+    assert ledger.declaration_conflict('支行01按类别分组的金额合计') == ''
+
+
+def test_corrected_aggregate_clears_argument_failure_without_claiming_raw_coverage():
+    ledger = DocumentReadLedger()
+    observe_parse(ledger)
+    payload = {'document_ref': REF, 'ops':[{'metrics':[{'column':'金额','op':'sum'}]}]}
+    ledger.start('MinerU__aggregate', payload)
+    ledger.observe('MinerU__aggregate', payload, blocks({'status':'failed','error_code':'DOCUMENT_ARGUMENT_INVALID'}), False)
+    assert ledger.pending and not ledger.argument_retry_exhausted
+    aggregate_evidence(ledger)
+    assert not ledger.pending and not ledger.argument_retry_exhausted
+    assert not ledger.documents[REF].sheet_full('支行01')

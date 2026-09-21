@@ -64,6 +64,14 @@ class FileRefRegistry:
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._entries: dict[str, ResolvedTaskFile] = {}
         self._expired: dict[str, datetime] = {}
+        self._file_tokens: dict[tuple[str, str], str] = {}
+
+    def reference_for_file(self, file_id: str, *, expected_task_id: str) -> str:
+        token = self._file_tokens.get((expected_task_id, file_id))
+        if not token:
+            raise FileRefError("FILE_ACCESS_DENIED", "File has not been prepared for this task")
+        self.resolve(token, expected_task_id=expected_task_id)
+        return token
 
     def issue(
         self,
@@ -120,6 +128,7 @@ class FileRefRegistry:
             expires_at=expiry,
         )
         self._expired.pop(nonce_hash, None)
+        self._file_tokens[(task_id, str(prepared.file_id))] = token
         return token
 
     def resolve(
@@ -207,7 +216,12 @@ class FileRefRegistry:
         return nonce, hashlib.sha256(nonce).hexdigest()
 
     def _expire(self, nonce_hash: str) -> None:
-        self._entries.pop(nonce_hash, None)
+        entry = self._entries.pop(nonce_hash, None)
+        if entry is not None:
+            key = (entry.task_id, entry.file_id)
+            token = self._file_tokens.get(key, "")
+            if token and hashlib.sha256(_decode(token.split("_")[1])).hexdigest() == nonce_hash:
+                self._file_tokens.pop(key, None)
         self._expired[nonce_hash] = _as_utc(self._clock())
 
 

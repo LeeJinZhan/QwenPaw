@@ -88,9 +88,10 @@ async def test_real_mcp_current_task_authorization_and_source_lifecycle(tmp_path
                 middleware = BankRuntimeGatewayMiddleware(gateway)
                 async def invoke(name, arguments):
                     full_name = "MinerU__" + name
-                    middleware.prepare(full_name, arguments, {"tool_call_id": "call"})
-                    async def native_handler():
-                        result = await session.call_tool(name, arguments, meta=current_mcp_metadata())
+                    middleware.prepare(full_name, middleware.document_input(full_name, arguments), {"tool_call_id": "call"})
+                    async def native_handler(**kwargs):
+                        actual = json.loads(kwargs["tool_call"].input) if kwargs else arguments
+                        result = await session.call_tool(name, actual, meta=current_mcp_metadata())
                         yield ToolResponse(id="call", state=ToolResultState.SUCCESS, content=_blocks_from_value(result))
                     output = [item async for item in middleware.on_acting(None,
                         {"tool_call": ToolCallBlock(id="call", name=full_name, input=json.dumps(arguments))}, native_handler)]
@@ -101,11 +102,28 @@ async def test_real_mcp_current_task_authorization_and_source_lifecycle(tmp_path
                 readers = [("read_document_chunks", {"document_ref": ref})]
                 if extension == "csv":
                     readers += [("read_range", {"document_ref": ref}),
+                                ("read_range", {"document_ref":"file", "rows":["1","2"], "include_header":"true"}),
                                 ("aggregate", {"document_ref": ref, "ops": [{"metrics": [{"column": "amount", "fn": "sum"}]}]}),
                                 ("search", {"document_ref": ref, "query": "20"})]
+                if extension == "csv":
+                    bad = {"document_ref":ref,"ops":[{"metrics":[{"column":"amount","op":"sum"}]}]}
+                    denied = await call("task_b", "aggregate", bad)
+                    assert denied["error_code"] == "FILE_ACCESS_DENIED"
+                    assert "argument_error" not in denied
+                    alias_success = await invoke("aggregate", bad)
+                    assert alias_success["results"][0]["groups"][0]["amount:sum"] == 50
+                    conflict = {"document_ref":ref,"ops":[{"metrics":[{"column":"amount","fn":"count","op":"sum"}]}]}
+                    failed = await invoke("aggregate", conflict)
+                    assert failed["argument_error"]["reason"] == "METRIC_FUNCTION_FIELD"
+                    assert "fn" in failed["recovery_hint"]
+                    corrected = {"document_ref":ref,"ops":[{"metrics":[{"column":"amount","fn":"sum"}]}]}
+                    success = await invoke("aggregate", corrected)
+                    assert success['results'][0]['groups'][0]['amount:sum'] == 50
+                    assert not middleware.document_reads.pending
                 for name, args in readers:
                     assert (await invoke(name, args)).get("status") != "failed"
-                    assert (await call("task_b", name, args))["error_code"] == "FILE_ACCESS_DENIED"
+                    if args["document_ref"] == ref:
+                        assert (await call("task_b", name, args))["error_code"] == "FILE_ACCESS_DENIED"
                 # Gateway cannot execute a read using an unobserved/foreign handle.
                 with pytest.raises(GatewayError) as denied:
                     await invoke("read_document_chunks", {"document_ref": "foreign"})
@@ -115,6 +133,8 @@ async def test_real_mcp_current_task_authorization_and_source_lifecycle(tmp_path
                 elif revocation == "expire": clock[0] += timedelta(minutes=11)
                 else: path.write_bytes(path.read_bytes() + b"changed")
                 for name, args in readers:
+                    if args["document_ref"] != ref:
+                        continue
                     result = await call("task_a", name, args)
                     assert result["status"] == "failed"
                     assert result["error_code"] in {"FILE_REF_EXPIRED", "FILE_ACCESS_DENIED", "FILE_REF_INVALID"}

@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections import defaultdict, deque
 from collections.abc import AsyncGenerator, Callable
 from dataclasses import dataclass
+from contextlib import aclosing
 from copy import copy
 import asyncio
 import json
@@ -29,6 +30,7 @@ from .protocol import canonical_payload_hash
 from .native_skills import NativeSkillReader
 from .completion import operation_keys, parse_outcomes
 from .document_reads import DocumentReadLedger, result_error, is_read_recovery_tool
+from .document_inputs import normalize_document_input
 from ..artifact_tools import DocumentReadIncompleteError
 from ..artifact_tools import FileOperationsIncompleteError, OfficeConversionFailureError
 from ..presentation import artifact_model_result, failure_message
@@ -321,11 +323,22 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
         read_error = self._read_error()
         if self.conversion_failures and any(key.startswith("artifact:") for key in self.unresolved_file_operations):
             raise OfficeConversionFailureError(next(iter(self.conversion_failures.values())))
+        if self.document_reads.argument_retry_exhausted:
+            self._read_guard_failed = True
+            raise DocumentReadIncompleteError("DOCUMENT_ARGUMENT_INVALID")
         if self._read_guard_failed or read_error in {
             "DOCUMENT_READ_NO_PROGRESS", "DOCUMENT_TEXT_TRUNCATED", "DOCUMENT_TEXT_ENCODING_UNSUPPORTED", "MINERU_SUBMIT_AMBIGUOUS"
         }:
             self._read_guard_failed = True
             raise DocumentReadIncompleteError(read_error or "DOCUMENT_READ_INCOMPLETE")
+        if read_error == "DOCUMENT_ARGUMENT_INVALID":
+            input_kwargs = dict(input_kwargs)
+            input_kwargs["messages"] = [*list(input_kwargs.get("messages") or []), SystemMsg(
+                name="system", content=(
+                    "文件统计或读取参数未通过校验。按工具返回的 argument_error/recovery_hint 修正一次；"
+                    "aggregate.metrics 每项使用 column 和 fn，不能把 fn 写成 op；filter 才使用 op。"
+                    "列名必须取自所选工作表 inventory。保留有效 document_ref，不重解析、不转 PDF，"
+                    "不原样重复失败请求，也不要把参数错误解释为文件过大或损坏。"))]
         self._raise_layout_failure()
         if self.artifact_input_failures >= 2:
             raise ArtifactInputRetryExhaustedError()
@@ -508,6 +521,11 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
             _logger.info("Recovered ordinary DOCX parameters from a completed text draft")
             return _CapturedModelOutput((result,), draft.streamed)
 
+    def document_input(self, tool_name, tool_input):
+        return normalize_document_input(tool_name, tool_input,
+            task_id=getattr(getattr(self.client, "config", None), "task_id", ""),
+            ledger=self.document_reads)
+
     def prepare(
         self,
         tool_name: str,
@@ -541,7 +559,8 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
         return prepared
 
     async def _authorized_native_call(self, tool_name, tool_input, next_handler):
-        from .document_access import DOCUMENT_TOOLS, DocumentAccessError, approved_document_call
+        from .document_access import DOCUMENT_TOOLS, DocumentAccessError, approved_document_grant
+        from qwenpaw.drivers.mcp_context import mcp_call_metadata
 
         raw_name = tool_name.removeprefix("MinerU__")
         if tool_name != "MinerU__" + raw_name or raw_name not in DOCUMENT_TOOLS:
@@ -551,9 +570,22 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
         task_id = getattr(getattr(self.client, "config", None), "task_id", "")
         if raw_name != "parse_documents" and tool_input.get("document_ref") not in self.document_reads.documents:
             raise DocumentAccessError()
-        with approved_document_call(task_id, raw_name, tool_input):
-            async for item in next_handler():
-                yield item
+        with approved_document_grant(task_id, raw_name, tool_input) as metadata:
+            with mcp_call_metadata(metadata):
+                stream = next_handler()
+            try:
+                while True:
+                    # Reset in the context that set the token BEFORE yielding.
+                    # Consumers may close this generator in a different task.
+                    with mcp_call_metadata(metadata):
+                        try:
+                            item = await anext(stream)
+                        except StopAsyncIteration:
+                            break
+                    yield item
+            finally:
+                with mcp_call_metadata(metadata):
+                    await stream.aclose()
 
     async def on_acting(
         self,
@@ -562,22 +594,23 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
         next_handler: Callable[..., AsyncGenerator[Any, None]],
     ) -> AsyncGenerator[Any, None]:
         try:
-            async for item in self._act_admitted(agent, input_kwargs, next_handler):
-                tool_call = input_kwargs.get("tool_call")
-                name = str(getattr(tool_call, "name", "") or "")
-                if isinstance(item, (ToolChunk, ToolResponse)) and name not in _RUNTIME_EXECUTED_TOOLS and item.state in {
-                    ToolResultState.ERROR,
-                    ToolResultState.DENIED,
-                    ToolResultState.INTERRUPTED,
-                }:
-                    item = copy(item)
-                    message = (
-                        "处理已中断，已完成的操作不会自动撤销。"
-                        if item.state == ToolResultState.INTERRUPTED
-                        else failure_message()
-                    )
-                    item.content = [TextBlock(type="text", text=message)]
-                yield item
+            async with aclosing(self._act_admitted(agent, input_kwargs, next_handler)) as admitted_stream:
+                async for item in admitted_stream:
+                    tool_call = input_kwargs.get("tool_call")
+                    name = str(getattr(tool_call, "name", "") or "")
+                    if isinstance(item, (ToolChunk, ToolResponse)) and name not in _RUNTIME_EXECUTED_TOOLS and item.state in {
+                        ToolResultState.ERROR,
+                        ToolResultState.DENIED,
+                        ToolResultState.INTERRUPTED,
+                    }:
+                        item = copy(item)
+                        message = (
+                            "处理已中断，已完成的操作不会自动撤销。"
+                            if item.state == ToolResultState.INTERRUPTED
+                            else failure_message()
+                        )
+                        item.content = [TextBlock(type="text", text=message)]
+                    yield item
         except asyncio.CancelledError:
             raise
         except DocumentReadIncompleteError:
@@ -626,6 +659,15 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
         tool_input = complete_artifact_tool_input(
             tool_name, tool_input, self.artifact_intent
         )
+        normalized = self.document_input(tool_name, tool_input)
+        if normalized != tool_input:
+            original_handler = next_handler
+            bound_call = copy(tool_call)
+            bound_call.input = json.dumps(normalized, ensure_ascii=False)
+            bound_kwargs = {**input_kwargs, "tool_call": bound_call}
+            def next_handler():
+                return original_handler(**bound_kwargs)
+        tool_input = normalized
         prepared = self.claim(tool_name, tool_input)
         prior_operation_keys = self.unresolved_file_operations.intersection(operation_keys(tool_name, tool_input))
         self.unresolved_file_operations.update(operation_keys(tool_name, tool_input))
@@ -730,61 +772,62 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
                 result_reported = True
                 yield response
                 return
-            async for item in self._authorized_native_call(tool_name, tool_input, next_handler):
-                if isinstance(item, ToolResponse) and not result_reported:
-                    self.document_reads.observe(tool_name, tool_input, item.content, item.state == ToolResultState.SUCCESS)
-                    keys = operation_keys(tool_name, tool_input)
-                    if keys:
-                        self.unresolved_file_operations.update(keys)
-                        outcomes = dict(parse_outcomes(item.content))
-                        failed_keys = {key for key, complete in outcomes.items() if not complete}
-                        for key, complete in outcomes.items():
-                            if complete and key in keys and item.state == ToolResultState.SUCCESS:
-                                self.unresolved_file_operations.discard(key)
-                                source = self.converted_sources.get(key.removeprefix("parse:"))
-                                if source:
-                                    recovered = {"parse:" + source} | {
-                                        "parse:" + converted
-                                        for converted, origin in self.converted_sources.items()
-                                        if origin == source
-                                    }
-                                    # Only older failures are superseded. A conflicting
-                                    # failure in this response remains unresolved.
-                                    self.unresolved_file_operations.difference_update(recovered - failed_keys)
-                                    self.document_reads.recover_sources({key.removeprefix("parse:") for key in recovered - failed_keys}, preserve_file_id=key.removeprefix("parse:"))
-                    status, error_code = _result_status(item)
-                    if tool_name.endswith((
-                        "parse_documents", "read_document_chunks", "read_range", "aggregate", "search",
-                    )):
-                        reason = result_error(item.content)
-                        if reason:
-                            status, error_code = "failed", reason
-                    await self.client.report_result(
-                        tool_call_id,
-                        status,
-                        _duration_ms(started_at),
-                        error_code,
-                    )
-                    result_reported = True
-                elif (
-                    isinstance(item, ToolChunk)
-                    and not result_reported
-                    and item.state
-                    in {
-                        ToolResultState.ERROR,
-                        ToolResultState.INTERRUPTED,
-                        ToolResultState.DENIED,
-                    }
-                ):
-                    status, error_code = _result_status(item)
-                    await self.client.report_result(
-                        tool_call_id,
-                        status,
-                        _duration_ms(started_at),
-                        error_code,
-                    )
-                    result_reported = True
-                yield item
+            async with aclosing(self._authorized_native_call(tool_name, tool_input, next_handler)) as native_stream:
+                async for item in native_stream:
+                    if isinstance(item, ToolResponse) and not result_reported:
+                        self.document_reads.observe(tool_name, tool_input, item.content, item.state == ToolResultState.SUCCESS)
+                        keys = operation_keys(tool_name, tool_input)
+                        if keys:
+                            self.unresolved_file_operations.update(keys)
+                            outcomes = dict(parse_outcomes(item.content))
+                            failed_keys = {key for key, complete in outcomes.items() if not complete}
+                            for key, complete in outcomes.items():
+                                if complete and key in keys and item.state == ToolResultState.SUCCESS:
+                                    self.unresolved_file_operations.discard(key)
+                                    source = self.converted_sources.get(key.removeprefix("parse:"))
+                                    if source:
+                                        recovered = {"parse:" + source} | {
+                                            "parse:" + converted
+                                            for converted, origin in self.converted_sources.items()
+                                            if origin == source
+                                        }
+                                        # Only older failures are superseded. A conflicting
+                                        # failure in this response remains unresolved.
+                                        self.unresolved_file_operations.difference_update(recovered - failed_keys)
+                                        self.document_reads.recover_sources({key.removeprefix("parse:") for key in recovered - failed_keys}, preserve_file_id=key.removeprefix("parse:"))
+                        status, error_code = _result_status(item)
+                        if tool_name.endswith((
+                            "parse_documents", "read_document_chunks", "read_range", "aggregate", "search",
+                        )):
+                            reason = result_error(item.content)
+                            if reason:
+                                status, error_code = "failed", reason
+                        await self.client.report_result(
+                            tool_call_id,
+                            status,
+                            _duration_ms(started_at),
+                            error_code,
+                        )
+                        result_reported = True
+                    elif (
+                        isinstance(item, ToolChunk)
+                        and not result_reported
+                        and item.state
+                        in {
+                            ToolResultState.ERROR,
+                            ToolResultState.INTERRUPTED,
+                            ToolResultState.DENIED,
+                        }
+                    ):
+                        status, error_code = _result_status(item)
+                        await self.client.report_result(
+                            tool_call_id,
+                            status,
+                            _duration_ms(started_at),
+                            error_code,
+                        )
+                        result_reported = True
+                    yield item
         except asyncio.CancelledError:
             if not result_reported:
                 await self.client.report_result(
@@ -851,6 +894,7 @@ class GatewayPermissionEngine:
         tool_input = complete_artifact_tool_input(
             tool_name, tool_input, self.middleware.artifact_intent
         )
+        tool_input = self.middleware.document_input(tool_name, tool_input)
         reason = self.middleware._conversion_retry_reason(tool_name, tool_input)
         if reason:
             return _deny(REASONS[reason])

@@ -118,7 +118,8 @@ async def test_qwen_native_driver_exposes_display_namespace_without_mcp_prefix(
         if "$ref" in item_schema:
             definition_name = item_schema["$ref"].rsplit("/", 1)[-1]
             item_schema = parse_capability.input_schema["$defs"][definition_name]
-        assert set(item_schema["required"]) == {"file_id", "file_ref"}
+        assert set(item_schema["required"]) == {"file_id"}
+        assert "file_ref" in item_schema["properties"]
         assert set(item_schema["properties"]) == {"file_id", "file_ref"}
 
         read_capability = next(

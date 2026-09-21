@@ -245,3 +245,104 @@ async def test_malformed_parse_metadata_remains_readable_failure(item):
     await invoke(middleware, "MinerU__parse_documents", {"documents": [{"file_id": "f1"}]},
                  {"status": "completed", "items": [item]})
     assert middleware.document_reads.pending
+
+
+@pytest.mark.asyncio
+async def test_argument_retry_stops_with_original_reason():
+    middleware = BankRuntimeGatewayMiddleware(Client())
+    await parse(middleware)
+    for _ in range(2):
+        await invoke(middleware, 'MinerU__aggregate', {'document_ref':'doc','ops':[{}]},
+                     {'status':'failed','error_code':'DOCUMENT_ARGUMENT_INVALID'})
+    async def model(**kwargs): pytest.fail('argument correction budget exhausted')
+    with pytest.raises(FileOperationsIncompleteError) as error:
+        await middleware.on_model_call(None, {}, model)
+    assert error.value.error_code == 'DOCUMENT_ARGUMENT_INVALID'
+
+
+@pytest.mark.asyncio
+async def test_native_metadata_does_not_escape_yield_and_can_close_in_other_task():
+    import asyncio
+    from qwenpaw.drivers.mcp_context import current_mcp_metadata
+    from bank_runtime.gateway.document_access import consume_document_call, current_document_task
+    middleware = BankRuntimeGatewayMiddleware(Client())
+    payload = {'documents':[{'file_id':'f1','file_ref':'r1'}]}
+    closed = []
+    async def handler():
+        metadata = current_mcp_metadata()
+        assert metadata
+        with consume_document_call(metadata, 'parse_documents', payload):
+            assert current_document_task() == 'task_001'
+        try:
+            yield 'first'
+        finally:
+            closed.append(True)
+    stream = middleware._authorized_native_call('MinerU__parse_documents', payload, handler)
+    assert await anext(stream) == 'first'
+    assert current_mcp_metadata() is None
+    await asyncio.create_task(stream.aclose())
+    assert closed == [True]
+    assert current_mcp_metadata() is None
+
+
+@pytest.mark.asyncio
+async def test_metadata_revoked_on_cancel_and_concurrent_calls_stay_isolated():
+    import asyncio
+    from qwenpaw.drivers.mcp_context import current_mcp_metadata
+    from bank_runtime.gateway.document_access import consume_document_call, current_document_task, DocumentAccessError
+    async def run(task_id):
+        client = Client()
+        client.config = SimpleNamespace(task_id=task_id)
+        middleware = BankRuntimeGatewayMiddleware(client)
+        payload = {'documents':[{'file_id':task_id,'file_ref':'ref'}]}
+        seen = []
+        entered = asyncio.Event()
+        closed = []
+        async def handler():
+            seen.append(current_mcp_metadata())
+            entered.set()
+            try:
+                await asyncio.Event().wait()
+                yield 'unreachable'
+            finally:
+                closed.append(True)
+        stream = middleware._authorized_native_call('MinerU__parse_documents', payload, handler)
+        pending = asyncio.create_task(anext(stream))
+        await entered.wait()
+        assert current_mcp_metadata() is None
+        with consume_document_call(seen[0], 'parse_documents', payload):
+            assert current_document_task() == task_id
+        with pytest.raises(DocumentAccessError):
+            with consume_document_call(seen[0], 'parse_documents', payload): pass
+        pending.cancel()
+        with pytest.raises(asyncio.CancelledError): await pending
+        assert closed == [True]
+        assert current_mcp_metadata() is None
+        return seen[0]
+    first, second = await asyncio.gather(run('task_a'), run('task_b'))
+    assert first != second
+
+
+@pytest.mark.asyncio
+async def test_outer_acting_close_revokes_unconsumed_grant():
+    import asyncio
+    from qwenpaw.drivers.mcp_context import current_mcp_metadata
+    from bank_runtime.gateway.document_access import consume_document_call, DocumentAccessError
+    middleware = BankRuntimeGatewayMiddleware(Client())
+    payload = {'documents':[{'file_id':'f','file_ref':'r'}]}
+    name = 'MinerU__parse_documents'
+    middleware.prepare(name, payload, {'tool_call_id':'call'})
+    seen, closed = [], []
+    async def handler():
+        seen.append(current_mcp_metadata())
+        try:
+            yield ToolResponse(id='call', state=ToolResultState.SUCCESS, content=[TextBlock(text='{}')])
+        finally:
+            closed.append(True)
+    stream = middleware.on_acting(None, {'tool_call':ToolCallBlock(id='call',name=name,input=json.dumps(payload))}, handler)
+    await anext(stream)
+    assert current_mcp_metadata() is None
+    await asyncio.create_task(stream.aclose())
+    assert closed == [True]
+    with pytest.raises(DocumentAccessError):
+        with consume_document_call(seen[0], 'parse_documents', payload): pass

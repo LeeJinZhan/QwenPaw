@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import logging
 import os
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
 
 from mcp.server.fastmcp import FastMCP
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, WithJsonSchema
 import uvicorn
 
 from .config import MinerUSettings
@@ -18,6 +19,11 @@ from .mineru_client import build_mineru_client
 from .structured_store import StructuredStore
 from .tools import MinerUToolService, ToolContractError
 from .recovery import recovery_hint
+from .aggregate_contract import AGGREGATE_OPS_SCHEMA
+
+logger = logging.getLogger(__name__)
+
+AggregateOps = Annotated[list[dict[str, Any]], WithJsonSchema(AGGREGATE_OPS_SCHEMA)]
 
 
 class RuntimeDocumentRef(BaseModel):
@@ -26,9 +32,9 @@ class RuntimeDocumentRef(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     file_id: str = Field(min_length=1, description="Runtime uploaded file ID")
-    file_ref: str = Field(
-        min_length=1,
-        description="Opaque task-scoped file reference supplied with the attachment",
+    file_ref: str | None = Field(
+        default=None, min_length=1,
+        description="Optional opaque reference. Prefer file_id only: the bank Gateway binds the current prepared attachment before authorization. Never invent a token.",
     )
 
 
@@ -69,6 +75,8 @@ class MinerUMcpService:
             raise ToolContractError("FILE_ACCESS_DENIED", "Current task authorization is required") from exc
         try:
             with consume_document_call(metadata, name, arguments):
+                if name != "parse_documents" and str(arguments.get("document_ref", "")).startswith("ds1_"):
+                    return await self.tool_service.execute_structured_query(name, arguments)
                 result = getattr(self.tool_service, name)(**arguments)
                 return await result if inspect.isawaitable(result) else result
         except DocumentAccessError as exc:
@@ -79,7 +87,7 @@ class MinerUMcpService:
             name="parse_documents",
             description=(
                 "Parse 1-5 Runtime-authorized documents. XLSX/CSV/TSV use local structured extraction; other formats use MinerU. For structured results use read_range/aggregate/search. "
-                "Each document must contain both file_id and its paired opaque "
+                "Each document must contain file_id; the bank Gateway supplies an omitted "
                 "file_ref from the current attachment; never pass paths or URLs."
             ),
             structured_output=True,
@@ -92,11 +100,11 @@ class MinerUMcpService:
         ) -> dict[str, Any]:
             try:
                 return await self._authorized_call("parse_documents", {
-                    "documents": [document.model_dump() for document in documents],
+                    "documents": [document.model_dump(exclude_none=True) for document in documents],
                     "parse_method": parse_method, "language": language, "options": options,
                 })
             except ToolContractError as exc:
-                return {"status": "failed", "error_code": exc.code, "recovery_hint": recovery_hint(exc.code), "items": []}
+                return {"status": "failed", "error_code": exc.code, "recovery_hint": exc.argument_error.get("hint") or recovery_hint(exc.code), "argument_error": exc.argument_error, "items": []}
 
         @self.mcp.tool(
             name="read_document_chunks",
@@ -126,9 +134,9 @@ class MinerUMcpService:
             name="read_range",
             description=(
                 "Read a bounded row range from one sheet of a structured "
-                "document_ref (xlsx/csv/tsv). Pass sheet name, rows=[start,end] "
+                "document_ref (xlsx/csv/tsv). A file_id already parsed in this task is also accepted by the bank Gateway. Pass sheet name, rows=[start,end] "
                 "or continue with next_row_cursor; optional columns projection; "
-                "format markdown (header repeated) or records. Pages are capped "
+                "format cell reads one columns entry and rows=[r,r], with row_cursor=next_cell_cursor for long text. format markdown (header repeated), records, or inventory. Inventory without sheet pages sheet summaries; with sheet pages columns/merges. Continue with next_inventory_cursor as row_cursor. Pages are capped "
                 "at 32000 UTF-8 bytes including metadata; echo fields report the served range and sheet "
                 "totals. Never infer values outside the echoed range."
             ),
@@ -155,16 +163,23 @@ class MinerUMcpService:
                 "ops with sheet, optional group_by, metrics (sum/avg/count/"
                 "count_distinct/min/max/median), optional filter and row_range, "
                 "or cross_sheet_union by a shared key column. Results include "
-                "rows_scanned/rows_matched/full_range so scope can be stated "
-                "honestly. Use this instead of reading every row for totals."
+                "rows_scanned/rows_matched/full_range so scope can be stated. Use group_cursor=0 in each op for high-cardinality group pages, then next_group_cursor. "
+                'Use metrics=[{"column":"exact inventory column","fn":"count"}]; metric uses fn, NOT op. '
+                "filter uses column/op/value. Use this instead of reading every row for totals."
             ),
             structured_output=True,
         )
-        async def aggregate(document_ref: str, ops: list[dict[str, Any]]) -> dict[str, Any]:
+        async def aggregate(document_ref: str, ops: AggregateOps) -> dict[str, Any]:
             try:
                 return await self._authorized_call("aggregate", {"document_ref": document_ref, "ops": ops})
             except ToolContractError as exc:
-                return {"status": "failed", "error_code": exc.code, "recovery_hint": recovery_hint(exc.code)}
+                result = {"status": "failed", "error_code": exc.code, "recovery_hint": recovery_hint(exc.code)}
+                if exc.argument_error:
+                    result["argument_error"] = exc.argument_error
+                    logger.warning("Aggregate argument rejected: reason=%s field=%s",
+                                   exc.argument_error["reason"], exc.argument_error["field"])
+                    result["recovery_hint"] = exc.argument_error["hint"] + " 保留 document_ref，修正后最多重试一次；不要原样重复调用或转换文件。"
+                return result
 
         @self.mcp.tool(
             name="search",
@@ -269,7 +284,8 @@ def build_mineru_mcp_service(
     )
     structured = StructuredStore(
         root=root,
-        max_task_bytes=settings.task_result_max_bytes,
+        max_task_bytes=settings.structured_task_max_bytes,
+        max_document_bytes=settings.structured_document_max_bytes,
         ttl_seconds=settings.temp_ttl_seconds,
     )
     tools = MinerUToolService(
@@ -278,6 +294,8 @@ def build_mineru_mcp_service(
         document_store=store,
         structured_store=structured,
         inline_max_chars=settings.inline_max_chars,
+        parse_timeout_seconds=settings.parse_timeout_seconds,
+        extract_memory_bytes=settings.extract_memory_bytes,
     )
     return MinerUMcpService(
         settings=settings,
