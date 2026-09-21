@@ -12,7 +12,7 @@ import shutil
 from typing import Any
 import uuid
 
-from .scope import SandboxRequestScope
+from .scope import MAX_TASK_FILES, SandboxRequestScope
 from .cache_retention import CacheLease
 
 _SAFE_NAME = re.compile(r"[^A-Za-z0-9._-]+")
@@ -39,7 +39,7 @@ class TaskAttachmentCache:
         self,
         root: str | Path | None = None,
         *,
-        max_files: int = 5,
+        max_files: int = MAX_TASK_FILES,
         max_total_bytes: int = 200 * 1024 * 1024,
         max_file_bytes: int = 200 * 1024 * 1024,
     ) -> None:

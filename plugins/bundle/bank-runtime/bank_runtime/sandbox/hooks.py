@@ -16,7 +16,7 @@ from .broker import RuntimeFileBroker
 from .cache import SandboxCacheError, TaskAttachmentCache
 from .file_refs import get_file_ref_registry
 from .processor import AttachmentProcessor
-from .scope import SandboxRequestScope
+from .scope import MAX_TASK_FILES, SandboxRequestScope
 from .tools import (
     SandboxToolState,
     reset_sandbox_tool_state,
@@ -28,8 +28,8 @@ from ..gateway.visibility import parse_runtime_tool_visibility
 
 _TOKEN = "bank_runtime_sandbox_state_token"
 _STATE = "bank_runtime_sandbox_state"
-# Five authorized originals plus at most five converted derivatives; byte quota is shared.
-_CACHE = TaskAttachmentCache(max_files=10)
+# Authorized originals and one converted derivative each share the existing byte quota.
+_CACHE = TaskAttachmentCache(max_files=2 * MAX_TASK_FILES)
 _FILE_REFS = get_file_ref_registry()
 
 
@@ -174,7 +174,7 @@ def _sandbox_guidance(current_count: int, installed_names: set[str]) -> str:
     }.issubset(installed_names):
         guidance.extend(
             [
-                "- Search only metadata for earlier conversation or assistant files; current and selected files together must not exceed five.",
+                f"- Search only metadata for earlier conversation or assistant files; current and selected files together must not exceed {MAX_TASK_FILES}.",
                 "- If a selected historical file is actually used, end the answer with a '参考文件' section listing its display name.",
             ]
         )

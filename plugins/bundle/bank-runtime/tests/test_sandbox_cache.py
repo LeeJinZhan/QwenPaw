@@ -176,3 +176,25 @@ async def test_cache_enforces_task_quota_across_separate_calls(
     assert sorted(
         path.name for path in (tmp_path / "cache" / "task_001").iterdir()
     ) == [".runtime-cache.lock", "file_current.txt"]
+
+
+@pytest.mark.asyncio
+async def test_default_cache_materializes_fifty_files_without_dropping_sources(tmp_path):
+    from types import SimpleNamespace
+    object_root = tmp_path / "objects"
+    object_root.mkdir()
+    ids = [f"file_{i}" for i in range(50)]
+    scope = SandboxRequestScope.from_request(SimpleNamespace(
+        runtime_task_id="task_fifty",
+        sandbox_context={"context_id": "ctx_fifty", "task_id": "task_fifty", "signature": "signed"},
+        attachments_manifest=[{"file_id": file_id, "source": "current_task"} for file_id in ids],
+    ))
+    cache = TaskAttachmentCache(tmp_path / "cache")
+    broker = _Broker(object_root)
+    prepared = await cache.prepare_files(scope, ids, broker)
+    assert [item.file_id for item in prepared] == ids
+    assert all(item.local_path.read_text() == f"content:{item.file_id}" for item in prepared)
+    with pytest.raises(SandboxCacheError, match="quota"):
+        await cache.prepare_files(scope, ["file_overflow"], broker)
+    await cache.cleanup(scope.task_id)
+    assert not (tmp_path / "cache" / scope.task_id).exists()

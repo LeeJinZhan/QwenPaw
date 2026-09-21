@@ -116,18 +116,18 @@ def test_scope_rejects_duplicate_or_excessive_model_selection() -> None:
                 "source": "conversation",
                 "readable": True,
             }
-            for index in range(5)
+            for index in range(50)
         ]
     )
     with pytest.raises(SandboxScopeError):
         scope.selection_records(["file_0", "file_0"])
-    assert len(scope.selection_records(["file_0", "file_1", "file_2", "file_3"])) == 4
-    scope.mark_selected(["file_0", "file_1", "file_2", "file_3"])
+    assert len(scope.selection_records([f"file_{i}" for i in range(49)])) == 49
+    scope.mark_selected([f"file_{i}" for i in range(49)])
     with pytest.raises(SandboxScopeError):
-        scope.selection_records(["file_4"])
+        scope.selection_records(["file_49"])
 
 
-def test_scope_limits_current_and_selected_files_to_five_per_task() -> None:
+def test_scope_limits_current_and_selected_files_to_fifty_per_task() -> None:
     request = _request(
         attachments_manifest=[
             {
@@ -136,7 +136,7 @@ def test_scope_limits_current_and_selected_files_to_five_per_task() -> None:
                 "content_type": "text/plain",
                 "size_bytes": 1,
             }
-            for index in range(4)
+            for index in range(49)
         ]
     )
     scope = SandboxRequestScope.from_request(request)
@@ -165,7 +165,7 @@ def test_scope_limits_current_and_selected_files_to_five_per_task() -> None:
             _request(
                 attachments_manifest=[
                     {"file_id": f"file_{index}", "source": "current_task"}
-                    for index in range(6)
+                    for index in range(51)
                 ]
             )
         )

@@ -7,7 +7,7 @@ import re
 from typing import Any, Mapping
 
 _ID = re.compile(r"^[A-Za-z0-9_-]{1,160}$")
-_MAX_TASK_FILES = 5
+MAX_TASK_FILES = 50
 _PUBLIC_FIELDS = (
     "file_id",
     "display_name",
@@ -58,7 +58,7 @@ class SandboxRequestScope:
             raw_manifest = []
         if (
             not isinstance(raw_manifest, list)
-            or len(raw_manifest) > _MAX_TASK_FILES
+            or len(raw_manifest) > MAX_TASK_FILES
         ):
             raise SandboxScopeError("Runtime attachment manifest is invalid")
         manifest: list[dict[str, Any]] = []
@@ -109,7 +109,7 @@ class SandboxRequestScope:
             raise SandboxScopeError("Runtime file selection requires file IDs")
         normalized = [_safe_id(value, "file_id") for value in file_ids]
         selected = self.selected_file_ids.union(normalized)
-        if len(self.current_attachment_ids) + len(selected) > _MAX_TASK_FILES:
+        if len(self.current_attachment_ids) + len(selected) > MAX_TASK_FILES:
             raise SandboxScopeError("Runtime file selection limit exceeded")
         if len(set(normalized)) != len(normalized):
             raise SandboxScopeError("Runtime file selection has duplicates")
@@ -132,7 +132,7 @@ class SandboxRequestScope:
     def mark_selected(self, file_ids: list[str]) -> None:
         normalized = {_safe_id(value, "file_id") for value in file_ids}
         selected = self.selected_file_ids.union(normalized)
-        if len(self.current_attachment_ids) + len(selected) > _MAX_TASK_FILES:
+        if len(self.current_attachment_ids) + len(selected) > MAX_TASK_FILES:
             raise SandboxScopeError("Runtime file selection limit exceeded")
         self.selected_file_ids.update(normalized)
 
@@ -170,4 +170,4 @@ def _public_file(
     return item
 
 
-__all__ = ["SandboxRequestScope", "SandboxScopeError"]
+__all__ = ["MAX_TASK_FILES", "SandboxRequestScope", "SandboxScopeError"]
