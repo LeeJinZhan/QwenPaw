@@ -47,6 +47,7 @@ async def test_recovered_operation_can_complete():
 async def test_partial_parser_result_keeps_only_failed_file_unresolved():
     from agentscope.message import ToolCallBlock, ToolResultState
     class Client:
+        config = SimpleNamespace(task_id="task_001")
         async def report_guard(self, *args): pass
         async def report_result(self, *args): pass
     middleware = BankRuntimeGatewayMiddleware(Client())
@@ -62,6 +63,7 @@ async def test_partial_parser_result_keeps_only_failed_file_unresolved():
 async def test_parser_without_final_response_remains_incomplete():
     from agentscope.message import ToolCallBlock
     class Client:
+        config = SimpleNamespace(task_id="task_001")
         async def report_guard(self, *args): pass
         async def report_result(self, *args): pass
     middleware = BankRuntimeGatewayMiddleware(Client())
@@ -85,6 +87,7 @@ async def test_mcp_structured_result_survives_tool_response_accumulation(failed)
     from qwenpaw.drivers.adapters.agentscope_tool import _blocks_from_value
 
     class Client:
+        config = SimpleNamespace(task_id="task_001")
         async def report_guard(self, *args): pass
         async def report_result(self, *args): pass
 
@@ -147,6 +150,7 @@ async def test_successful_reconversion_clears_only_same_source_parse_failures(sc
     from agentscope.message import ToolCallBlock, ToolResultState
 
     class Client:
+        config = SimpleNamespace(task_id="task_001")
         async def report_guard(self, *args): pass
         async def report_result(self, *args): pass
 

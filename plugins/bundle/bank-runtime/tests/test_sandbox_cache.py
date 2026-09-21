@@ -175,4 +175,4 @@ async def test_cache_enforces_task_quota_across_separate_calls(
 
     assert sorted(
         path.name for path in (tmp_path / "cache" / "task_001").iterdir()
-    ) == ["file_current.txt"]
+    ) == [".runtime-cache.lock", "file_current.txt"]

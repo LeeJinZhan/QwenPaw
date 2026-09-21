@@ -30,7 +30,10 @@
         "url": "http://127.0.0.1:18081/mcp",
         "tools": [
           "parse_documents",
-          "read_document_chunks"
+          "read_document_chunks",
+          "read_range",
+          "aggregate",
+          "search"
         ]
       }
     },

@@ -70,3 +70,59 @@ def test_document_store_rejects_result_over_per_document_limit(tmp_path) -> None
     with pytest.raises(DocumentStoreError) as failed:
         store.write(_source(tmp_path), _document())
     assert failed.value.code == "DOCUMENT_RESULT_TOO_LARGE"
+
+
+def test_retry_cursor_returns_same_page_and_continuation(tmp_path) -> None:
+    store = DocumentStore(root=tmp_path)
+    document = NormalizedDocument(
+        title="分页恢复", markdown="test", page_count=None,
+        chunks=tuple(NormalizedChunk(index=i, heading="", text=str(i)) for i in range(24)),
+    )
+    handle = store.write(_source(tmp_path), document)
+    first = store.read_chunks(handle.document_ref, cursor=None, limit=2)
+    # A response can be lost after the server has read the page.
+    second = store.read_chunks(handle.document_ref, cursor=first.next_cursor, limit=2)
+    for _ in range(20):
+        retry = store.read_chunks(handle.document_ref, cursor=first.next_cursor, limit=2)
+        assert retry == second
+    assert store.read_chunks(handle.document_ref, cursor=None, limit=2) == first
+    seen = [chunk.index for chunk in first.chunks + second.chunks]
+    page = second
+    while page.has_more:
+        page = store.read_chunks(handle.document_ref, cursor=page.next_cursor, limit=2)
+        seen.extend(chunk.index for chunk in page.chunks)
+    assert seen == list(range(24))
+
+
+def test_wrong_document_does_not_consume_valid_cursor(tmp_path) -> None:
+    store = DocumentStore(root=tmp_path)
+    source = _source(tmp_path)
+    first = store.write(source, _document())
+    other = store.write(source, _document())
+    page = store.read_chunks(first.document_ref, cursor=None, limit=1)
+    with pytest.raises(DocumentStoreError):
+        store.read_chunks(other.document_ref, cursor=page.next_cursor, limit=1)
+    assert store.read_chunks(first.document_ref, cursor=page.next_cursor, limit=1).chunks[0].index == 1
+
+
+def test_retry_preserves_expiry_integrity_and_task_cleanup(tmp_path) -> None:
+    now = datetime.now(timezone.utc)
+    store = DocumentStore(root=tmp_path, ttl_seconds=60, clock=lambda: now)
+    handle = store.write(_source(tmp_path), _document())
+    page = store.read_chunks(handle.document_ref, cursor=None, limit=1)
+    cursor = page.next_cursor
+    store.read_chunks(handle.document_ref, cursor=cursor, limit=1)
+    with pytest.raises(DocumentStoreError):
+        store.read_chunks(handle.document_ref, cursor=cursor + "tampered", limit=1)
+    original = handle.path.read_bytes()
+    handle.path.write_bytes(original + b" ")
+    with pytest.raises(DocumentStoreError, match="integrity"):
+        store.read_chunks(handle.document_ref, cursor=cursor, limit=1)
+    handle.path.write_bytes(original)
+    now += timedelta(seconds=61)
+    with pytest.raises(DocumentStoreError, match="expired"):
+        store.read_chunks(handle.document_ref, cursor=cursor, limit=1)
+    assert not handle.path.exists()
+    store.delete_task("task_001")
+    with pytest.raises(DocumentStoreError):
+        store.read_chunks(handle.document_ref, cursor=cursor, limit=1)

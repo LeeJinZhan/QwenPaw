@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from contextvars import Token
 from datetime import datetime, timezone
+import logging
 
 from agentscope.tool import FunctionTool
 
@@ -128,7 +129,14 @@ class BankRuntimeSandboxCleanupHook(LifecycleHook):
         try:
             if isinstance(state, SandboxToolState):
                 _FILE_REFS.revoke_task(state.scope.task_id)
-                await state.cache.cleanup(state.scope.task_id)
+                try:
+                    await state.cache.cleanup(state.scope.task_id)
+                except (OSError, RuntimeError) as exc:
+                    # Marked leftovers are retried by the expiry sweep. Cleanup must
+                    # not replace an already produced answer with a filesystem error.
+                    logging.getLogger(__name__).warning(
+                        "task_cache.cleanup_failed error_type=%s", type(exc).__name__
+                    )
         finally:
             token = ctx.extras.pop(_TOKEN, None)
             if isinstance(token, Token):

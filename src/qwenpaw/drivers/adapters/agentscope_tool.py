@@ -98,7 +98,17 @@ def _blocks_from_value(value: Any) -> list[Any]:
         blocks = _blocks_from_mcp_content(content)
         structured = getattr(value, "structuredContent", None)
         if structured is not None:
-            blocks.append(_text_block(_stringify(structured)))
+            # MCP text often repeats structuredContent. Preserve other text and
+            # media, but emit the equivalent JSON only once, in canonical UTF-8.
+            unique = []
+            for block in blocks:
+                try:
+                    identical = json.loads(getattr(block, "text", "")) == structured
+                except (ValueError, TypeError):
+                    identical = False
+                if not identical:
+                    unique.append(block)
+            blocks = unique + [_text_block(_stringify(structured))]
         return blocks or [_text_block("")]
     return [_text_block(_stringify(value))]
 

@@ -29,11 +29,14 @@ _RESULT_ATTEMPTS = 3
 class GatewayError(RuntimeError):
     """Gateway mediation failed safely."""
 
-    def __init__(self, message: str, *, code: str = "", violation: str = "", validation_hint: str = "") -> None:
+    def __init__(self, message: str, *, code: str = "", violation: str = "", validation_hint: str = "", layout_failure: tuple[int, str] | None = None, conversion_failure: str = "") -> None:
         super().__init__(message)
         self.code = str(code or "")
         self.violation = str(violation or "")
+        from ..conversion_reports import REASONS
+        self.conversion_failure = conversion_failure if isinstance(conversion_failure, str) and conversion_failure in REASONS else ""
         self.validation_hint = str(validation_hint or "")[:500] if code == "ARTIFACT_VALIDATION_FAILED" else ""
+        self.layout_failure = layout_failure
 
 
 @dataclass(frozen=True)
@@ -306,7 +309,7 @@ class GatewayClient:
     async def _post(self, payload: dict[str, Any]) -> dict[str, Any]:
         try:
             async with httpx.AsyncClient(
-                timeout=10,
+                timeout=httpx.Timeout(300 if payload.get("phase") == "execute" else 10, connect=10),
                 follow_redirects=False,
                 trust_env=False,
             ) as client:
@@ -360,11 +363,23 @@ def _response_error(payload: Mapping[str, Any], fallback: str) -> GatewayError:
         detail = payload
     details = detail.get("details")
     details = details if isinstance(details, Mapping) else {}
+    location = None
+    if (
+        detail.get("code") == "ARTIFACT_VALIDATION_FAILED"
+        and details.get("reason") == "presentation_layout_capacity"
+        and details.get("retryable") is False
+        and type(details.get("page_index")) is int
+        and 1 <= details["page_index"] <= 100
+        and details.get("element") in ("text", "title", "chart_conclusion")
+    ):
+        location = (details["page_index"], details["element"])
     return GatewayError(
         str(detail.get("message") or fallback),
         code=str(detail.get("code") or ""),
         violation=str(details.get("violation_type") or ""),
         validation_hint=str(details.get("validation_hint") or ""),
+        layout_failure=location,
+        conversion_failure=details.get("reason", ""),
     )
 
 

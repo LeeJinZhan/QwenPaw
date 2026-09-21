@@ -49,10 +49,12 @@ metadata:
 - 生成 Word 时按 `bank-document-writing` 确定文种与版式并提交 delivery_plan；已读取且仍适用的规则直接复用。生成普通 DOCX（非公文版式）时，`content` 优先传完整正文字符串；需要分节时只使用 `{"sections":[{"heading":"标题","paragraphs":["正文"]}]}`，所有集合直接使用 JSON 数组，禁止添加 `item` 包装层；结构化内容必须直接作为对象传递，不得再次序列化成 JSON 字符串。
 - 生成或修订 PPTX 时先读取 `bank-presentation`，按用途选择八套主题及图表、图文、时间轴等版式；仍使用现有成果工具，不套用公文 DOCX 结构。
 - 生成 XLSX 时，使用 `{"sheets":[{"name":"工作表名","rows":[["表头1","表头2"],["内容",1]]}]}`；表头也可在工作表内单独使用 `headers` 提供。工作表、表头、行和单元格集合都直接使用 JSON 数组，不要添加 `item` 包装层。
+- Excel 需要可修改的计算时，单元格明确写 `{"formula":"=SUM(B2:B5)"}`；仅支持本工作簿内已提供范围的引用、算术比较和 SUM/AVERAGE/MIN/MAX/COUNT/ROUND/ABS/IF/IFERROR/SUMIF/COUNTIF。可跨表引用，例如 `='数据'!B2`；不提供缓存结果，不用外链、宏或未登记函数。普通以等号开头的字符串仍按文本处理。生成器实际重算并保留公式，计算错误不会发布成功成果。所有行参与列宽/行高计算，宽表按可读宽度分页；极长单元格仍受 Excel 本身行高和字符容量约束。
+
 - 生成 PNG/JPEG/WEBP/SVG 时，只生成已登记的确定性固定图形：`chart`、`table`、`flowchart` 或 `cover`。图表严格只使用 `kind`、`chart_type`、`title`、`categories`、`series` 和可选的 `style_profile`，例如 `{"kind":"chart","chart_type":"bar","title":"趋势","categories":["一月"],"series":[{"name":"数量","values":[1]}],"style_profile":"executive"}`；正式商务风使用 `style_profile: "executive"`，禁止猜测或添加 `x_axis`、`y_axis`、`bar_colors`、`style`、`width`、`height`、`show_values`、`show_legend` 等字段。不要传自然语言图片提示词、SVG markup、代码、URL 或路径。用户未给出具体内容时，使用安全的 `cover` 结构生成标题图，不要放弃调用成果工具。
 - 只有用户明确要求 PDF 时，才可将 `artifact_type` 设为 `pdf` 并将 `explicit_pdf_request` 设为 `true`。
 - 修改已有成果时使用 `artifact_revise`，只用真实返回的 source_generated_file_id，提交完整新 content 和 instructions；不追加 artifact_type、title 或 source_refs。上传附件不属于已生成成果，应先读取再按需要生成新稿。
-- 用户明确要求格式转换时使用 `artifact_convert`；读取上传的旧版 `.doc/.xls` 需要转换且当前能力已授权时，也可先转换为 `.docx/.xlsx` 再读取，无需额外询问。上传文件用 source_type=session_file 或 workspace_file 及 source_id，不能同时传 source_generated_file_id；已生成成果才用 source_generated_file_id。只转换为当前登记且适用于该来源的格式，转换完成后仍须读取才能分析。转换目标为 PDF 时必须将 `explicit_pdf_request` 设为 `true`，不得把重新生成冒充为格式转换。
+- 用户明确要求格式转换时使用 `artifact_convert`；读取上传的旧版 `.doc/.xls` 需要转换且当前能力已授权时，也可先转换为 `.docx/.xlsx` 再读取，无需额外询问。上传文件用 source_type=session_file 或 workspace_file 及 source_id，不能同时传 source_generated_file_id；已生成成果才用 source_generated_file_id。只转换为当前登记且适用于该来源的格式，转换完成后仍须读取才能分析。用户下载交付转换默认 purpose=delivery，目标为 PDF 时必须将 `explicit_pdf_request` 设为 `true`；内部识别使用 purpose=read，可选择 Runtime 登记支持的 PDF 静态读取副本，无需声称用户要求 PDF，不作为下载成果。不得把重新生成冒充为格式转换。
 - 仅当 Runtime 已提供已发布模板版本且字段齐全时使用 `template_fill_docx`；用户指定模板但不可用时说明限制，不以普通 DOCX 或固定版式规避。未指定机构模板的公文初稿按文档写作技能交付，不伪造正式公文要素。
 - 这些工具由 Runtime 执行；不得改用 shell、临时 Python/Node 脚本、任意路径、URL 或对象存储 key 生成文件。
 
@@ -75,13 +77,13 @@ metadata:
 将上传的旧版 Word 转为可读取的 DOCX。转换成功后使用实际返回的附件引用读取；若未返回可读引用，只说明转换已完成、读取未完成，不猜文件路径或配对引用，也不反复转换试探文件名。
 
 ```json
-{"source_type":"session_file","source_id":"uploaded_doc_example_only","target_format":"docx","output_name":"转换示例.docx"}
+{"source_type":"session_file","source_id":"uploaded_doc_example_only","target_format":"docx","purpose":"read","output_name":"转换示例.docx"}
 ```
 
 将上传的旧版 Excel 转为可读取的 XLSX。
 
 ```json
-{"source_type":"session_file","source_id":"uploaded_xls_example_only","target_format":"xlsx","output_name":"转换示例.xlsx"}
+{"source_type":"session_file","source_id":"uploaded_xls_example_only","target_format":"xlsx","purpose":"read","output_name":"转换示例.xlsx"}
 ```
 
 用户明确要求将已生成的 Word 转为 PDF。
@@ -116,3 +118,13 @@ metadata:
 - 结果未知：“这次文件处理是否完成还未确认。”
 
 只说明影响目标的缺口与当前可行的下一步，不追加内部角色名、检查清单或参数说明；没有可用查询能力时不承诺后台继续查询。
+
+### 安全转换与读取范围
+
+- 正文和普通表格优先结构读取；图表、Visio、OLE 对象优先已有静态预览或受控静态渲染。只用实际返回的授权引用，不访问外部对象、链接或任意路径，不执行宏、ActiveX、DDE。
+- 现代 Office 也可先用 `artifact_convert(purpose="read")` 同格式准备安全副本（DOCX→DOCX、XLSX→XLSX、PPTX→PPTX），再做结构提取。`artifact_convert(purpose="read")` 是内部识别转换，DOCX 等结构副本不足以读取图形时，可按工具实际支持的格式选择 PDF；不设置虚假的 `explicit_pdf_request`，不把内部 PDF 当作用户下载成果。普通文字无需重复转换两遍。
+- 可信工具 `conversion_report` 中 `coverage=complete` 仅表示转换保留范围，仍须读取派生文件及全部分页；`editable=false` 表示静态化后不再支持原对象双击编辑。
+- `coverage=partial` 表示存在未读对象或资源。完整读完派生内容后，可以明确限定范围总结已读部分，必须说明遗漏；不得声称已完整读取原件、全量统计，不能将未读图形或附件猜成已知内容。分页未读、授权拒绝、解析失败仍是硬性限制。
+- `objects` 的 `static` 表示只保留可见静态展示；当前解析工具仅返回 Markdown，读完 DOCX 或 PDF 的文字不证明图形含义、连线关系和底层数据已完整识别，回答必须保留“图形语义未核验”的范围说明，不生成完整图形分析报告。含图表/Visio 可用内部 PDF 辅助解析，但不能仅凭转换或文字分页完成解除该限制。`extracted` 当前仅表示受控文字提取，不含附件完整布局及图形，coverage 必须为 partial；`unreadable` 表示未读取。底层数据、附件全文与静态预览不同；未读部分不能混入结论。
+- 只转换或得到部分内容不能满足完整分析报告生成要求。先补齐来源；无法补齐时提供明确范围的文本答复，不通过其他写文件工具绕过限制。
+- 工具返回固定不可恢复转换原因、`retryable=false` 时，说明具体失败原因并停止相同参数重试；不能通过换输出文件名、shell、脚本或另一个未经授权工具绕过。

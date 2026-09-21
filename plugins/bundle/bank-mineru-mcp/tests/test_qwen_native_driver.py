@@ -37,6 +37,18 @@ class _Tools:
         del document_ref, cursor, limit
         return {"chunks": [], "next_cursor": None, "has_more": False}
 
+    def read_range(self, document_ref, **kwargs):
+        del document_ref, kwargs
+        return {"markdown": "", "has_more": False}
+
+    def aggregate(self, document_ref, ops):
+        del document_ref, ops
+        return {"results": []}
+
+    def search(self, document_ref, query, sheet=None, limit=100):
+        del document_ref, query, sheet, limit
+        return {"hits": []}
+
 
 def _port() -> int:
     with socket.socket() as sock:
@@ -84,12 +96,18 @@ async def test_qwen_native_driver_exposes_display_namespace_without_mcp_prefix(
         )
         capabilities = await manager.list_capabilities(kind="tool")
         assert [item.name for item in capabilities] == [
+            "aggregate",
             "parse_documents",
             "read_document_chunks",
+            "read_range",
+            "search",
         ]
         assert [item.exposure.tool_name for item in capabilities] == [
+            "MinerU__aggregate",
             "MinerU__parse_documents",
             "MinerU__read_document_chunks",
+            "MinerU__read_range",
+            "MinerU__search",
         ]
         assert all("mcp__" not in item.exposure.tool_name for item in capabilities)
         parse_capability = next(
@@ -106,14 +124,17 @@ async def test_qwen_native_driver_exposes_display_namespace_without_mcp_prefix(
         read_capability = next(
             item for item in capabilities if item.name == "read_document_chunks"
         )
-        result = await manager.invoke_capability(
-            DriverInvocation(
-                read_capability.capability_id,
-                {"document_ref": "dr1_test"},
-                request_context={"channel": "bank-runtime", "user_id": "u001"},
+        from bank_runtime.gateway.document_access import approved_document_call
+        with approved_document_call("task_001", "read_document_chunks", {"document_ref": "dr1_test"}):
+            result = await manager.invoke_capability(
+                DriverInvocation(
+                    read_capability.capability_id,
+                    {"document_ref": "dr1_test"},
+                    request_context={"channel": "bank-runtime", "user_id": "u001"},
+                )
             )
-        )
         assert result.ok is True
+        assert result.value.structuredContent == {"chunks": [], "next_cursor": None, "has_more": False}
     finally:
         await manager.shutdown_all()
         await server.stop()

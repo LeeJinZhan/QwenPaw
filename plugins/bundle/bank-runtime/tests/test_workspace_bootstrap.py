@@ -55,6 +55,9 @@ def test_initial_config_aligns_general_assistant_and_governed_document_tools(
         assert config["mcp"]["clients"]["mineru"]["tools"] == [
             "parse_documents",
             "read_document_chunks",
+            "read_range",
+            "aggregate",
+            "search",
         ]
         assert config["security"]["trusted_proxies"] == ["10.20.0.0/16"]
         assert config["security"]["allow_no_auth_hosts"] == []

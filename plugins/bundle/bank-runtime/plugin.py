@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+import os
 from pathlib import Path
 
 from fastapi import APIRouter
@@ -23,6 +24,7 @@ from bank_runtime.hooks import bank_runtime_startup_guard
 from bank_runtime.middleware import bank_runtime_middleware_factory
 from bank_runtime.gateway.middleware import BankRuntimeGatewayInstallHook
 from bank_runtime.gateway.hooks import BankRuntimeToolVisibilityHook
+from bank_runtime.sandbox.cache_retention import CacheCleanupLoop
 from bank_runtime.sandbox.hooks import (
     BankRuntimeAttachmentPrepareHook,
     BankRuntimeSandboxCleanupHook,
@@ -64,6 +66,7 @@ class BankRuntimePlugin:
 
     def __init__(self) -> None:
         self._registered = False
+        self._cache_cleanup = CacheCleanupLoop(Path(os.environ.get("QWENPAW_TASK_FILE_ROOT") or "/tmp/qwenpaw-runtime-task-files"))
 
     def register(self, api: PluginApi) -> None:
         if self._registered:
@@ -103,6 +106,8 @@ class BankRuntimePlugin:
             # and 100. Audit the final registry rather than a partial view.
             priority=1000,
         )
+        api.register_startup_hook(hook_name="bank_runtime_cache_cleanup", callback=self._cache_cleanup.start, priority=1100)
+        api.register_shutdown_hook(hook_name="bank_runtime_cache_cleanup_stop", callback=self._cache_cleanup.close, priority=50)
         api.register_middleware(
             bank_runtime_middleware_factory,
             priority=10,

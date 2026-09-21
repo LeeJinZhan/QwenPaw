@@ -705,11 +705,11 @@ async def test_repeated_artifact_input_rejections_stop_before_next_model_call():
 async def test_admission_does_not_reset_parameter_failure_streak():
     client = _Client()
     middleware = BankRuntimeGatewayMiddleware(client)
-    middleware.artifact_input_failures = 2
+    middleware.artifact_input_failures = 1
     engine = GatewayPermissionEngine(_DelegateEngine(PermissionBehavior.ALLOW, client.events), middleware)
     decision = await engine.check_permission(SimpleNamespace(name="artifact_generate"), {"artifact_type": "docx"})
     assert decision.behavior == PermissionBehavior.ALLOW
-    assert middleware.artifact_input_failures == 2
+    assert middleware.artifact_input_failures == 1
 
 
 @pytest.mark.asyncio
@@ -737,12 +737,40 @@ async def test_execution_validation_failures_share_the_preflight_budget():
     async def forbidden(**kwargs):
         raise AssertionError("local execution forbidden")
         yield
-    for i in range(3):
+    for i in range(2):
         payload = {"artifact_type": "docx"}
         await engine.check_permission(SimpleNamespace(name="artifact_generate"), payload)
         call = ToolCallBlock(id=f"call-{i}", name="artifact_generate", input=json.dumps(payload))
         _ = [item async for item in middleware.on_acting(SimpleNamespace(), {"tool_call": call}, forbidden)]
-    assert middleware.artifact_input_failures == 3
+    assert middleware.artifact_input_failures == 2
     with pytest.raises(Exception) as error:
         await middleware.on_model_call(None, {}, None)
     assert getattr(error.value, "error_code", "") == "ARTIFACT_VALIDATION_FAILED"
+
+
+@pytest.mark.asyncio
+async def test_exhausted_renderer_layout_stops_diagnostic_generation_in_same_turn():
+    from bank_runtime.gateway.client import _response_error
+    class Client(_Client):
+        executions = 0
+        async def execute_runtime_tool(self, *args):
+            self.executions += 1
+            raise _response_error({"code": "ARTIFACT_VALIDATION_FAILED", "details": {
+                "reason": "presentation_layout_capacity", "retryable": False,
+                "page_index": 5, "layout": "chart", "element": "chart_conclusion",
+            }}, "failed")
+    client = Client()
+    middleware = BankRuntimeGatewayMiddleware(client)
+    async def forbidden(**kwargs):
+        raise AssertionError("must not execute locally")
+        yield
+    for i in range(2):
+        payload = {"artifact_type": "pptx", "output_name": "报告.pptx" if i == 0 else "测试.pptx"}
+        middleware.prepare("artifact_generate", payload, {"tool_call_id": f"call-{i}"})
+        call = ToolCallBlock(id=f"call-{i}", name="artifact_generate", input=json.dumps(payload))
+        with pytest.raises(Exception):
+            _ = [x async for x in middleware.on_acting(None, {"tool_call": call}, forbidden)]
+    assert client.executions == 1
+    with pytest.raises(Exception) as raised:
+        await middleware.on_model_call(None, {}, None)
+    assert raised.value.message == "PPTX_LAYOUT_CAPACITY|5|chart_conclusion"

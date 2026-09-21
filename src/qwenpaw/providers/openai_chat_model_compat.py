@@ -14,6 +14,7 @@ from typing import Any, AsyncGenerator, Callable
 from agentscope.message import ToolCallBlock
 from agentscope.model import OpenAIChatModel
 from agentscope.model._model_response import ChatResponse
+from qwenpaw.exceptions import ModelExecutionException
 
 from qwenpaw.local_models.tag_parser import (
     parse_tool_calls_from_text,
@@ -108,6 +109,19 @@ def _sanitize_chunk(chunk: Any) -> Any:
     changed = False
 
     for choice in choices:
+        finish_reason = getattr(choice, "finish_reason", None)
+        if finish_reason in {"error", "length", "content_filter"}:
+            # AgentScope otherwise ignores finish_reason and emits a completed
+            # response even when tool arguments were cut off by the provider.
+            # Do not expose provider error bodies or partial document content.
+            logger.warning(
+                "Upstream generation did not complete: finish_reason=%s",
+                finish_reason,
+            )
+            raise ModelExecutionException(
+                model="upstream",
+                details={"finish_reason": finish_reason},
+            )
         delta = getattr(choice, "delta", None)
         if delta is None:
             sanitized_choices.append(choice)

@@ -185,3 +185,21 @@ async def test_client_rejects_runtime_permit_with_wrong_agent(monkeypatch) -> No
             tool_input,
             call_id="model_call_001",
         )
+
+@pytest.mark.asyncio
+async def test_execution_transport_waits_for_document_worker_but_control_calls_remain_short(monkeypatch):
+    import httpx
+    timeouts = []
+    class Transport:
+        def __init__(self, **kwargs):
+            timeouts.append(httpx.Timeout(kwargs['timeout']).read)
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): pass
+        async def post(self, url, **kwargs):
+            return httpx.Response(200, json={'status': 'success'})
+    monkeypatch.setattr(httpx, 'AsyncClient', Transport)
+    client = GatewayClient(_config())
+    await client._post({'phase': 'preflight'})
+    await client._post({'phase': 'execute'})
+    await client._post({'phase': 'result'})
+    assert timeouts == [10, 300, 10]

@@ -404,3 +404,24 @@ async def test_multiple_tagged_tool_calls_have_unique_ids() -> None:
     ]
     assert [block.name for block in tool_blocks] == ["first", "second"]
     assert len({block.id for block in tool_blocks}) == 2
+
+
+@pytest.mark.parametrize('reason', ['error', 'length', 'content_filter'])
+async def test_abnormal_stream_end_never_completes_partial_tool_call(reason):
+    from qwenpaw.exceptions import ModelExecutionException
+    model = CompatHarnessOpenAIChatModel(
+        credential=OpenAICredential(api_key='sk-test', base_url='https://api.openai.com/v1'),
+        model='dummy', stream=True,
+    )
+    partial = _make_chunk([SimpleNamespace(index=0, id='call_word',
+        function=SimpleNamespace(name='artifact_generate', arguments='{"title":"报告",'))])
+    terminal = _make_chunk()
+    terminal.choices[0].finish_reason = reason
+    seen = []
+    object.__setattr__(model, '_test_stream', FakeAsyncStream([partial, terminal]))
+    with pytest.raises(ModelExecutionException) as error:
+        response = await model(messages=[])
+        async for chunk in response:
+            seen.append(chunk)
+    assert not any(chunk.is_last for chunk in seen)
+    assert error.value.details['finish_reason'] == reason

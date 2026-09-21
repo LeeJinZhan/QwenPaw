@@ -47,6 +47,13 @@ def reset_sandbox_tool_state(token) -> None:
     _STATE.reset(token)
 
 
+def attachment_read_error() -> str:
+    state = _STATE.get()
+    if state is None:
+        return ""
+    return next(iter(state.processor.read_failures.values()), "")
+
+
 async def runtime_sandbox_files_search(
     query: str = "",
     content_types: list[str] | None = None,
@@ -136,8 +143,9 @@ def _prepared_blocks(state, prepared):
 async def converted_attachment_blocks(payload, result):
     """Continue an admitted legacy conversion through the same file authorization."""
     state = _STATE.get()
-    if (state is None or payload.get("source_type") not in {"session_file", "workspace_file"}
-            or payload.get("target_format") not in {"docx", "xlsx"}
+    if (state is None or not (payload.get("source_type") in {"session_file", "workspace_file"}
+                                      or (payload.get("purpose") == "read" and payload.get("source_generated_file_id")))
+            or payload.get("target_format") not in {"docx", "xlsx", "pptx", "pdf"}
             or result.get("artifact_status") != "succeeded"):
         return []
     ids = result.get("generated_file_ids") or []

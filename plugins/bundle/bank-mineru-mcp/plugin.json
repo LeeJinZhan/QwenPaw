@@ -17,7 +17,13 @@
     "mcp_server": {
       "transport": "streamable_http",
       "path": "/mcp",
-      "tools": ["parse_documents", "read_document_chunks"]
+      "tools": [
+        "parse_documents",
+        "read_document_chunks",
+        "read_range",
+        "aggregate",
+        "search"
+      ]
     }
   }
 }

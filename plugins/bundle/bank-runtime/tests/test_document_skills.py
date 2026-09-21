@@ -4,6 +4,13 @@ import re
 ROOT = Path(__file__).resolve().parents[1] / "skills"
 
 
+def test_presentation_text_guidance_uses_layout_capacity_not_short_character_caps():
+    content = (ROOT / "bank-presentation/SKILL.md").read_text()
+    for obsolete in ("conclusion（100 字以内）", "最多 36 字", "不超过 16 字", "单元格不超过 2000 字"):
+        assert obsolete not in content
+    assert "完整说明页" in content and "资源预算" in content
+
+
 def test_three_document_skills_are_packaged_with_valid_local_references():
     for name in ("bank-document-writing", "bank-document-review", "bank-document-qa"):
         entry = ROOT / name / "SKILL.md"
@@ -97,6 +104,14 @@ def test_real_native_viewer_returns_complete_document_rules_without_reference_re
     assert "template_fill_docx" in writing and "15000" in writing
     for name in ("bank-document-review", "bank-document-qa"):
         assert "材料" in asyncio.run(_read_native_skill(name))
+
+
+def test_table_completeness_rules_survive_native_skill_viewer():
+    import asyncio
+
+    content = asyncio.run(_read_native_skill("bank-document-qa"))
+    for required in ("next_cursor", "has_more=false", "chunk_count", "按 chunk index 去重", "日均活跃用户数", "未分类项", "生成报告文件也不能替代完整性核对"):
+        assert required in content
 
 
 def test_presentation_skill_is_readable_via_native_skill_viewer():

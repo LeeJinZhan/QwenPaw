@@ -13,6 +13,7 @@ from typing import Any
 import uuid
 
 from .scope import SandboxRequestScope
+from .cache_retention import CacheLease
 
 _SAFE_NAME = re.compile(r"[^A-Za-z0-9._-]+")
 _SAFE_EXTENSION = re.compile(r"\.[A-Za-z0-9]{1,15}")
@@ -57,6 +58,7 @@ class TaskAttachmentCache:
         self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
         os.chmod(self.root, 0o700)
         self._locks: dict[str, asyncio.Lock] = {}
+        self._leases: dict[str, CacheLease] = {}
         self._prepared: dict[tuple[str, str], PreparedSandboxFile] = {}
 
     async def prepare_files(
@@ -112,6 +114,10 @@ class TaskAttachmentCache:
             os.chmod(task_root, 0o700)
             prepared: list[PreparedSandboxFile] = []
             try:
+                if scope.task_id not in self._leases:
+                    lease = CacheLease(task_root)
+                    self._leases[scope.task_id] = lease
+                    lease.mark(task_root, scope)
                 for file_id in ordered:
                     item = self._prepared.get((scope.task_id, file_id))
                     if item is None or not item.local_path.is_file():
@@ -126,7 +132,11 @@ class TaskAttachmentCache:
                         self._prepared[(scope.task_id, file_id)] = item
                     prepared.append(item)
             except BaseException:
-                await _run_thread(_safe_remove_tree, self.root, task_root)
+                try:
+                    if scope.task_id in self._leases:
+                        await _run_thread(_safe_remove_tree, self.root, task_root)
+                finally:
+                    self._release_lease(scope.task_id)
                 for key in [key for key in self._prepared if key[0] == scope.task_id]:
                     self._prepared.pop(key, None)
                 raise
@@ -137,10 +147,20 @@ class TaskAttachmentCache:
         lock = self._locks.setdefault(normalized, asyncio.Lock())
         async with lock:
             task_root = self._task_root(normalized)
-            await _run_thread(_safe_remove_tree, self.root, task_root)
+            try:
+                if task_root.is_dir() and normalized not in self._leases:
+                    self._leases[normalized] = CacheLease(task_root)
+                await _run_thread(_safe_remove_tree, self.root, task_root)
+            finally:
+                self._release_lease(normalized)
             for key in [key for key in self._prepared if key[0] == normalized]:
                 self._prepared.pop(key, None)
         self._locks.pop(normalized, None)
+
+    def _release_lease(self, task_id):
+        lease = self._leases.pop(task_id, None)
+        if lease is not None:
+            lease.close()
 
     def _task_root(self, task_id: str) -> Path:
         if not re.fullmatch(r"[A-Za-z0-9_-]{1,160}", task_id):

@@ -1,5 +1,6 @@
 """Model-facing presentation guidance and bounded execution outcomes."""
 from typing import Any, Mapping
+from .conversion_reports import validate_conversion_report, conversion_reason, REASONS
 
 
 PUBLIC_RESPONSE_GUIDANCE = """USER-FACING RESPONSE CONTRACT
@@ -72,12 +73,27 @@ def artifact_model_result(envelope: Mapping[str, Any]) -> dict[str, Any]:
     raw = envelope.get("result")
     raw = raw if isinstance(raw, Mapping) else {}
     result = {key: raw[key] for key in ("artifact_status", "artifact_type", "operation", "generated_file_ids") if key in raw}
+    report = validate_conversion_report(raw.get("conversion_report"))
+    if report is not None:
+        result["conversion_report"] = report
+    if raw.get("purpose") in ("read", "delivery"):
+        result["purpose"] = raw["purpose"]
     status = str(raw.get("artifact_status") or "")
     if envelope.get("status") != "success":
-        message = failure_message(str(envelope.get("error_code") or ""))
+        reason = conversion_reason(envelope)
+        message = REASONS.get(reason) or failure_message(str(envelope.get("error_code") or ""))
+        if reason:
+            result.update(reason=reason, retryable=False)
         outcome = "failed"
     elif status == "succeeded" and result.get("generated_file_ids"):
         message, outcome = "文件已生成，可通过文件卡片打开或下载。", "completed"
+        if raw.get("purpose") == "read":
+            message = "内部读取副本已准备，仍须读取其内容及全部分页后才能分析。此副本仅用于识别。"
+        if report is not None:
+            if report["coverage"] == "partial":
+                message += "转换仅保留部分内容，部分对象或资源未读取；后续回答必须说明范围。"
+            if not report["editable"]:
+                message += "部分内容已静态化，不再支持原对象的双击编辑。"
     elif status in {"queued", "pending", "running", "preparing", "rendering", "validating", "publishing"}:
         message, outcome = "正在处理文件，尚未完成。", "pending"
     elif status in {"failed", "cancelled"}:
