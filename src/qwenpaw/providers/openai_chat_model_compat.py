@@ -7,6 +7,7 @@ import inspect
 import json
 import logging
 import re
+from copy import copy
 from datetime import datetime
 from types import SimpleNamespace
 from typing import Any, AsyncGenerator, Callable
@@ -15,6 +16,10 @@ from agentscope.message import ToolCallBlock
 from agentscope.model import OpenAIChatModel
 from agentscope.model._model_response import ChatResponse
 from qwenpaw.exceptions import ModelExecutionException
+from qwenpaw.providers.chat_message_order import (
+    SystemMessageOrderFormatter,
+    validate_extra_body,
+)
 
 from qwenpaw.local_models.tag_parser import (
     parse_tool_calls_from_text,
@@ -770,6 +775,10 @@ class OpenAIChatModelCompat(OpenAIChatModel):
         **generate_kwargs: Any,
     ) -> Any:
         merged = {**self._extra_generate_kwargs, **generate_kwargs}
+        # The SDK merges extra_body after formatter output. Reject structural
+        # overrides before they can undo role ordering or tool restrictions.
+        validate_extra_body(self.extra_body)
+        validate_extra_body(merged.get("extra_body"))
         self._consume_disable_thinking(merged)
         if self._output_token_param != "max_tokens":
             max_tokens = merged.pop("max_tokens", None)
@@ -778,7 +787,12 @@ class OpenAIChatModelCompat(OpenAIChatModel):
         if self._default_headers:
             existing = merged.get("extra_headers") or {}
             merged["extra_headers"] = {**self._default_headers, **existing}
-        return await super()._call_api(
+        # AgentScope accepts Msg objects here and formats them inside _call_api.
+        # Normalize that formatter's output, not its still-unformatted input.
+        # Never swap self.formatter while other calls may be using this model.
+        request_model = copy(self)
+        request_model.formatter = SystemMessageOrderFormatter(self.formatter)
+        return await super(OpenAIChatModelCompat, request_model)._call_api(
             model_name,
             messages,
             tools,
