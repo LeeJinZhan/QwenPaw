@@ -204,11 +204,7 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
             raise FileOperationsIncompleteError()
 
     def _requires_conversion_read(self, payload):
-        return payload.get("purpose") == "read" or (
-            payload.get("source_type") in {"session_file", "workspace_file"}
-            and payload.get("target_format") in {"docx", "xlsx", "pptx"}
-            and not (self.artifact_intent and self.artifact_intent.operation == "convert")
-        )
+        return payload.get("purpose", "delivery") == "read"
 
     def _conversion_retry_reason(self, name, payload):
         if name != "artifact_convert":
@@ -422,6 +418,11 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
         state = self._artifact_turn_state
         if state is None or state.invoked:
             response = await next_handler(**input_kwargs)
+            if self.unresolved_file_operations or self.artifact_input_failures:
+                captured = await _capture_model_output(response)
+                if not _tool_call_names(captured.final):
+                    self._check_file_completion()
+                response = captured.replay()
             if self.conversion_coverage.requires_scope:
                 return await self._scoped_model_response(response)
             return response
@@ -909,11 +910,12 @@ class GatewayPermissionEngine:
             )
         except Exception as exc:
             self.middleware._remember_conversion_failure(tool_name, tool_input, getattr(exc, "conversion_failure", ""))
-            self.middleware.unresolved_file_operations.update(operation_keys(tool_name, tool_input))
             if tool_name in _RUNTIME_EXECUTED_TOOLS and getattr(exc, "code", "") in {
                 "INVALID_REQUEST", "BAD_REQUEST", "ARTIFACT_VALIDATION_FAILED",
             }:
                 self.middleware._record_artifact_input_failure(tool_name, tool_input)
+            else:
+                self.middleware.unresolved_file_operations.update(operation_keys(tool_name, tool_input))
             _logger.warning(
                 "Runtime tool preflight failed: task_id=%s tool=%s error_type=%s",
                 getattr(getattr(self.middleware.client, "config", None), "task_id", ""),

@@ -65,7 +65,7 @@ def test_retry_hint_is_only_schema_guidance_from_a_rejected_docx_call():
 @pytest.mark.asyncio
 async def test_followup_without_frozen_intent_retains_rejected_official_layout():
     from types import SimpleNamespace
-    from agentscope.message import TextBlock
+    from agentscope.message import TextBlock, ToolCallBlock
     from agentscope.model import ChatResponse
     from agentscope.permission import PermissionBehavior
     from bank_runtime.gateway.client import GatewayError
@@ -87,13 +87,13 @@ async def test_followup_without_frozen_intent_retains_rejected_official_layout()
         assert content['properties']['kind']['enum'] == ['official_document']
         prompt = str(kwargs['messages'])
         assert 'kind' in prompt and '不得改成普通' in prompt
-        return ChatResponse(content=[TextBlock(text='prepared')], is_last=True)
+        return ChatResponse(content=[ToolCallBlock(id='correction', name='artifact_generate', input='{}')], is_last=True)
     await middleware.on_model_call(None, {'tools': tools}, model)
 
 
 @pytest.mark.asyncio
 async def test_rejected_proposal_never_overrides_trusted_layout_or_adds_tools():
-    from agentscope.message import TextBlock
+    from agentscope.message import TextBlock, ToolCallBlock
     from agentscope.model import ChatResponse
     from bank_runtime.gateway.middleware import BankRuntimeGatewayMiddleware
     intent = ArtifactDeliveryIntent('generate', 'docx', layout_kind='standard_document')
@@ -106,7 +106,7 @@ async def test_rejected_proposal_never_overrides_trusted_layout_or_adds_tools():
         assert len(kwargs['tools']) == 1
         content = kwargs['tools'][0]['function']['parameters']['properties']['content']
         assert 'sections' in content['properties'] and 'kind' not in content['properties']
-        return ChatResponse(content=[TextBlock(text='prepared')], is_last=True)
+        return ChatResponse(content=[ToolCallBlock(id='correction', name='artifact_generate', input='{}')], is_last=True)
     await middleware.on_model_call(None, {'tools': schemas}, model)
     assert middleware.artifact_intent is intent
     assert not middleware._prepared

@@ -9,14 +9,11 @@ def operation_keys(name, payload):
                 for item in payload.get("documents", []) if isinstance(item, Mapping)}
     if name not in {"artifact_generate", "artifact_revise", "artifact_convert", "template_fill_docx"}:
         return set()
-    source = payload.get("source_generated_file_id") or payload.get("source_id")
-    refs = payload.get("source_refs") or []
-    if not source and refs:
-        source = ",".join(sorted(str(ref.get("source_id") or "") for ref in refs if isinstance(ref, Mapping)))
-    target = payload.get("artifact_type") or payload.get("target_format") or name
-    # A success for another source/output cannot erase an unresolved failure.
-    identity = source or payload.get("output_name") or payload.get("title") or "unspecified"
-    return {f"artifact:{target}:{identity}"}
+    # Full payload and tool identity prevent same-name/source operations from
+    # erasing one another. Parameter rejections are tracked separately because
+    # no file operation has started at preflight.
+    from .protocol import canonical_payload_hash
+    return {f"artifact:{name}:{canonical_payload_hash(payload)}"}
 
 
 def _result_values(text):

@@ -53,7 +53,11 @@ class CompatHarnessOpenAIChatModel(OpenAIChatModelCompat):
 
 class FakeAsyncStream:
     def __init__(self, items: list[Any]):
-        self._items = items
+        # These fixtures represent successful provider responses. Include the
+        # protocol terminal; truncated streams have dedicated regression cases.
+        terminal = _make_chunk()
+        terminal.choices[0].finish_reason = "stop"
+        self._items = [*items, terminal]
         self._iter = None
 
     async def __aenter__(self) -> "FakeAsyncStream":

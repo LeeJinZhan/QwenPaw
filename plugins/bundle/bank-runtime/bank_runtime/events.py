@@ -10,6 +10,8 @@ from typing import Any
 from .public_thinking import PublicThinkingStream
 
 _TERMINAL_EVENTS = {"answer.completed", "answer.failed"}
+_CODE_EXAMPLE = re.compile(r"(`+).*?(?:\1|$)", re.DOTALL)
+_THINK_MARKUP = re.compile(r"(?<!\\)</?think>", re.IGNORECASE)
 _RECOVERABLE_SESSION_ERROR_CODES = {
     "RUNTIME_SESSION_NOT_FOUND",
     "RUNTIME_SESSION_SCOPE_MISMATCH",
@@ -58,6 +60,7 @@ class CompactEventProjector:
         self._active_message_id = ""
         self._classified_text_messages: set[str] = set()
         self._streamed_text_messages: set[str] = set()
+        self._retired_text_messages: set[str] = set()
 
     def project(self, raw_event: dict[str, Any]) -> list[dict[str, Any]]:
         phases = []
@@ -65,14 +68,26 @@ class CompactEventProjector:
             message_id = str(raw_event.get('msg_id') or raw_event.get('message_id') or raw_event.get('id') or '')
             kind = str(raw_event.get('type') or '').lower()
             previous = self._active_message_id
-            if previous and kind in {'reasoning', 'thinking'} and message_id == previous:
-                self._active_message_id = ''
-            elif previous and message_id != previous and kind in {'message', 'plugin_call', 'plugin_call_output', 'reasoning', 'thinking'}:
+            known_kind = self._message_stream_types.get(message_id)
+            reclassified = known_kind in {'message', 'text'} and kind in {'reasoning', 'thinking'}
+            if reclassified:
+                # Classification is control data. It must survive suppression of
+                # private thinking text and can also withdraw an earlier phase.
+                if self._snapshots.pop(('answer.chunk', message_id), ''):
+                    phases.append({'event': 'answer.retracted', 'message_id': message_id})
+                self._retired_text_messages.add(message_id)
+                if message_id == previous:
+                    self._active_message_id = ''
+            elif known_kind and previous and message_id != previous:
+                # Old block completion/snapshot is not a new ReAct iteration.
+                return []
+            elif previous and not known_kind and message_id != previous and kind in {'message', 'plugin_call', 'plugin_call_output', 'reasoning', 'thinking'}:
                 text = self._snapshots.get(('answer.chunk', previous), '')
                 if text:
                     phases.append({'event': 'answer.phase', 'message_id': previous, 'text': text})
+                self._retired_text_messages.add(previous)
                 self._active_message_id = ''
-            if kind == 'message' and message_id:
+            if kind == 'message' and message_id and message_id not in self._retired_text_messages:
                 self._active_message_id = message_id
         projected = self._project(raw_event)
         if any(item.get("event") == "answer.completed" for item in projected):
@@ -168,6 +183,8 @@ class CompactEventProjector:
             if obj == "content"
             else declared_stream_type
         )
+        if message_id in self._retired_text_messages and stream_type in {"message", "text"}:
+            return []
         if stream_type not in {"message", "reasoning", "thinking", "text"}:
             return []
         is_thinking = stream_type in {"reasoning", "thinking"}
@@ -201,6 +218,12 @@ class CompactEventProjector:
             self._snapshots[key] = current
         if not chunk:
             return []
+        if not is_thinking and _THINK_MARKUP.search(previous[-8:] + chunk):
+            # Defence for providers/old workers which did not classify inline
+            # reasoning. Do not turn it into a public phase or a stored answer.
+            if _THINK_MARKUP.search(_CODE_EXAMPLE.sub("", self._snapshots[key])):
+                self._active_message_id = ""
+                return [self._terminal_event("answer.failed")]
         if not is_thinking and obj in {"message", "content"}:
             # Preserve classification for ambiguous native snapshots, but do not
             # hold explicitly typed TEXT_BLOCK streams until the response ends.
@@ -212,7 +235,7 @@ class CompactEventProjector:
                 return []
             self._streamed_text_messages.add(message_id)
         payload = {"event": event, "text": chunk}
-        if not is_thinking and self._active_message_id == message_id:
+        if is_thinking or self._active_message_id == message_id:
             payload["message_id"] = message_id
         return [payload]
 
