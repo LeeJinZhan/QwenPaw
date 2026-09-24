@@ -15,3 +15,21 @@ def mcp_call_metadata(value):
         yield
     finally:
         _metadata.reset(token)
+
+_timeout = ContextVar("mcp_call_timeout", default=None)
+
+def current_mcp_timeout():
+    return _timeout.get()
+
+@contextmanager
+def mcp_call_timeout(seconds):
+    """Local caller budget, never serialized into model arguments or metadata."""
+    from datetime import timedelta
+    import math
+    if seconds is not None and (not math.isfinite(seconds) or seconds <= 0):
+        raise TimeoutError('MCP task budget exhausted')
+    token = _timeout.set(timedelta(seconds=min(seconds, 1800)) if seconds is not None else None)
+    try:
+        yield
+    finally:
+        _timeout.reset(token)

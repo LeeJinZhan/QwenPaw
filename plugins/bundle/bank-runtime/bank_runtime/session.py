@@ -22,7 +22,13 @@ from qwenpaw.runtime.phases import Phase
 _SCOPE_KEY = "bank_runtime_scope"
 _CTX_TOKEN_KEY = "bank_runtime_session_context_token"
 _DROP = object()
-_RUNTIME_REFERENCE = re.compile(r"\b(?:fr1|dr1|cur1)_[0-9a-f]{64}_[0-9a-f]{64}\b")
+# Tool arguments/results are often JSON strings, not nested dictionaries.
+# Redact both document handles and the actual offset-bearing cursor format on
+# save AND load so existing sessions cannot feed task-local references back.
+_RUNTIME_REFERENCE = re.compile(
+    r"\b(?:(?:fr1|dr1|ds1|cur1)_[0-9a-f]{64}_[0-9a-f]{64}"
+    r"|(?:cur1|cs1)_[0-9]+_[0-9a-f]{32}_[0-9a-f]{64})\b"
+)
 
 
 class ManagedSessionError(AgentRuntimeErrorException):

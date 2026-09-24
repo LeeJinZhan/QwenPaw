@@ -61,6 +61,14 @@ description: 用于本行制度、业务流程、办理条件、内部产品规�
 
 ## 表格计算完整性
 
+### 先确定问题，再一次取齐所需统计
+
+- 续聊涉及历史文件且当前清单未提供时，依据会话保留的原始文件名，使用已有查找/选择能力仅选所需文件并重新授权；历史元数据不是读取凭证，普通聊天不查找或准备文件。不要沿用上一任务的 file_ref；清单已提供文件时不再反复搜索。仅需统计时，解析取得完整目录和列名后直接统计，不为了“读完”而遍历所有原文。
+- 一次列出本轮要求的指标，将同一文档的不同维度放进一次 aggregate 的 ops（最多10项），同一范围多个指标放进同一 metrics。类别/小类计数、风险分布可一次取齐；总计另用无分组 count 核对。已经成功的同参数查询直接复用，不把查找→读取→统计当成每个指标的固定循环。
+- 缺少机构、日期等所需列时，先核对该工作表完整列目录；确认缺列后完成已有维度，明确“文件没有机构/日期字段，无法据此统计该维度”。不能循环搜索列名、假设某段描述就是机构/日期，或把缺少字段解释为文件未读完。
+- 分组结果分页时只续取未返回的 group_cursor，并保留同一统计口径；空工作表无需读页。统计结果覆盖所需数据和全部分组即可回答对应统计，但不能声称读完所有正文，也不能抵消其他读取失败或统计分页缺口。尚缺原文证据的解释或排除性结论才补相应行列；局部补读明确指定 rows 范围，范围已完整返回就复用，不反复发起无范围读取。统计行范围使用 row_range，不混用读取的 rows 字段。
+- 文件名使用当前清单或 inventory.title 的原始显示名；不得用内部缓存名、file_id 或 attachment.xlsx 替代真实上传文件名。
+
 工具名中的 MinerU 是兼容命名，不代表所有文件都使用 MinerU 引擎。以 parse 返回的 content_mode 和 inventory.engine 判断路径；structured / ooxml-1 表示 Excel 结构化解析。向用户说明时使用“Excel 结构化解析”或“表格读取”，不要把兼容工具名当作实际解析引擎。
 
 整份文件总结须先核对工作表目录，按 read_range 分页覆盖相关工作表后综合总结；特定工作表或行列问题只读取所需范围。聚合结果支撑相应统计，不替代未读取的行级事实。read_range 返回 has_more=true 时从 next_row_cursor 续读；指定 rows 的请求续读时保留原结束行，避免超出用户指定范围。列投影不等于读取全部列。
@@ -97,7 +105,7 @@ description: 用于本行制度、业务流程、办理条件、内部产品规�
 - XLSX/CSV/TSV 始终使用结构化解析，不因返回页过大改转 PDF。文件解析完成后，按问题选择服务端 aggregate、search 或 read_range，不把整份50 MiB文件逐段送入模型。
 - 首次 inventory 是目录摘要。inventory_complete=false 时，使用同一 document_ref 调用 read_range(format="inventory", row_cursor=next_inventory_cursor)，直到工作表目录取全；未取全不能声称覆盖全部 Sheet。列名或合并区域需要详情时，增加 sheet 参数，从 row_cursor=0 开始分页。
 - 单个单元格内容过长时，使用 read_range(format="cell", sheet=实际表名, rows=[r,r], columns=[实际列名])，把返回的 next_cell_cursor 作为 row_cursor 继续。单元格分段或投影列不代表整行/整表已读完。
-- 高基数分组使用 aggregate 的 op.group_cursor=0，按 next_group_cursor 获取后续组。truncated=true 或 groups_complete=false 时不能把当前页当成全部分组；需要全表总计时另做无分组聚合并核对口径。
+- 高基数分组默认从第一页返回，也可显式使用 aggregate 的 op.group_cursor=0，按 next_group_cursor 获取后续组。truncated=true 或 groups_complete=false 时不能把当前页当成全部分组；需要全表总计时另做无分组聚合并核对口径。
 - 重试解析同一授权文件会复用已发布结果。引用过期或服务重启后，通过当前任务有效 file_id/file_ref 重新解析以恢复授权；不构造引用，不通过转换工具绕过拒绝。
 - 质量为 partial 的读取可能包含不可用公式值，不把它们当零；只对明确可用范围作结论。合并单元格的展示展开不表示金额重复出现，不对预览结果再次盲目求和。
 

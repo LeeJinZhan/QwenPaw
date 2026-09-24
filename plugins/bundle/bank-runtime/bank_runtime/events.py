@@ -8,6 +8,7 @@ import re
 from collections.abc import AsyncIterable, AsyncIterator
 from typing import Any
 from .public_thinking import PublicThinkingStream
+from .delivery_state import DeliveryState, delivery_scope, current_delivery_state
 
 _TERMINAL_EVENTS = {"answer.completed", "answer.failed"}
 _CODE_EXAMPLE = re.compile(r"(`+).*?(?:\1|$)", re.DOTALL)
@@ -17,6 +18,7 @@ _RECOVERABLE_SESSION_ERROR_CODES = {
     "RUNTIME_SESSION_SCOPE_MISMATCH",
 }
 _PUBLIC_ERROR_CODES = _RECOVERABLE_SESSION_ERROR_CODES | {
+    'MODEL_TIMEOUT', 'MODEL_OUTPUT_TRUNCATED', 'MODEL_UPSTREAM_UNAVAILABLE', 'MODEL_REQUEST_REJECTED', 'MODEL_CONTENT_FILTERED', 'MODEL_EXECUTION_ERROR', "WORKER_FAILED",
     "DOCUMENT_ARGUMENT_INVALID", "DOCUMENT_FORMULA_CACHE_MISSING",
     "DOCUMENT_CONVERSION_PARTIAL",
     "MINERU_SUBMIT_AMBIGUOUS", "DOCUMENT_READ_INCOMPLETE", "DOCUMENT_READ_NO_PROGRESS", "DOCUMENT_PARSE_FAILED", "DOCUMENT_REF_EXPIRED", "DOCUMENT_RESULT_TOO_LARGE", "DOCUMENT_TEXT_TRUNCATED", "DOCUMENT_TEXT_ENCODING_UNSUPPORTED", "MINERU_TIMEOUT", "MINERU_UNAVAILABLE",
@@ -51,8 +53,9 @@ def _delta(previous: str, current: str) -> str:
 class CompactEventProjector:
     """Project native 2.1 events into the small Runtime-owned event set."""
 
-    def __init__(self, runtime_task_id: str) -> None:
+    def __init__(self, runtime_task_id: str, delivery_state=None) -> None:
         self.runtime_task_id = runtime_task_id
+        self.delivery_state = delivery_state
         self._snapshots: dict[tuple[str, str], str] = {}
         self._content_snapshots: dict[tuple[str, str], dict[str, str]] = {}
         self._message_stream_types: dict[str, str] = {}
@@ -256,7 +259,10 @@ class CompactEventProjector:
     ) -> dict[str, Any]:
         self._terminal = True
         if event == "answer.completed":
+            state = self.delivery_state or current_delivery_state()
+            evidence = state.analysis if state is not None and state.task_id == self.runtime_task_id else {}
             return {
+                **({'analysis_delivery': evidence} if evidence else {}),
                 "event": event,
                 "status": "completed",
                 "message": "回答完成",
@@ -275,8 +281,7 @@ class CompactEventProjector:
             error_code = "QWENPAW_TASK_CANCELLED"
         elif raw_status == "timeout":
             error_code = "WORKER_TIMEOUT"
-        if error_code in _PUBLIC_ERROR_CODES:
-            failed["error_code"] = error_code
+        failed["error_code"] = error_code if error_code in _PUBLIC_ERROR_CODES else "WORKER_FAILED"
         return failed
 
 
@@ -299,7 +304,8 @@ async def project_sse_stream(
     runtime_task_id: str,
 ) -> AsyncIterator[str]:
     """Project an upstream SSE stream while preserving disconnect semantics."""
-    projector = CompactEventProjector(runtime_task_id)
+    state = DeliveryState(runtime_task_id)
+    projector = CompactEventProjector(runtime_task_id, state)
     public_thinking = PublicThinkingStream()
     yield _encode(
         {
@@ -311,7 +317,12 @@ async def project_sse_stream(
     iterator = source.__aiter__()
     try:
         buffer = ""
-        async for item in iterator:
+        while True:
+            with delivery_scope(state):
+                try:
+                    item = await anext(iterator)
+                except StopAsyncIteration:
+                    break
             # Native cleanup can swallow cancellation and yield a completed envelope.
             # Cancellation belongs to this producer task, not the SSE subscriber.
             task = asyncio.current_task()
@@ -336,7 +347,8 @@ async def project_sse_stream(
     finally:
         close = getattr(iterator, "aclose", None)
         if close is not None:
-            await close()
+            with delivery_scope(state):
+                await close()
 
 
 def _encode(event: dict[str, Any]) -> str:

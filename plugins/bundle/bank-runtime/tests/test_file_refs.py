@@ -120,3 +120,12 @@ def test_file_ref_issue_rejects_files_outside_the_task_root() -> None:
                 expires_at=datetime.now(timezone.utc) + timedelta(minutes=1),
             )
         assert denied.value.code == "FILE_ACCESS_DENIED"
+
+
+def test_reference_preserves_display_name_without_using_it_as_path(tmp_path):
+    registry = FileRefRegistry(tmp_path)
+    prepared = _prepared(tmp_path, "task_001")
+    token = registry.issue(prepared, expires_at=datetime.now(timezone.utc) + timedelta(hours=1))
+    resolved = registry.resolve(token, expected_task_id="task_001")
+    assert resolved.original_name == "年度报告.pdf"
+    assert resolved.path.name != resolved.original_name

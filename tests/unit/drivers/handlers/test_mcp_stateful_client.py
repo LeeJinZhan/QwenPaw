@@ -552,3 +552,20 @@ async def test_call_metadata_is_scoped_and_never_added_to_tool_arguments():
     await c.call_tool("read", arguments)
     assert calls == [("read", arguments, {"meta": {"opaque_grant": "nonce"}}), ("read", arguments, {})]
     assert arguments == {"document_ref": "opaque"}
+
+@pytest.mark.asyncio
+async def test_document_call_timeout_is_request_local_and_not_model_arguments():
+    from datetime import timedelta
+    from qwenpaw.drivers.mcp_context import mcp_call_timeout
+    c = _client()
+    c.is_connected = True
+    calls=[]
+    class Session:
+        async def call_tool(self, name, arguments, **kwargs):
+            calls.append(kwargs)
+            return 'ok'
+    c.session=Session()
+    with mcp_call_timeout(1200):
+        await c.call_tool('aggregate',{})
+    await c.call_tool('aggregate',{})
+    assert calls==[{'read_timeout_seconds':timedelta(seconds=1200)},{}]

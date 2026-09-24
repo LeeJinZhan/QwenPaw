@@ -61,6 +61,12 @@ async def runtime_sandbox_files_search(
     limit: int = 20,
     extensions: list[str] | None = None,
 ) -> ToolResponse:
+    """Find earlier files by metadata in the current user's authorized conversation/workspace.
+
+    Use for follow-up requests about previously attached files, even when no new
+    files were attached this turn. An empty query lists candidates. Search does
+    not read contents or grant access; select the matching result before parsing.
+    """
     state = _STATE.get()
     if state is None:
         return _text("Runtime file search is unavailable.")
@@ -93,6 +99,11 @@ async def runtime_sandbox_files_search(
 
 
 async def runtime_sandbox_files_select(file_ids: list[str]) -> ToolResponse:
+    """Authorize and prepare files returned by this task's metadata search.
+
+    Returns fresh file references for reading/conversion. Old conversation file
+    references and paths must not be reused. Clarify ambiguous file choices first.
+    """
     state = _STATE.get()
     if state is None:
         return _text("Runtime file selection is unavailable.")

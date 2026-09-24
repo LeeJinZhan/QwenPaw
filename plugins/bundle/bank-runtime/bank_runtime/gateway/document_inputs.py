@@ -50,6 +50,16 @@ def normalize_document_input(name, arguments, *, task_id, ledger):
             value['rows'] = [_integer(item) for item in value['rows']]
         if value.get('include_header') in ('true', 'false'):
             value['include_header'] = value['include_header'] == 'true'
+    if raw == 'read_document_chunks':
+        # A first-page zero is not an opaque continuation capability. Normalize
+        # only this unambiguous alias; never construct/repair signed cursors.
+        cursor = value.get('cursor')
+        if (type(cursor) is int and cursor == 0) or (isinstance(cursor, str) and cursor in {'', '0'}):
+            value['cursor'] = None
+        # Reduce page size to the service budget before permission hashing,
+        # execution and coverage accounting, without changing the target.
+        if type(value.get('limit')) is int and value['limit'] > 10:
+            value['limit'] = 10
     if raw == 'aggregate' and isinstance(value.get('ops'), list):
         for op in value['ops']:
             if not isinstance(op, dict) or not isinstance(op.get('metrics'), list):

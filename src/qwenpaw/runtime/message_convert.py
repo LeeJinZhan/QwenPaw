@@ -54,6 +54,8 @@ def _get_last_user_text(msgs: List[Any]) -> str | None:
 # pylint: disable=too-many-branches
 def _request_input_to_msgs(
     input_list: List[Any],
+    *,
+    preserve_empty_user_message: bool = False,
 ) -> List[Any]:
     """Convert ``AgentRequest.input`` (list of 1.x Message) to a list of
     agentscope 2.0 ``Msg`` objects.
@@ -93,7 +95,7 @@ def _request_input_to_msgs(
 
             if ctype == "text":
                 text = getattr(c, "text", None) or ""
-                if text:
+                if text or (preserve_empty_user_message and role == "user"):
                     blocks.append(TextBlock(type="text", text=text))
 
             elif ctype in _MEDIA_TYPES:

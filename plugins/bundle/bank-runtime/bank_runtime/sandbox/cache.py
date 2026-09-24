@@ -202,10 +202,10 @@ class TaskAttachmentCache:
         locator: dict[str, Any],
         broker: Any,
     ) -> PreparedSandboxFile:
-        name = _safe_filename(
-            locator.get("original_name") or locator.get("display_name")
-        )
-        suffix = Path(name).suffix[:16]
+        name = str(locator.get("original_name") or locator.get("display_name") or "attachment")
+        # Display metadata is not a path. Keep Unicode names intact while the
+        # cache continues to use an opaque identity and a sanitized extension.
+        suffix = Path(_safe_filename(name)).suffix[:16]
         target = (task_root / f"{file_id}{suffix}").resolve(strict=False)
         if target.parent != task_root or target.is_symlink():
             raise SandboxCacheError("Attachment cache path is invalid")

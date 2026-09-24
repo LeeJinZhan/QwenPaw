@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import re
 import secrets
+from weakref import WeakMethod
 from typing import Callable
 
 from .cache import PreparedSandboxFile
@@ -37,6 +38,7 @@ class ResolvedTaskFile:
     size_bytes: int
     sha256: str
     expires_at: datetime
+    original_name: str = ""
 
 
 class FileRefRegistry:
@@ -65,6 +67,11 @@ class FileRefRegistry:
         self._entries: dict[str, ResolvedTaskFile] = {}
         self._expired: dict[str, datetime] = {}
         self._file_tokens: dict[tuple[str, str], str] = {}
+        self._revocation_listeners: set[WeakMethod] = set()
+
+    def on_task_revoked(self, callback: Callable[[str], None]) -> None:
+        """Register a service cleanup method without retaining its lifetime."""
+        self._revocation_listeners.add(WeakMethod(callback))
 
     def reference_for_file(self, file_id: str, *, expected_task_id: str) -> str:
         token = self._file_tokens.get((expected_task_id, file_id))
@@ -126,6 +133,7 @@ class FileRefRegistry:
             size_bytes=size_bytes,
             sha256=digest,
             expires_at=expiry,
+            original_name=prepared.original_name,
         )
         self._expired.pop(nonce_hash, None)
         self._file_tokens[(task_id, str(prepared.file_id))] = token
@@ -182,6 +190,12 @@ class FileRefRegistry:
         for nonce_hash, entry in list(self._entries.items()):
             if entry.task_id == normalized:
                 self._expire(nonce_hash)
+        for reference in list(self._revocation_listeners):
+            callback = reference()
+            if callback is None:
+                self._revocation_listeners.discard(reference)
+            else:
+                callback(normalized)
 
     def purge_expired(self, now: datetime | None = None) -> int:
         cutoff = _as_utc(now or self._clock())

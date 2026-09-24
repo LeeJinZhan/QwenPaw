@@ -129,7 +129,12 @@ async def test_real_mcp_current_task_authorization_and_source_lifecycle(tmp_path
                     await invoke("read_document_chunks", {"document_ref": "foreign"})
                 assert denied.value.code == "FILE_ACCESS_DENIED"
                 assert gateway.events[-1] == ("result", "failed", "FILE_ACCESS_DENIED")
-                if revocation == "revoke": registry.revoke_task("task_a")
+                if revocation == "revoke":
+                    if extension == "csv":
+                        assert tools._query_result_bytes > 0
+                    registry.revoke_task("task_a")
+                    assert tools._query_result_bytes == 0
+                    assert not tools._query_results
                 elif revocation == "expire": clock[0] += timedelta(minutes=11)
                 else: path.write_bytes(path.read_bytes() + b"changed")
                 for name, args in readers:

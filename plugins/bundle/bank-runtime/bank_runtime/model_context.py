@@ -24,6 +24,18 @@ CURRENT_TURN_GUIDANCE = """本轮回答约定：
 """
 
 
+FOLLOWUP_GUIDANCE = """回答尾部的可选推荐追问（平台交互字段，不属于正文）：
+先完成本轮回答，再判断是否存在与当前内容直接相关、尚未回答、用户值得继续了解的下一步。有这样的下一步时，输出1至3条推荐；不要等待用户专门要求推荐。
+例如流程分析之后可推荐细化优先级标准、拟定试行检查清单；数据比较之后可推荐验证原因所需的数据或下一步核对方法。按实际内容选择，不照搬示例，不重复已经完成的内容。
+每条使用用户视角，像用户下一次实际会发送的请求，例如“请把优先级标准细化为可操作的判断规则”。不要用助手口吻“需要我继续吗”。
+正文末尾不要再写“需要我……”或重复推荐列表；推荐只放在下一行的保留格式中：
+<bank_followups>["具体的下一步问题"]</bank_followups>
+使用JSON字符串数组，不用代码围栏；该字段由平台分离为按钮，既不是工具调用，也不是新增用户输入。不要为追问调用工具、查找文件或另起模型请求。
+每条2至80字，不含Markdown、链接、内部路径、标识、令牌或敏感个人数据。不默认推荐生成文件，不猜测文件内容，不承诺未经确认的执行能力。
+没有合适追问、简单确认或已完整解决的封闭问题、失败或拒绝、只有等待补充必要信息的澄清时，完全省略该行；不要为了凑数推荐“继续”或“其他用途”。中间执行说明和思考中不输出该字段。
+"""
+
+
 def prepare_public_model_context(request: dict[str, Any]) -> dict[str, Any]:
     messages = list(request.get("messages") or [])
     last_user = max((index for index, msg in enumerate(messages) if msg.role == "user"), default=-1)
@@ -59,5 +71,5 @@ def prepare_public_model_context(request: dict[str, Any]) -> dict[str, Any]:
     # Keep the per-call reminder next to this turn rather than before a long
     # restored history. The static contract stays in the initial system prompt.
     messages.append(SystemMsg(name="system", content=CURRENT_TURN_GUIDANCE +
-                              "\n本轮可调用入口：" + json.dumps(names, ensure_ascii=False)))
+                              "\n本轮可调用入口：" + json.dumps(names, ensure_ascii=False) + "\n\n" + FOLLOWUP_GUIDANCE))
     return {**request, "messages": messages}

@@ -67,3 +67,16 @@ def test_audio_content_data_becomes_audio_data_block(tmp_path):
     assert block.source.type == "url"
     assert str(block.source.url) == audio_path.resolve().as_uri()
     assert block.source.media_type.startswith("audio/")
+
+
+def test_empty_user_container_is_opt_in_and_keeps_metadata_without_inventing_text():
+    source = [Message(role=Role.USER, content=[TextContent(text="")],
+                      metadata={QWENPAW_CLIENT_MESSAGE_ID_KEY: "file-turn"}),
+              Message(role=Role.ASSISTANT, content=[TextContent(text="")])]
+    assert _request_input_to_msgs(source) == []
+    messages = _request_input_to_msgs(source, preserve_empty_user_message=True)
+    assert len(messages) == 1
+    assert messages[0].role == "user"
+    assert messages[0].content[0].text == ""
+    assert messages[0].metadata[QWENPAW_CLIENT_MESSAGE_ID_KEY] == "file-turn"
+    assert source[0].content[0].text == ""

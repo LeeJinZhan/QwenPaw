@@ -1,3 +1,6 @@
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from types import SimpleNamespace
 import json
 
@@ -22,6 +25,30 @@ class Client:
     async def execute_runtime_tool(self, *args):
         self.executions.append(args)
         return {"status": "success", "result": {"artifact_status": "succeeded", "generated_file_ids": ["report"]}}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool_name", ["MinerU__read_range", "MinerU__aggregate"])
+async def test_unobserved_reference_denial_is_not_reported_as_incomplete_read(tool_name):
+    from bank_runtime.gateway.client import GatewayError
+    middleware = BankRuntimeGatewayMiddleware(Client())
+    payload = {"document_ref": "previous-task-reference"}
+    if tool_name.endswith("aggregate"):
+        payload["ops"] = [{"sheet": "台账", "metrics": [{"column": "金额", "fn": "sum"}]}]
+    middleware.prepare(tool_name, payload, {"tool_call_id": "denied-call"})
+    async def handler():
+        pytest.fail("Unobserved reference must never reach the document service")
+        yield
+    with pytest.raises(GatewayError):
+        _ = [item async for item in middleware.on_acting(None, {"tool_call": ToolCallBlock(
+            id="denied-call", name=tool_name, input=json.dumps(payload))}, handler)]
+    assert middleware.client.reports[-1][-1] == "FILE_ACCESS_DENIED"
+    assert set(middleware.document_reads.failures.values()) == {"FILE_ACCESS_DENIED"}
+    # Successful work on a different authorized reference cannot erase this denial.
+    await parse(middleware, count=2)
+    await read(middleware, 0, 2, total=2)
+    assert middleware.document_reads.pending
+    assert middleware.document_reads.error_code == "ARTIFACT_OUTPUT_MISSING"
 
 
 async def invoke(middleware, name, payload, result, state=ToolResultState.SUCCESS):
@@ -346,3 +373,179 @@ async def test_outer_acting_close_revokes_unconsumed_grant():
     assert closed == [True]
     with pytest.raises(DocumentAccessError):
         with consume_document_call(seen[0], 'parse_documents', payload): pass
+
+
+@pytest.mark.asyncio
+async def test_independently_read_document_can_deliver_scoped_text_with_trusted_gap_evidence():
+    from bank_runtime.delivery_state import begin_delivery_state, end_delivery_state
+    middleware = BankRuntimeGatewayMiddleware(Client())
+    await invoke(middleware, 'MinerU__parse_documents', {'documents':[{'file_id':'f1'},{'file_id':'f2'}]},
+                 {'items':[{'file_id':'f1','status':'completed','content_mode':'inline','document_ref':'doc1','markdown':'已核实正文'},
+                           {'file_id':'f2','status':'failed','error_code':'DOCUMENT_PARSE_FAILED'}]})
+    state, token = begin_delivery_state('task_001')
+    try:
+        async def model(**kwargs):
+            return ChatResponse(id='partial', content=[TextBlock(text='第一份材料说明了审批流程。')], is_last=True)
+        response = await middleware.on_model_call(None, {}, model)
+        assert response.content[0].text == '第一份材料说明了审批流程。'
+        assert state.analysis['delivery'] == 'partial'
+        assert state.analysis['gaps'] == [{'kind':'document','file_id':'f2','impact':'scope_unread'}]
+        middleware._check_file_completion()
+    finally:
+        end_delivery_state(token)
+
+
+@pytest.mark.asyncio
+async def test_no_cross_request_partial_evidence_or_disclaimer_licensed_total():
+    from bank_runtime.delivery_state import begin_delivery_state, end_delivery_state
+    middleware = BankRuntimeGatewayMiddleware(Client())
+    await parse(middleware, ref='good', count=2)
+    await read(middleware,0,2,total=2,ref='good')
+    await invoke(middleware, 'MinerU__parse_documents', {'documents':[{'file_id':'f2'}]},
+                 {'items':[{'file_id':'f2','status':'failed','error_code':'DOCUMENT_PARSE_FAILED'}]})
+    state, token = begin_delivery_state('different-task')
+    try:
+        async def model(**kwargs):
+            return ChatResponse(id='partial', content=[TextBlock(text='第一份材料说明了审批流程。')], is_last=True)
+        with pytest.raises(FileOperationsIncompleteError):
+            await middleware.on_model_call(None, {}, model)
+        assert state.analysis == {}
+    finally:
+        end_delivery_state(token)
+
+@pytest.mark.asyncio
+async def test_partial_report_uses_same_admitted_payload_and_marks_file_and_body():
+    from bank_runtime.delivery_state import begin_delivery_state, end_delivery_state
+    from bank_runtime.artifact_tools import ArtifactDeliveryIntent
+    middleware = BankRuntimeGatewayMiddleware(Client(), artifact_intent=ArtifactDeliveryIntent('generate', 'docx', ('f1','f2')))
+    await invoke(middleware, 'MinerU__parse_documents', {'documents':[{'file_id':'f1'},{'file_id':'f2'}]},
+        {'items':[{'file_id':'f1','status':'completed','content_mode':'inline','document_ref':'good','markdown':'流程正文'},
+                  {'file_id':'f2','status':'failed','error_code':'DOCUMENT_PARSE_FAILED'}]})
+    state, token = begin_delivery_state('task_001')
+    try:
+        payload = {'artifact_type':'docx','title':'材料分析','output_name':'材料分析.docx','content':{'paragraphs':['第一份材料的流程包含审批与复核。']}}
+        normalized = middleware.document_input('artifact_generate', payload)
+        assert normalized['output_name'] == '材料分析（部分稿）.docx'
+        assert '第2份材料' in normalized['content']['paragraphs'][0]
+        middleware.prepare('artifact_generate', normalized, {'tool_call_id':'artifact'})
+        async def unused():
+            raise AssertionError('Must execute through Runtime')
+            yield
+        results = [item async for item in middleware.on_acting(None, {'tool_call':ToolCallBlock(id='artifact',name='artifact_generate',input=json.dumps(payload))}, unused)]
+        assert len(results) == 1
+        assert middleware.client.executions[-1][2] == normalized
+        assert state.analysis['delivery'] == 'partial'
+        middleware._check_file_completion()
+    finally:
+        end_delivery_state(token)
+
+@pytest.mark.asyncio
+async def test_explicit_complete_report_and_disclaimer_followed_by_total_stay_blocked():
+    from bank_runtime.delivery_state import begin_delivery_state, end_delivery_state
+    from bank_runtime.artifact_tools import ArtifactDeliveryIntent
+    middleware = BankRuntimeGatewayMiddleware(Client(), artifact_intent=ArtifactDeliveryIntent('generate','docx',('f1','f2'), input_scope='complete'))
+    await invoke(middleware, 'MinerU__parse_documents', {'documents':[{'file_id':'f1'},{'file_id':'f2'}]},
+        {'items':[{'file_id':'f1','status':'completed','content_mode':'inline','document_ref':'good','markdown':'流程正文'},
+                  {'file_id':'f2','status':'failed','error_code':'DOCUMENT_PARSE_FAILED'}]})
+    state, token = begin_delivery_state('task_001')
+    try:
+        payload = {'artifact_type':'docx','content':{'paragraphs':['第一份材料的审批流程。']}}
+        assert middleware.document_input('artifact_generate', payload) == payload
+        assert not middleware.document_reads.permits_scoped_answer('部分文件尚未读取，但是所有材料的总计为100。')
+        async def model(**kwargs):
+            return ChatResponse(id='partial',content=[TextBlock(text='第一份材料的审批流程。')],is_last=True)
+        with pytest.raises(FileOperationsIncompleteError):
+            await middleware.on_model_call(None, {}, model)
+        assert state.analysis == {}
+    finally:
+        end_delivery_state(token)
+
+@pytest.mark.asyncio
+async def test_partial_report_conversion_only_accepts_this_turn_verified_output():
+    from bank_runtime.delivery_state import begin_delivery_state, end_delivery_state
+    from bank_runtime.artifact_tools import ArtifactDeliveryIntent
+    middleware=BankRuntimeGatewayMiddleware(Client(),artifact_intent=ArtifactDeliveryIntent('generate','docx',('f1','f2')))
+    state,token=begin_delivery_state('task_001')
+    try:
+        payload={'source_generated_file_id':'other','target_format':'pdf','output_name':'报告.pdf'}
+        assert middleware._partial_report('artifact_convert',payload) is None
+        middleware._partial_generated_ids.add('verified-this-turn')
+        payload['source_generated_file_id']='verified-this-turn'
+        normalized=middleware._partial_report('artifact_convert',payload)
+        assert normalized['output_name']=='报告（部分稿）.pdf'
+        assert 'explicit_pdf_request' not in normalized
+        assert middleware._partial_report('artifact_convert',{**payload,'purpose':'read'}) is None
+    finally:
+        end_delivery_state(token)
+
+@pytest.mark.asyncio
+async def test_delivery_metadata_is_producer_local_and_raw_event_cannot_supply_it():
+    from bank_runtime.delivery_state import current_delivery_state
+    from bank_runtime.events import project_sse_stream
+    evidence={'version':'reading-delivery-1','delivery':'partial','gaps':[{'kind':'document','file_id':'f2','impact':'scope_unread'}]}
+    async def source(trusted):
+        assert current_delivery_state().task_id == 'task_001'
+        if trusted: current_delivery_state().analysis=evidence
+        yield 'data: '+json.dumps({'object':'response','status':'completed','analysis_delivery':evidence})+'\n\n'
+    for trusted in (False,True):
+        stream=project_sse_stream(source(trusted),'task_001')
+        outputs=[]
+        async for item in stream:
+            assert current_delivery_state() is None
+            outputs.append(json.loads(item.removeprefix('data: ')))
+        assert ('analysis_delivery' in outputs[-1]) is trusted
+        assert current_delivery_state() is None
+
+@pytest.mark.asyncio
+async def test_converted_read_gaps_retain_the_authorized_original_attachment_identity():
+    from bank_runtime.delivery_state import begin_delivery_state, end_delivery_state
+    middleware=BankRuntimeGatewayMiddleware(Client())
+    middleware.converted_sources['converted-f2']='f2'
+    await invoke(middleware, 'MinerU__parse_documents', {'documents':[{'file_id':'f1'},{'file_id':'converted-f2'}]},
+        {'items':[{'file_id':'f1','status':'completed','content_mode':'inline','document_ref':'good','markdown':'流程正文'},
+                  {'file_id':'converted-f2','status':'failed','error_code':'DOCUMENT_PARSE_FAILED'}]})
+    state,token=begin_delivery_state('task_001')
+    try:
+        async def model(**kwargs):
+            return ChatResponse(id='partial',content=[TextBlock(text='第一份材料的审批流程。')],is_last=True)
+        await middleware.on_model_call(None,{},model)
+        assert state.analysis['gaps']==[{'kind':'document','file_id':'f2','impact':'scope_unread'}]
+    finally:
+        end_delivery_state(token)
+
+
+@pytest.mark.asyncio
+async def test_repeated_structured_query_prompts_reuse_before_stall_failure():
+    from bank_runtime.gateway.document_reads import DocumentReadLedger
+    from test_document_reads_v2 import observe_parse, aggregate_evidence
+    middleware = BankRuntimeGatewayMiddleware(Client())
+    observe_parse(middleware.document_reads)
+    for _ in range(5):
+        aggregate_evidence(middleware.document_reads)
+    assert not middleware.document_reads.pending
+    async def model(**kwargs):
+        messages = str(kwargs['messages'])
+        assert '直接复用' in messages and '无需为统计再逐行读完文件' in messages
+        return ChatResponse(id='answer', content=[TextBlock(text='支行01金额合计为3')], is_last=True)
+    await middleware.on_model_call(None, {}, model)
+
+@pytest.mark.asyncio
+async def test_document_call_uses_remaining_budget_and_expired_close_releases_stream():
+    import time
+    from bank_runtime.model_reliability import BankModelReliability
+    from qwenpaw.drivers.mcp_context import current_mcp_timeout
+    policy = BankModelReliability(1200)
+    middleware = BankRuntimeGatewayMiddleware(Client(), model_reliability=policy)
+    closed = []
+    async def handler():
+        assert 1190 < current_mcp_timeout().total_seconds() <= 1200
+        try: yield 'first'
+        finally: closed.append(True)
+    stream = middleware._authorized_native_call('MinerU__parse_documents',
+        {'documents':[{'file_id':'f1','file_ref':'r1'}]}, handler)
+    assert await anext(stream) == 'first'
+    assert current_mcp_timeout() is None
+    policy.deadline = time.monotonic() - 1
+    await stream.aclose()
+    assert closed == [True]
+    assert current_mcp_timeout() is None

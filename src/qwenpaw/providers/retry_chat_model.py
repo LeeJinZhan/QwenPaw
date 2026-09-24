@@ -495,8 +495,10 @@ class RetryChatModel(ChatModelBase):
             jitter_range=self._rate_limit_config.jitter_range,
         )
 
+        from .retry_scope import external_retry_owner
         retries = (
-            self._retry_config.max_retries if self._retry_config.enabled else 0
+            self._retry_config.max_retries
+            if self._retry_config.enabled and not external_retry_owner.get() else 0
         )
         attempts = retries + 1
         last_exc: Exception | None = None

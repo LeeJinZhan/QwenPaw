@@ -40,6 +40,7 @@ class ArtifactDeliveryIntent:
     source_refs: tuple[str, ...] = ()
     layout_kind: str = ""
     layout_resolution: str = ""
+    input_scope: str = ""
 
 
 def complete_artifact_tool_input(
@@ -144,6 +145,14 @@ class ArtifactDeliveryErrorHook(LifecycleHook):
         if isinstance(ctx.error, ArtifactToolNotInvokedError):
             ctx.extras["_error_code"] = ctx.error.error_code
             ctx.extras["_error_text"] = ctx.error.message
+        else:
+            from .model_reliability import MODEL_FAILURE_MESSAGES, failure_code
+            from qwenpaw.exceptions import ModelExecutionException, ModelTimeoutException
+            code = getattr(ctx.error, "error_code", "")
+            if code in MODEL_FAILURE_MESSAGES or isinstance(ctx.error, (ModelExecutionException, ModelTimeoutException)):
+                code = failure_code(ctx.error)
+                ctx.extras["_error_code"] = code
+                ctx.extras["_error_text"] = MODEL_FAILURE_MESSAGES[code]
         return HookResult()
 
 
@@ -189,6 +198,7 @@ def parse_artifact_delivery_intent(value: Any) -> ArtifactDeliveryIntent | None:
         source_refs=refs,
         layout_kind=layout_kind,
         layout_resolution=layout_resolution,
+        input_scope="complete" if value.get("input_scope") == "complete" else "",
     )
 
 

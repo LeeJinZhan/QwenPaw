@@ -283,3 +283,33 @@ async def test_parse_parameter_errors_are_not_misreported_as_invalid_file_refs(t
     assert error.value.code=='DOCUMENT_ARGUMENT_INVALID'
     assert error.value.argument_error['reason']==reason
     assert 'private' not in str(error.value.argument_error)
+
+
+@pytest.mark.asyncio
+async def test_structured_query_reuses_result_but_reauthorizes_every_call(tmp_path, monkeypatch):
+    from unittest.mock import AsyncMock
+    from bank_mineru_mcp import parse_jobs
+    from bank_mineru_mcp.structured_store import StructuredStore
+    source = _resolved(tmp_path)
+    csv = source.path.with_suffix('.csv'); csv.write_text('类别,金额\n甲,10\n乙,20\n', encoding='utf-8')
+    source = replace(source, path=csv, extension='.csv', media_type='text/csv',
+                     size_bytes=csv.stat().st_size, original_name='中文原始台账.csv')
+    resolver = _Resolver(source)
+    service = MinerUToolService(file_resolver=resolver, mineru_client=object(),
+        document_store=DocumentStore(root=tmp_path), structured_store=StructuredStore(root=tmp_path))
+    parsed = await service.parse_documents([{'file_id': source.file_id, 'file_ref': 'test-ref'}])
+    item = parsed['items'][0]
+    assert item['inventory']['title'] == source.original_name
+    ref = item['document_ref']
+    spy = AsyncMock(wraps=parse_jobs.query_job); monkeypatch.setattr(parse_jobs, 'query_job', spy)
+    args = {'document_ref': ref, 'ops': [{'metrics': [{'column': '金额', 'fn': 'sum'}]}]}
+    first = await service.execute_structured_query('aggregate', args)
+    expected = json.loads(json.dumps(first))
+    first['results'].clear()
+    assert await service.execute_structured_query('aggregate', args) == expected
+    assert spy.await_count == 1
+    def denied(ref):
+        raise ToolContractError('FILE_REF_EXPIRED', 'Revoked')
+    monkeypatch.setattr(resolver, 'resolve', denied)
+    with pytest.raises(ToolContractError):
+        await service.execute_structured_query('aggregate', args)

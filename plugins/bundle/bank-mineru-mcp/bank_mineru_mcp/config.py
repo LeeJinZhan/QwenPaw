@@ -22,7 +22,7 @@ class MinerUSettings:
     proxy_url: str = ""
     connect_timeout_seconds: float = 5
     upload_timeout_seconds: float = 120
-    parse_timeout_seconds: float = 900
+    parse_timeout_seconds: float = 1800
     poll_interval_seconds: float = 1
     mcp_host: str = "127.0.0.1"
     mcp_port: int = 18081
@@ -77,7 +77,7 @@ class MinerUSettings:
         port = _integer("BANK_MINERU_MCP_PORT", 18081, 1, 65535, "port")
         connect = _number("BANK_MINERU_CONNECT_TIMEOUT_SECONDS", 5, 0.1, 60, "timeout")
         upload = _number("BANK_MINERU_UPLOAD_TIMEOUT_SECONDS", 120, 1, 600, "timeout")
-        parse = _number("BANK_MINERU_PARSE_TIMEOUT_SECONDS", 900, 1, 3600, "timeout")
+        parse = _number("BANK_MINERU_PARSE_TIMEOUT_SECONDS", 1800, 1, 3600, "timeout")
         poll = _number("BANK_MINERU_POLL_INTERVAL_SECONDS", 1, 0.1, 10, "poll interval")
         inline = _integer(
             "BANK_MINERU_INLINE_MAX_CHARS", 20_000, 1_000, 100_000, "inline limit"

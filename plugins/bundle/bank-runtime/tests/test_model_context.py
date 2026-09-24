@@ -127,8 +127,10 @@ async def test_no_tools_does_not_block_model_only_answers_after_old_refusal(ques
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('layout', [None, 'standard_document', 'official_document'])
-async def test_real_bank_context_reaches_strict_provider_with_one_leading_system(monkeypatch, layout):
+@pytest.mark.parametrize('layout,completed_read_repeats', [
+    (None, False), (None, True), ('standard_document', False), ('official_document', False)])
+@pytest.mark.parametrize('model_id', ['deepseek-v4-flash', 'qwen3-27b'])
+async def test_real_bank_context_reaches_strict_provider_with_one_leading_system(monkeypatch, layout, model_id, completed_read_repeats):
     from unittest.mock import AsyncMock
     from agentscope.credential._openai import OpenAICredential
     from openai.types.chat import ChatCompletion
@@ -136,6 +138,13 @@ async def test_real_bank_context_reaches_strict_provider_with_one_leading_system
     intent = None if layout is None else ArtifactDeliveryIntent(
         'generate', 'docx', layout_kind=layout, layout_resolution='skill')
     middleware = BankRuntimeGatewayMiddleware(None, artifact_intent=intent)
+    if layout is None:
+        from test_document_reads_v2 import observe_parse, aggregate_evidence, repeat_raw_range
+        observe_parse(middleware.document_reads)
+        for _ in range(5):
+            aggregate_evidence(middleware.document_reads)
+        if completed_read_repeats:
+            repeat_raw_range(middleware.document_reads, requested_end=5)
     history = [SystemMsg('system', 'base policy'), UserMsg('user', '分析Excel'),
                AssistantMsg('assistant', '先前未完成'), UserMsg('user', '可以生成一份docx文件给我吗')]
     before = copy.deepcopy(history)
@@ -149,17 +158,49 @@ async def test_real_bank_context_reaches_strict_provider_with_one_leading_system
         assert '本轮回答约定' in str(messages[0]['content'])
         if layout:
             assert 'delivery_plan' in str(messages[0]['content'])
+        else:
+            assert '直接复用' in str(messages[0]['content'])
+            if completed_read_repeats:
+                assert '同一明确行范围已经完整返回' in str(messages[0]['content'])
+                assert not kwargs.get('tools')
         seen.append(messages)
         return response
     monkeypatch.setattr('openai.AsyncClient', lambda **kwargs: SimpleNamespace(
         chat=SimpleNamespace(completions=SimpleNamespace(create=AsyncMock(side_effect=strict_api)))))
     model = OpenAIChatModelCompat(
         credential=OpenAICredential(id='strict-probe', api_key='unused', base_url='http://127.0.0.1:1/v1'),
-        model='strict-test', stream=False)
+        model=model_id, stream=False)
     async def call(**kwargs):
-        return await model._call_api('strict-test', kwargs['messages'], kwargs.get('tools'))
+        return await model._call_api(model_id, kwargs['messages'], kwargs.get('tools'))
     result = await middleware.on_model_call(None, {'messages': history, 'tools': []}, call)
     assert result.content[0].text == '测试回答'
     assert history == before
     assert len(seen) == 1
     assert [m['role'] for m in seen[0]] == ['system', 'user', 'assistant', 'user']
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('model_id', ['deepseek-v4-flash', 'qwen3-27b'])
+async def test_followup_contract_reaches_current_model_request_after_history(model_id):
+    from qwenpaw.agents.model_factory import _create_formatter_instance
+    request = {'messages': [SystemMsg('system', 'base'), UserMsg('user', '分析需求收集流程'),
+        AssistantMsg('assistant', '已有分析。需要我继续吗？'), UserMsg('user', '如何改进优先级标准？')], 'tools': []}
+    before = copy.deepcopy(request)
+    prepared = prepare_public_model_context(request)
+    reminder = prepared['messages'][-1].get_text_content()
+    assert '<bank_followups>' in reminder
+    assert '用户视角' in reminder
+    assert '没有合适追问' in reminder
+    assert '正文末尾' in reminder
+    assert request == before
+    from qwenpaw.providers.openai_provider import OpenAIProvider
+    model = OpenAIProvider(id='followup-test', name='test', api_key='unused', base_url='http://test.invalid/v1').get_chat_model_instance(model_id)
+    formatter = _create_formatter_instance(model, provider_id='followup-test')
+    wire = await formatter.format(prepared['messages'])
+    # Native model order normalization retains the current contract, never
+    # elevates the user message or rewrites the persisted conversation.
+    from qwenpaw.providers.chat_message_order import normalize_system_messages
+    normalized = normalize_system_messages(wire)
+    assert [m['role'] for m in normalized] == ['system', 'user', 'assistant', 'user']
+    assert '<bank_followups>' in str(normalized[0]['content'])
+    assert normalized[-1]['content'] == wire[-2]['content']

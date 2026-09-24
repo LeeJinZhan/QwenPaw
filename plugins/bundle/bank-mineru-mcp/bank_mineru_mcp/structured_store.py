@@ -333,7 +333,11 @@ class StructuredStore:
                 rows_iter = self._iter_rows(entry, sheet_meta, start, end, aggregate=True)
                 scanned = max(0, end - start + 1)
                 sources = [{"sheet": sheet_meta["name"], "range": [start, end], "rows_scanned": scanned}]
-            result = self._aggregate_op(sheet_meta, rows_iter, op, key_column, workspace=entry.path)
+            # Reserve a response share for every requested operation so a large
+            # first grouping cannot silently discard subsequent statistics.
+            share = (min(self.page_chars, 26000) - 1000) // len(ops)
+            result = self._aggregate_op(sheet_meta, rows_iter, op, key_column, workspace=entry.path,
+                                        response_bytes=max(128, share - _response_bytes(sources) - 1000))
             result.update(
                 sheet="*" if key_column else sheet_meta["name"],
                 sources=sources,
@@ -342,12 +346,18 @@ class StructuredStore:
                 full_range=full_range,
                 range=matched_range,
             )
+            # Account for the final nested JSON, including metadata/indentation.
+            while len(result["groups"]) > 1 and _response_bytes(result) > share:
+                result["groups"].pop()
+                result["next_group_cursor"] = (op.get("group_cursor") or 0) + len(result["groups"])
+                result["groups_complete"] = False
+            if _response_bytes(result) > share:
+                raise StructuredStoreError("DOCUMENT_RESULT_TOO_LARGE", "One aggregate group exceeds response budget; reduce operations or metrics")
             if result.get("groups_complete") is False:
                 truncated = True
             encoded = _response_bytes(result)
             if size + encoded > min(self.page_chars, 26000):
-                truncated = True
-                break
+                raise StructuredStoreError("DOCUMENT_RESULT_TOO_LARGE", "Aggregate metadata exceeds response budget; reduce operations")
             size += encoded
             results.append(result)
         return {
@@ -441,7 +451,7 @@ class StructuredStore:
 
     # ---------------------------------------------------------------- helpers
 
-    def _aggregate_op(self, sheet_meta, rows_iter, op: dict[str, Any], key_column: str, *, workspace=None):
+    def _aggregate_op(self, sheet_meta, rows_iter, op: dict[str, Any], key_column: str, *, workspace=None, response_bytes=16000):
         filters = op.get("filter") or {}
         group_by = op.get("group_by") or []
         metrics = op.get("metrics")
@@ -463,13 +473,13 @@ class StructuredStore:
             value = filters.get("value")
             if column not in names or not isinstance(op_name, str) or op_name not in _FILTER_OPS or (op_name == "in" and not isinstance(value, list)):
                 raise StructuredStoreError("DOCUMENT_ARGUMENT_INVALID", "aggregate filter is invalid")
-        cursor = op.get("group_cursor")
+        cursor = op.get("group_cursor", 0)
         if cursor is not None and (type(cursor) is not int or cursor < 0):
             raise StructuredStoreError("DOCUMENT_ARGUMENT_INVALID", "group_cursor must be nonnegative")
         try:
             return disk_aggregate(rows_iter, names=names, group_by=group_by, metrics=metrics,
                 filters=filters, match=_match, directory=workspace or self.root, max_bytes=self.max_document_bytes,
-                max_groups=self.max_groups, group_cursor=cursor)
+                max_groups=self.max_groups, group_cursor=cursor, response_bytes=response_bytes)
         except SpreadsheetExtractError as exc:
             raise StructuredStoreError(exc.code, str(exc)) from exc
         except (OverflowError, sqlite3.OperationalError) as exc:

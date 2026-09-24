@@ -18,7 +18,7 @@ class DecimalSum:
 
 
 def disk_aggregate(rows, *, names, group_by, metrics, filters, match, directory,
-                   max_bytes, max_groups, group_cursor=None):
+                   max_bytes, max_groups, group_cursor=None, response_bytes=16000):
     columns = list(dict.fromkeys(m['column'] for m in metrics))
     positions = {name: i for i, name in enumerate(names)}
     matched = 0
@@ -90,7 +90,7 @@ def disk_aggregate(rows, *, names, group_by, metrics, filters, match, directory,
                 output.append(item)
             if group_cursor is not None:
                 from .inventory import encoded_size
-                while len(output) > 1 and encoded_size(output) > 16000:
+                while len(output) > 1 and encoded_size(output) > response_bytes:
                     output.pop()
             result = {'groups': output, 'group_count': count, 'rows_matched': matched,
                       'metrics': metrics, 'group_by': group_by}

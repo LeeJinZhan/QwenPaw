@@ -119,7 +119,7 @@ async def test_cache_preserves_extension_for_non_ascii_filename(tmp_path) -> Non
         ),
     )
 
-    assert prepared[0].original_name == "attachment.pptx"
+    assert prepared[0].original_name == "通义灵码安装及使用指南.pptx"
     assert prepared[0].local_path.suffix == ".pptx"
 
 

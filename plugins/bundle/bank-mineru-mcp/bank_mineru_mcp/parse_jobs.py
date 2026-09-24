@@ -48,11 +48,11 @@ def source_nonce(store, source):
     with source.path.open('rb') as stream:
         while chunk := stream.read(1024 * 1024):
             digest.update(chunk)
-    identity = json.dumps([source.task_id, getattr(source, 'file_id', source.path.name), digest.hexdigest(), 'reading-2'], separators=(',', ':')).encode()
+    identity = json.dumps([source.task_id, getattr(source, 'file_id', source.path.name), digest.hexdigest(), getattr(source, 'original_name', ''), 'reading-2'], separators=(',', ':')).encode()
     return hmac.new(store.key, identity, hashlib.sha256).digest()
 
 
-async def parse_job(store, source, *, timeout=900, memory_bytes=4 * 1024**3, progress=None):
+async def parse_job(store, source, *, timeout=1800, memory_bytes=4 * 1024**3, progress=None):
     nonce = await asyncio.to_thread(source_nonce, store, source)
     identifier = hashlib.sha256(nonce).hexdigest()
     task = (store.root / source.task_id).resolve(strict=True)
@@ -108,6 +108,8 @@ async def parse_job(store, source, *, timeout=900, memory_bytes=4 * 1024**3, pro
                         saved = json.loads(result_path.read_text())
                 if saved.get('status') != 'ready':
                     raise StructuredStoreError(saved.get('error_code', 'DOCUMENT_PARSE_FAILED'), 'Extraction failed')
+                if getattr(source, 'original_name', ''):
+                    saved['inventory']['title'] = source.original_name
                 handle = store.write(source, saved['inventory'], work, nonce=nonce)
                 write_state(state, 'ready', document_ref=handle.document_ref)
                 return handle, saved['inventory']

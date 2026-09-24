@@ -5,7 +5,9 @@ from __future__ import annotations
 import asyncio
 import functools
 import inspect
+import hashlib
 import json
+from collections import OrderedDict
 
 from dataclasses import asdict
 from datetime import datetime, timezone
@@ -74,7 +76,7 @@ class MinerUToolService:
         document_store: DocumentStore,
         structured_store: StructuredStore | None = None,
         inline_max_chars: int = 20_000,
-        parse_timeout_seconds: float = 900,
+        parse_timeout_seconds: float = 1800,
         extract_memory_bytes: int = 4 * 1024**3,
     ) -> None:
         self.parse_timeout_seconds = parse_timeout_seconds
@@ -84,6 +86,13 @@ class MinerUToolService:
         self.document_store = document_store
         self.structured_store = structured_store
         self._document_sources: dict[str, tuple[str, datetime]] = {}
+        # Immutable JSON responses, bounded across all tasks served by this
+        # listener. Every reuse still checks task authority and source integrity.
+        self._query_results: OrderedDict[str, tuple[str, str, datetime, bytes]] = OrderedDict()
+        self._query_result_bytes = 0
+        subscribe = getattr(file_resolver, 'on_task_revoked', None)
+        if callable(subscribe):
+            subscribe(self.discard_task_results)
         self.inline_max_chars = max(1_000, min(int(inline_max_chars), 100_000))
 
     @_bounded_result
@@ -347,9 +356,27 @@ class MinerUToolService:
     async def execute_structured_query(self, name, arguments):
         from .parse_jobs import query_job
         ref = arguments.get("document_ref")
+        now = datetime.now(timezone.utc)
+        for key, (_, _, expiry, encoded) in list(self._query_results.items()):
+            if expiry <= now:
+                del self._query_results[key]
+                self._query_result_bytes -= len(encoded)
         self._authorize_document(ref)
         if name not in {"read_range", "read_document_chunks", "aggregate", "search"}:
             raise ToolContractError("FILE_ACCESS_DENIED", "Unregistered query")
+        cache_key = hashlib.sha256(json.dumps([self._current_task(), name, arguments],
+                                              sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+        cached = self._query_results.get(cache_key)
+        if cached is not None:
+            # Validate the durable document too: deleted/expired manifests must
+            # not remain readable merely because their response is cached.
+            try:
+                self._structured().inventory(ref)
+            except StructuredStoreError as exc:
+                raise ToolContractError(exc.code, str(exc)) from exc
+            self._authorize_document(ref)
+            self._query_results.move_to_end(cache_key)
+            return json.loads(cached[3])
         if name == "read_range":
             mode = arguments.get("format", "markdown")
             rows, columns, cursor = (arguments.get(k) for k in ("rows", "columns", "row_cursor"))
@@ -367,7 +394,22 @@ class MinerUToolService:
         self._authorize_document(ref)  # Recheck revocation after external work.
         if len(json.dumps(result, ensure_ascii=False, indent=2).encode()) > 32000:
             raise ToolContractError("DOCUMENT_RESULT_TOO_LARGE", "Query response exceeds budget")
+        if result.get("status") != "failed":
+            encoded = json.dumps(result, ensure_ascii=False).encode()
+            previous = self._query_results.pop(cache_key, None)
+            self._query_result_bytes += len(encoded) - (len(previous[3]) if previous else 0)
+            self._query_results[cache_key] = (self._current_task(), ref, self._document_sources[ref][1], encoded)
+            while len(self._query_results) > 128 or self._query_result_bytes > 2 * 1024**2:
+                _, removed = self._query_results.popitem(last=False)
+                self._query_result_bytes -= len(removed[3])
         return result
+
+    def discard_task_results(self, task_id: str) -> None:
+        """Release cached plaintext at the same boundary as task file refs."""
+        for key, (owner, ref, _, encoded) in list(self._query_results.items()):
+            if owner == task_id:
+                del self._query_results[key]
+                self._query_result_bytes -= len(encoded)
 
     @staticmethod
     def _current_task():
@@ -392,7 +434,14 @@ class MinerUToolService:
         file_ref = self._document_sources.get(document_ref)
         if not file_ref:
             raise ToolContractError("DOCUMENT_REF_EXPIRED", "Parse the authorized source again")
-        self._resolve_authorized_source(file_ref[0])
+        try:
+            self._resolve_authorized_source(file_ref[0])
+        except ToolContractError as exc:
+            for key, (_, ref, _, encoded) in list(self._query_results.items()):
+                if ref == document_ref and exc.code in {"FILE_REF_EXPIRED", "FILE_REF_INVALID", "DOCUMENT_REF_EXPIRED"}:
+                    del self._query_results[key]
+                    self._query_result_bytes -= len(encoded)
+            raise
 
     def _structured(self) -> StructuredStore:
         if self.structured_store is None:

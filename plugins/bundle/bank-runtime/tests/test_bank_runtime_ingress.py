@@ -561,6 +561,7 @@ async def test_projector_emits_one_sanitized_failure_on_stream_error():
             "event": "answer.failed",
             "status": "failed",
             "message": "回答生成失败",
+            "error_code": "WORKER_FAILED",
         }
     ]
 
@@ -610,6 +611,7 @@ def test_projector_preserves_only_recoverable_session_codes():
             "event": "answer.failed",
             "status": "failed",
             "message": "回答生成失败",
+            "error_code": "WORKER_FAILED",
         }
     ]
     assert scope_mismatch == [
@@ -655,3 +657,28 @@ def test_only_registered_layout_marker_survives_error_projection():
     ]:
         result = CompactEventProjector("t").project({"event": "error", "error": {"code": "ARTIFACT_VALIDATION_FAILED", "message": message}})
         assert result[0]["message"] == expected
+
+
+@pytest.mark.parametrize("user_text", ["", "   ", "请总结附件"])
+def test_real_channel_dispatches_each_attachment_request_without_text_debounce(monkeypatch, user_text):
+    received = []
+
+    async def process(request):
+        received.append(request)
+        if False:
+            yield request
+
+    channel = BankRuntimeChannel.from_config(process, SimpleNamespace(enabled=True, bot_prefix="", media_dir=""))
+    with _client(monkeypatch, _workspace(channel=channel)) as client:
+        for index in range(2):
+            response = client.post("/api/bank-runtime/agents/assistant-a/chat", headers=_headers(), json=_request_body(
+                runtime_task_id=f"task-attachment-{index}",
+                input=[{"role": "user", "content": [{"type": "text", "text": user_text}]}],
+                sandbox_context={"task_id": f"task-attachment-{index}"},
+                attachments_manifest=[{"file_id": f"file-{index}", "source": "current_task"}],
+            ))
+            assert response.status_code == 200
+            assert len(received) == index + 1
+            assert len(received[-1].input[0].content) == 1
+            assert received[-1].input[0].content[0].text == user_text
+    assert not channel._pending_content_by_session

@@ -31,13 +31,16 @@ from .native_skills import NativeSkillReader
 from .completion import operation_keys, parse_outcomes
 from .document_reads import DocumentReadLedger, result_error, is_read_recovery_tool
 from .document_inputs import normalize_document_input
+from .document_access import DocumentAccessError
 from ..artifact_tools import DocumentReadIncompleteError
 from ..artifact_tools import FileOperationsIncompleteError, OfficeConversionFailureError
 from ..presentation import artifact_model_result, failure_message
 from ..conversion_reports import (ConversionCoverage, validate_conversion_report, conversion_reason, REASONS)
 from ..model_context import prepare_public_model_context
+from ..delivery_state import current_delivery_state
 from ..artifact_schema import describe_docx_tools, docx_retry_schema_hint
 from ..docx_draft import controlled_docx_call, draft_request
+from ..pptx_draft import controlled_pptx_call, draft_request as pptx_draft_request
 from ..artifact_tools import (
     ARTIFACT_WORKER_TOOL_NAMES,
     ArtifactDeliveryIntent,
@@ -103,8 +106,10 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
         sandbox_executor: Any | None = None,
         configuration_error: str = "",
         artifact_intent: ArtifactDeliveryIntent | None = None,
+        model_reliability: Any | None = None,
     ) -> None:
         self.client = client
+        self.model_reliability = model_reliability
         self.sandbox_executor = sandbox_executor
         self.configuration_error = str(configuration_error or "")
         self.artifact_intent = artifact_intent
@@ -114,6 +119,7 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
         self._artifact_turn_state: _ArtifactTurnState | None = None
         self.artifact_input_failures = 0
         self._docx_draft_attempted = False
+        self._pptx_draft_attempted = False
         self._artifact_schema_hint: ArtifactDeliveryIntent | None = None
         self.layout_failure = None
         self.unresolved_file_operations: set[str] = set()
@@ -122,6 +128,10 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
         self.conversion_failures: dict[str, str] = {}
         self.document_reads = DocumentReadLedger()
         self._read_guard_failed = False
+        self._scoped_answer_confirmed = False
+        self._partial_fallback_calls = 0
+        self._successful_read_finish_attempted = False
+        self._partial_generated_ids: set[str] = set()
         self._reply_text: list[str] = []
         self.native_skills: NativeSkillReader | None = None
         self.allowed_tool_names: frozenset[str] | None = None
@@ -137,6 +147,7 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
     ) -> AsyncGenerator[Any, None]:
         self.artifact_input_failures = 0
         self._docx_draft_attempted = False
+        self._pptx_draft_attempted = False
         self._artifact_schema_hint = None
         self.layout_failure = None
         self.unresolved_file_operations.clear()
@@ -145,6 +156,10 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
         self.conversion_failures.clear()
         self.document_reads = DocumentReadLedger()
         self._read_guard_failed = False
+        self._scoped_answer_confirmed = False
+        self._partial_fallback_calls = 0
+        self._successful_read_finish_attempted = False
+        self._partial_generated_ids: set[str] = set()
         self._reply_text: list[str] = []
         if self.artifact_intent is None:
             async for item in next_handler(**input_kwargs):
@@ -187,6 +202,8 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
         return code
 
     def _check_file_completion(self):
+        if self._read_guard_failed:
+            raise DocumentReadIncompleteError(self._read_error() or "DOCUMENT_READ_INCOMPLETE")
         if any(key.startswith("artifact:") for key in self.unresolved_file_operations):
             if self.conversion_failures:
                 raise OfficeConversionFailureError(next(iter(self.conversion_failures.values())))
@@ -195,12 +212,12 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
             raise FileOperationsIncompleteError()
         if self.artifact_input_failures:
             raise ArtifactInputRetryExhaustedError()
-        if self._read_error():
+        if self._read_error() and not self._scoped_answer_confirmed:
             raise DocumentReadIncompleteError(self._read_error())
         conflict = self.document_reads.declaration_conflict("".join(self._reply_text or []))
         if conflict:
             raise DocumentReadIncompleteError(conflict)
-        if self.unresolved_file_operations:
+        if self.unresolved_file_operations and not (self._scoped_answer_confirmed and all(key.startswith("parse:") for key in self.unresolved_file_operations)):
             raise FileOperationsIncompleteError()
 
     def _requires_conversion_read(self, payload):
@@ -279,6 +296,23 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
         input_kwargs["tools"] = describe_docx_tools(
             input_kwargs.get("tools"), self.artifact_intent or self._artifact_schema_hint,
         )
+        if self.model_reliability is not None:
+            raw_handler = next_handler
+            async def reliable_handler(**kwargs):
+                intent = self.artifact_intent
+                eligible = bool(
+                    intent is not None and intent.operation == "generate"
+                    and not intent.source_refs and not self.unresolved_file_operations
+                    and not self.artifact_input_failures
+                    and any(s.get("function", {}).get("name") == "artifact_generate"
+                            for s in _visible_artifact_tool_schemas(kwargs.get("tools")))
+                    and ((intent.target_format == "docx" and intent.layout_kind != "official_document"
+                          and not self._docx_draft_attempted)
+                         or (intent.target_format == "pptx" and not self._pptx_draft_attempted))
+                )
+                return await self.model_reliability.call(
+                    raw_handler, allow_parameter_recovery=eligible, **kwargs)
+            next_handler = reliable_handler
         original_handler = next_handler
         async def checked_handler(**kwargs):
             value = await original_handler(**kwargs)
@@ -317,16 +351,53 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
                 )),
             ]
         read_error = self._read_error()
+        if any(doc.structured and (doc.no_progress or doc.repeated_statistics
+                                  or any(doc.aggregate_stalls.values()))
+               for doc in self.document_reads.documents.values()) and not read_error:
+            input_kwargs = dict(input_kwargs)
+            input_kwargs["messages"] = [*list(input_kwargs.get("messages") or []), SystemMsg(
+                name="system", content=(
+                    "本轮已有重复的表格查询，没有增加新证据。直接复用已返回结果和 document_ref；"
+                    "不要再次查找、解析、读取相同范围或重算相同指标。统计请求由完整范围的 aggregate 结果支撑，"
+                    "无需为统计再逐行读完文件。只补实际缺少的指标或下一页；缺少的机构、日期等列不能凭空推断。"
+                    "回答写清工作表、指标和统计范围，不把统计完成描述为全部正文已读完。"))]
         if self.conversion_failures and any(key.startswith("artifact:") for key in self.unresolved_file_operations):
             raise OfficeConversionFailureError(next(iter(self.conversion_failures.values())))
-        if self.document_reads.argument_retry_exhausted:
-            self._read_guard_failed = True
-            raise DocumentReadIncompleteError("DOCUMENT_ARGUMENT_INVALID")
-        if self._read_guard_failed or read_error in {
-            "DOCUMENT_READ_NO_PROGRESS", "DOCUMENT_TEXT_TRUNCATED", "DOCUMENT_TEXT_ENCODING_UNSUPPORTED", "MINERU_SUBMIT_AMBIGUOUS"
-        }:
-            self._read_guard_failed = True
-            raise DocumentReadIncompleteError(read_error or "DOCUMENT_READ_INCOMPLETE")
+        exhausted = self.document_reads.argument_retry_exhausted or read_error in {
+            "DOCUMENT_READ_NO_PROGRESS", "DOCUMENT_TEXT_TRUNCATED", "DOCUMENT_TEXT_ENCODING_UNSUPPORTED", "MINERU_SUBMIT_AMBIGUOUS"}
+        force_scoped = False
+        successful_read_finish = (not read_error and not self._read_guard_failed and self.artifact_intent is None
+                                  and not self.conversion_coverage.requires_scope
+                                  and self.document_reads.successful_read_repeats)
+        if successful_read_finish:
+            if self._successful_read_finish_attempted:
+                self._read_guard_failed = True
+                raise DocumentReadIncompleteError("DOCUMENT_READ_NO_PROGRESS")
+            self._successful_read_finish_attempted = True
+            input_kwargs['tools'] = []
+            input_kwargs.pop('tool_choice', None)
+            input_kwargs['messages'] = [*list(input_kwargs.get('messages') or []), SystemMsg(
+                name='system', content=(
+                    "同一明确行范围已经完整返回，不再重复调用工具。复用已有结果完成回答，"
+                    "只陈述已验证的范围、指标与内容；局部行范围读取完成不代表全文读完。"))]
+        elif self._read_guard_failed or exhausted:
+            if self._successful_read_finish_attempted:
+                self._read_guard_failed = True
+                raise DocumentReadIncompleteError(read_error or "DOCUMENT_READ_NO_PROGRESS")
+            permitted = (not self._read_guard_failed and self.document_reads.permits_scoped_answer("已确认范围的结果")
+                         and not (self.artifact_intent and self.artifact_intent.input_scope == "complete")
+                         and self._partial_fallback_calls < (3 if self.artifact_intent else 1))
+            if not permitted:
+                self._read_guard_failed = True
+                raise DocumentReadIncompleteError(read_error or "DOCUMENT_READ_INCOMPLETE")
+            self._partial_fallback_calls += 1
+            force_scoped = True
+            input_kwargs['tools'] = [schema for schema in (input_kwargs.get('tools') or [])
+                if self.artifact_intent and self._partial_fallback_calls <= 2
+                and schema.get('function', {}).get('name') == ('artifact_generate' if self._partial_fallback_calls == 1 else 'artifact_convert')]
+            input_kwargs['messages'] = [*list(input_kwargs.get('messages') or []), SystemMsg(name='system', content=(
+                "读取恢复已达到本轮预算，不再重复读取或统计。仅交付已经核实且能独立成立的范围，明确具体缺口和影响；"
+                "不能输出依赖缺失材料的全量合计、排名或排除性结论。有报告要求时仅生成标明范围的部分稿。"))]
         if read_error == "DOCUMENT_ARGUMENT_INVALID":
             input_kwargs = dict(input_kwargs)
             input_kwargs["messages"] = [*list(input_kwargs.get("messages") or []), SystemMsg(
@@ -399,14 +470,44 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
         # with public-answer guidance rather than a schema to recite.
         if input_kwargs.get("messages"):
             input_kwargs = prepare_public_model_context(input_kwargs)
-        if read_error:
+        if read_error or successful_read_finish:
             # Only this incomplete-read model round is buffered. A complete
             # file answer and ordinary conversation retain their normal stream.
             response = await _capture_model_output(await next_handler(**input_kwargs))
             names = _tool_call_names(response.final)
-            if not names or any(not is_read_recovery_tool(name) for name in names):
+            if successful_read_finish:
+                text = ''.join(block.text for block in response.final.content if isinstance(block, TextBlock))
+                conflict = self.document_reads.declaration_conflict(text)
+                if names or conflict or not text.strip():
+                    self._read_guard_failed = True
+                    raise DocumentReadIncompleteError(conflict or "DOCUMENT_READ_NO_PROGRESS")
+                final = copy(response.final)
+                final.content = [TextBlock(text=text)]
+                return _CapturedModelOutput((final,), response.streamed).replay()
+            if not names:
+                text = ''.join(block.text for block in response.final.content if isinstance(block, TextBlock))
+                if (self.artifact_intent is None or self._scoped_answer_confirmed) and self.document_reads.permits_scoped_answer(text):
+                    state = current_delivery_state()
+                    if state is not None and state.task_id == getattr(getattr(self.client, 'config', None), 'task_id', ''):
+                        self._confirm_scoped_delivery()
+                        # A single verified formal snapshot avoids leaking a speculative buffered prefix.
+                        final = copy(response.final)
+                        final.content = [TextBlock(text=text)]
+                        return _CapturedModelOutput((final,), response.streamed).replay()
                 self._read_guard_failed = True
                 raise DocumentReadIncompleteError(read_error)
+            artifact_calls = [block for block in response.final.content if isinstance(block, ToolCallBlock)]
+            partial_report = bool(artifact_calls) and all(
+                block.name in {'artifact_generate', 'artifact_convert'} and self._partial_report(block.name, self._tool_payload(block)) is not None
+                for block in artifact_calls)
+            if force_scoped:
+                permitted_name = 'artifact_generate' if self._partial_fallback_calls == 1 else 'artifact_convert' if self._partial_fallback_calls == 2 else ''
+                partial_report = partial_report and names == {permitted_name}
+            if (force_scoped or any(not is_read_recovery_tool(name) for name in names)) and not partial_report:
+                self._read_guard_failed = True
+                raise DocumentReadIncompleteError(read_error)
+            if partial_report and self._artifact_turn_state is not None:
+                self._artifact_turn_state.invoked = True
             # Tool plans are allowed to recover the read, but their speculative
             # prose must never escape into an answer or downloadable report.
             chunks = []
@@ -476,8 +577,33 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
         if replacement_names & ARTIFACT_WORKER_TOOL_NAMES:
             state.invoked = True
             return replacement.replay()
+        recovered = await self._recover_pptx_proposal(input_kwargs, original_handler, state)
+        if recovered is not None:
+            state.invoked = True
+            return recovered.replay()
         state.failed = True
         raise ArtifactToolNotInvokedError()
+
+    async def _recover_pptx_proposal(self, input_kwargs, original_handler, state):
+        intent = self.artifact_intent
+        names = {schema.get("function", {}).get("name")
+                 for schema in _visible_artifact_tool_schemas(input_kwargs.get("tools"))}
+        if (self._pptx_draft_attempted or intent is None or intent.operation != "generate"
+                or intent.target_format != "pptx" or intent.source_refs
+                or self.unresolved_file_operations or self.artifact_input_failures
+                or "artifact_generate" not in names):
+            return None
+        self._pptx_draft_attempted = True
+        try:
+            draft = await _capture_model_output(await original_handler(**pptx_draft_request(input_kwargs)))
+            proposal = controlled_pptx_call(draft.final)
+            return _CapturedModelOutput((proposal,), draft.streamed)
+        except Exception as exc:
+            state.failed = True
+            if self.model_reliability is not None and exc is self.model_reliability.failure:
+                raise
+            _logger.warning("PPT parameter recovery failed: error_type=%s", type(exc).__name__)
+            return None
 
     async def _capture_artifact_proposal(
         self, input_kwargs, next_handler, original_handler, state,
@@ -485,6 +611,10 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
         try:
             return await _capture_model_output(await next_handler(**input_kwargs))
         except ModelExecutionException as exc:
+            if exc.details.get("finish_reason") in {"error", "length"}:
+                recovered = await self._recover_pptx_proposal(input_kwargs, original_handler, state)
+                if recovered is not None:
+                    return recovered
             intent = self.artifact_intent
             names = {
                 schema.get("function", {}).get("name")
@@ -511,6 +641,8 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
                 result = controlled_docx_call(draft.final)
             except Exception as draft_error:
                 state.failed = True
+                if self.model_reliability is not None and draft_error is self.model_reliability.failure:
+                    raise
                 _logger.warning(
                     "DOCX text draft recovery failed: error_type=%s",
                     type(draft_error).__name__,
@@ -522,7 +654,44 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
             _logger.info("Recovered ordinary DOCX parameters from a completed text draft")
             return _CapturedModelOutput((result,), draft.streamed)
 
+    @staticmethod
+    def _tool_payload(block):
+        try:
+            value = json.loads(block.input) if isinstance(block.input, str) else block.input
+            return value if isinstance(value, dict) else {}
+        except (ValueError, TypeError):
+            return {}
+
+    def _partial_report(self, tool_name, tool_input):
+        from .partial_reports import partial_report_input
+        state = current_delivery_state()
+        if state is None or state.task_id != getattr(getattr(self.client, 'config', None), 'task_id', ''):
+            return None
+        source = tool_input.get('source_generated_file_id') or (tool_input.get('source_id') if tool_input.get('source_type') == 'generated_file' else '')
+        if (tool_name == 'artifact_convert' and source in self._partial_generated_ids
+                and tool_input.get('purpose', 'delivery') == 'delivery'
+                and self.artifact_intent and self.artifact_intent.input_scope != 'complete'):
+            result = dict(tool_input)
+            name = str(result.get('output_name') or '')
+            if name and '（部分稿）' not in name:
+                from pathlib import PurePath
+                path = PurePath(name)
+                result['output_name'] = str(path.with_name(path.stem + '（部分稿）' + path.suffix))
+            return result
+        return partial_report_input(tool_name, tool_input, self.artifact_intent, self.document_reads, self.converted_sources)
+
+    def _confirm_scoped_delivery(self):
+        state = current_delivery_state()
+        if state is not None and state.task_id == getattr(getattr(self.client, 'config', None), 'task_id', ''):
+            self._scoped_answer_confirmed = True
+            state.analysis = {'version': 'reading-delivery-1', 'delivery': 'partial',
+                'gaps': [{**gap, 'file_id': self.converted_sources.get(gap['file_id'], gap['file_id'])}
+                         for gap in self.document_reads.unfinished_scopes()]}
+
     def document_input(self, tool_name, tool_input):
+        partial = self._partial_report(tool_name, tool_input)
+        if partial is not None:
+            return partial
         return normalize_document_input(tool_name, tool_input,
             task_id=getattr(getattr(self.client, "config", None), "task_id", ""),
             ledger=self.document_reads)
@@ -561,7 +730,7 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
 
     async def _authorized_native_call(self, tool_name, tool_input, next_handler):
         from .document_access import DOCUMENT_TOOLS, DocumentAccessError, approved_document_grant
-        from qwenpaw.drivers.mcp_context import mcp_call_metadata
+        from qwenpaw.drivers.mcp_context import mcp_call_metadata, mcp_call_timeout
 
         raw_name = tool_name.removeprefix("MinerU__")
         if tool_name != "MinerU__" + raw_name or raw_name not in DOCUMENT_TOOLS:
@@ -572,13 +741,15 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
         if raw_name != "parse_documents" and tool_input.get("document_ref") not in self.document_reads.documents:
             raise DocumentAccessError()
         with approved_document_grant(task_id, raw_name, tool_input) as metadata:
-            with mcp_call_metadata(metadata):
+            with mcp_call_metadata(metadata), mcp_call_timeout(
+                        self.model_reliability.deadline - time.monotonic() if self.model_reliability else None):
                 stream = next_handler()
             try:
                 while True:
                     # Reset in the context that set the token BEFORE yielding.
                     # Consumers may close this generator in a different task.
-                    with mcp_call_metadata(metadata):
+                    with mcp_call_metadata(metadata), mcp_call_timeout(
+                        self.model_reliability.deadline - time.monotonic() if self.model_reliability else None):
                         try:
                             item = await anext(stream)
                         except StopAsyncIteration:
@@ -660,6 +831,7 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
         tool_input = complete_artifact_tool_input(
             tool_name, tool_input, self.artifact_intent
         )
+        partial_report = self._partial_report(tool_name, tool_input) is not None
         normalized = self.document_input(tool_name, tool_input)
         if normalized != tool_input:
             original_handler = next_handler
@@ -702,7 +874,7 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
             if self.conversion_coverage.partial_read and not is_read_recovery_tool(tool_name):
                 self.unresolved_file_operations.difference_update(operation_keys(tool_name, tool_input) - prior_operation_keys)
                 raise DocumentReadIncompleteError("DOCUMENT_CONVERSION_PARTIAL")
-            if self._read_error() and not is_read_recovery_tool(tool_name):
+            if self._read_error() and not is_read_recovery_tool(tool_name) and not partial_report:
                 # Even a directly requested physical or delegated tool cannot
                 # publish a result from known-incomplete input.
                 self.unresolved_file_operations.difference_update(operation_keys(tool_name, tool_input) - prior_operation_keys)
@@ -730,6 +902,9 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
                 chart_ready = tool_name == "chart_generate" and delivered.get("chart_status") == "ready" and delivered.get("chart_id") and delivered.get("version_id")
                 if result.get("status") == "success" and (chart_ready or (delivered.get("artifact_status") == "succeeded" and delivered.get("generated_file_ids"))):
                     self.unresolved_file_operations.difference_update(keys)
+                    if partial_report:
+                        self._partial_generated_ids.update(str(file_id) for file_id in delivered['generated_file_ids'])
+                        self._confirm_scoped_delivery()
                     if not self.unresolved_file_operations:
                         self.artifact_input_failures = 0
                 else:
@@ -842,6 +1017,13 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
             raise
         except Exception as exc:
             self._remember_conversion_failure(tool_name, tool_input, getattr(exc, "conversion_failure", ""))
+            if isinstance(exc, DocumentAccessError):
+                # start() precedes native scope validation. Preserve the actual
+                # denial instead of leaving its provisional "incomplete read"
+                # behind; other successful reads must not erase this failure.
+                self.document_reads.observe(tool_name, tool_input, [TextBlock(
+                    type="text", text=json.dumps({"status": "failed", "error_code": exc.error_code})
+                )], False)
             if not isinstance(exc, DocumentReadIncompleteError):
                 self.unresolved_file_operations.update(operation_keys(tool_name, tool_input))
             if tool_name in _RUNTIME_EXECUTED_TOOLS and getattr(exc, "code", "") in {"INVALID_REQUEST", "BAD_REQUEST", "ARTIFACT_VALIDATION_FAILED"}:
@@ -1020,8 +1202,19 @@ def bank_runtime_middleware_factory(
             base_url=config.base_url,
             sandbox_context=getattr(request, "sandbox_context", None),
         )
+        from ..model_reliability import BankModelReliability
+        model_policy = (request_context or {}).get("runtime_model_policy") or {}
+        if not isinstance(model_policy, Mapping):
+            model_policy = {}
+        reliability = BankModelReliability(
+            (request_context or {}).get("runtime_model_budget_seconds", 1800),
+            idle_seconds=model_policy.get("idle_seconds"),
+            no_output_retry_attempts=model_policy.get("no_output_retry_attempts", 1),
+            truncation_recovery_attempts=model_policy.get("truncation_recovery_attempts", 1),
+        )
         return BankRuntimeGatewayMiddleware(
             GatewayClient(config),
+            model_reliability=reliability,
             sandbox_executor=sandbox_executor,
             artifact_intent=artifact_delivery_intent_from_request(request),
         )

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import json
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -28,6 +29,50 @@ from qwenpaw.hooks.session.session_hook import SessionLoadHook, SessionSaveHook
 from qwenpaw.runtime.hooks import HookRegistry
 from qwenpaw.runtime.phases import Phase
 from qwenpaw.runtime.runtime import Runtime
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("prefix,offset", [("fr1", None), ("dr1", None), ("ds1", None),
+                                           ("cur1", 5), ("cs1", 10)])
+async def test_managed_history_redacts_document_handles_on_commit_and_legacy_load(tmp_path, prefix, offset):
+    # Match the formats actually emitted by FileRefRegistry/DocumentStore/StructuredStore.
+    token = (f"{prefix}_" + "a" * 64 + "_" + "b" * 64 if offset is None
+             else f"{prefix}_{offset}_" + "a" * 32 + "_" + "b" * 64)
+    state = {"state": {"context": [
+        {"role": "user", "content": [{"type": "text", "text": "识别中文台账.xlsx"}],
+         "metadata": {"runtime_attachment_metadata": [{"file_id": "file_a", "display_name": "中文台账.xlsx"}]}},
+        {"role": "assistant", "content": [{"type": "tool_use", "id": "call-original",
+         "name": "MinerU__read_range", "input": json.dumps({"document_ref": token})}]},
+        {"role": "tool", "content": [{"type": "tool_result", "id": "call-original",
+         "output": [{"type": "text", "text": json.dumps({"document_ref": token, "rows": 12})}]}]},
+        {"role": "assistant", "content": [{"type": "text", "text": "台账共12条记录。"}]},
+    ]}}
+    original = copy.deepcopy(state)
+    delegate = SafeJSONSession(str(tmp_path))
+    ctx = _ctx(delegate, agent=_Agent(state))
+    await _prepare_and_load(ctx)
+    await _commit_and_cleanup(ctx)
+    saved = await delegate.get_session_state_dict(session_id="session-001", user_id="user-a", channel="bank-runtime")
+    # Also test old sessions already containing the token, without rewriting their storage.
+    legacy = copy.deepcopy(saved)
+    legacy["agent"] = original
+    class LegacySession:
+        async def get_session_state_dict(self, **kwargs):
+            return legacy
+    resumed = _ctx(LegacySession(), request=_request(task_id="task-next", session_state="active"))
+    try:
+        await _prepare_and_load(resumed)
+        for actual in (saved["agent"], resumed.session_state):
+            serialized = json.dumps(actual, ensure_ascii=False)
+            assert token not in serialized
+            assert "中文台账.xlsx" in serialized
+            assert "file_a" in serialized
+            assert serialized.count("call-original") == 2
+            assert "台账共12条记录。" in serialized
+        assert ctx.agent.state == original
+        assert legacy["agent"] == original
+    finally:
+        await ManagedSessionCleanupHook().run(resumed)
 
 
 class _Agent:

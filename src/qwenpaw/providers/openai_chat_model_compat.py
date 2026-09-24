@@ -833,6 +833,9 @@ class OpenAIChatModelCompat(OpenAIChatModel):
         # Normalize that formatter's output, not its still-unformatted input.
         # Never swap self.formatter while other calls may be using this model.
         request_model = copy(self)
+        from .retry_scope import external_retry_owner
+        if external_retry_owner.get():
+            request_model.client_kwargs = {**self.client_kwargs, "max_retries": 0}
         request_model.formatter = SystemMessageOrderFormatter(self.formatter)
         extra_body = merged.get("extra_body") or self.extra_body or {}
         thinking = extra_body.get("thinking")
@@ -881,6 +884,11 @@ class OpenAIChatModelCompat(OpenAIChatModel):
         if tools:
             tools = _sanitize_tool_schemas(tools)
         return super()._format_tools(tools, tool_choice)
+
+    def _parse_completion_response(self, start_datetime: datetime, response: Any, audio_format: str = "wav") -> ChatResponse:
+        # Non-streaming requests must obey the same finish-reason guard.
+        _sanitize_chunk(response)
+        return super()._parse_completion_response(start_datetime, response, audio_format)
 
     # pylint: disable=too-many-branches, too-many-statements
     async def _parse_stream_response(

@@ -18,6 +18,25 @@ from bank_runtime.sandbox.cache import PreparedSandboxFile
 from qwenpaw.drivers.mcp_context import current_mcp_metadata
 
 
+@pytest.mark.parametrize("cursor", [0, "0", ""])
+@pytest.mark.asyncio
+async def test_chunk_first_page_alias_and_oversized_limit_before_approval(cursor):
+    m = BankRuntimeGatewayMiddleware(Client())
+    parsed(m, ref="observed-ref")
+    args = {"document_ref": "observed-ref", "cursor": cursor, "limit": "16"}
+    await execute(m, "MinerU__read_document_chunks", args,
+                  {"document_ref": "observed-ref", "cursor": None, "limit": 10})
+
+
+@pytest.mark.parametrize("cursor", ["1", "unknown-cursor", False])
+def test_chunk_continuation_cursors_are_never_guessed(cursor):
+    from bank_runtime.gateway.document_inputs import normalize_document_input
+    m = BankRuntimeGatewayMiddleware(Client())
+    args = {"document_ref": "unknown-ref", "cursor": cursor, "limit": 5}
+    assert normalize_document_input("MinerU__read_document_chunks", args,
+                                    task_id="task_a", ledger=m.document_reads) == args
+
+
 class Client:
     config = SimpleNamespace(task_id='task_a')
     def __init__(self): self.inputs = []; self.results = []

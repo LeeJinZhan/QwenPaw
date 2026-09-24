@@ -485,7 +485,16 @@ class Runtime:
             workspace_dir=workspace_dir,
             workspace=self.workspace,
             app_services=self.app_services,
-            input_msgs=_request_input_to_msgs(request.input),
+            # Bank attachments live in a separate authorized manifest. Keep the
+            # empty current user text container until the attachment hook fills
+            # it; normal Console empty-message filtering stays unchanged.
+            input_msgs=_request_input_to_msgs(
+                request.input,
+                preserve_empty_user_message=(
+                    getattr(request, "channel", "") == "bank-runtime"
+                    and bool(getattr(request, "attachments_manifest", None))
+                ),
+            ),
         )
 
     @staticmethod

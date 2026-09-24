@@ -25,8 +25,8 @@ def is_read_recovery_tool(name):
 
 
 FULL_CLAIM_KEYWORDS = (
-    "全量", "全表", "全部sheet", "全部 sheet", "所有sheet", "所有 sheet",
-    "所有工作表", "合计", "总计", "整体", "读完", "完整读取", "全部内容", "全文", "完整分析",
+    "全量", "全表", "全部材料", "所有材料", "全部文件", "所有文件", "全部sheet", "全部 sheet", "所有sheet", "所有 sheet",
+    "所有工作表", "合计", "总计", "读完", "完整读取", "全部内容", "全文", "完整分析",
     "平均", "中位数", "计数", "去重数量", "最小", "最大",
 )
 ALL_SHEET_KEYWORDS = ("全量", "全表", "全部", "所有", "所有工作表")
@@ -67,6 +67,7 @@ class _Read:
     cursors: dict[str | None, int] = field(default_factory=lambda: {None: 0})
     terminal: bool = False
     no_progress: int = 0
+    last_range_complete: bool = False
     error: str = ""
     inventory: dict[str, int] = field(default_factory=dict)
     inventory_complete: bool = True
@@ -74,7 +75,11 @@ class _Read:
     covered: dict[str, list] = field(default_factory=dict)
     aggregates: list[dict] = field(default_factory=list)
     aggregate_pages: dict[str, list[list[int]]] = field(default_factory=dict)
+    aggregate_stalls: dict[str, int] = field(default_factory=dict)
+    repeated_statistics: bool = False
     touched: set = field(default_factory=set)
+    cell_fragments: set[str] = field(default_factory=set)
+    projections: set[str] = field(default_factory=set)
 
     @property
     def structured(self):
@@ -121,8 +126,12 @@ class DocumentReadLedger:
 
     @property
     def pending(self):
+        # Completed statistics never grant an exemption to unfinished reads
+        # or other aggregate operations. Their progress budgets are separate.
         return bool(self.failures) or any(
-            not doc.complete for doc in self.documents.values() if not doc.structured
+            (not doc.complete and (not doc.structured or (doc.no_progress >= 3 and not doc.last_range_complete)))
+            or bool(doc.aggregate_stalls)
+            for doc in self.documents.values()
         )
 
     @property
@@ -143,7 +152,8 @@ class DocumentReadLedger:
         if any(self.attempts.get(key, 0) >= 3 for key in self.failures):
             return "DOCUMENT_READ_NO_PROGRESS"
         for doc in self.documents.values():
-            if doc.no_progress >= 3:
+            if ((doc.no_progress >= 3 and not doc.last_range_complete and not doc.complete)
+                    or any(count >= 3 for count in doc.aggregate_stalls.values())):
                 return "DOCUMENT_READ_NO_PROGRESS"
         return next(iter(self.failures.values()), "") or next(
             (doc.error for doc in self.documents.values() if doc.error), "DOCUMENT_READ_INCOMPLETE")
@@ -151,6 +161,57 @@ class DocumentReadLedger:
     def coverage(self, ref):
         doc = self.documents[ref]
         return len(doc.chunks), doc.total
+
+    @staticmethod
+    def _aggregate_scope(op):
+        if not isinstance(op, Mapping):
+            return op
+        # Absent/default options describe the same computation on continuation.
+        return {k: v for k, v in op.items() if k != "group_cursor"
+                and not (k in {"sheet", "row_range", "filter", "cross_sheet_union"} and v is None)
+                and not (k == "group_by" and v in (None, []))}
+
+    @staticmethod
+    def _aggregate_keys(payload):
+        ref = str(payload.get("document_ref") or "")
+        ops = payload.get("ops")
+        if not isinstance(ops, list) or not ops:
+            ops = [ops]
+        keys = set()
+        for op in ops:
+            # Cursor advancement recovers the same operation; changing its
+            # sheet, range, grouping, filter or metrics does not.
+            scope = DocumentReadLedger._aggregate_scope(op)
+            digest = hashlib.sha256(json.dumps(scope, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+            keys.add(f"aggregate:{ref}:{digest}")
+        return keys
+
+    def _fail_aggregate(self, payload, code):
+        keys = self._aggregate_keys(payload)
+        if code == "DOCUMENT_ARGUMENT_INVALID":
+            # Schema rejection did not execute an operation. Keep the existing
+            # bounded parameter correction, without erasing prior real errors.
+            for key in keys:
+                if self.failures.get(key) == "DOCUMENT_READ_INCOMPLETE" and self.attempts.get(key) == 1:
+                    self.failures.pop(key, None)
+                    self.attempts.pop(key, None)
+            self.failures["aggregate-argument:" + str(payload.get("document_ref") or "")] = code
+            return
+        for key in keys:
+            self.failures[key] = code
+
+    def _clear_aggregate_reference(self, ref):
+        for collection in (self.failures, self.attempts, self.argument_failures):
+            for key in list(collection):
+                if key.startswith(f"aggregate:{ref}:") or key == "aggregate-argument:" + ref:
+                    collection.pop(key, None)
+
+    @property
+    def successful_read_repeats(self):
+        """Stop a redundant loop independently of delivery completeness."""
+        return not self.pending and not any(doc.error for doc in self.documents.values()) and any(
+            doc.structured and doc.no_progress >= 3 and (doc.last_range_complete or doc.complete)
+            for doc in self.documents.values())
 
     def start(self, name, payload):
         if name.endswith("parse_documents"):
@@ -160,15 +221,16 @@ class DocumentReadLedger:
                     self.failures[key] = "DOCUMENT_PARSE_FAILED"
                     self.attempts[key] = self.attempts.get(key, 0) + 1
         elif name.endswith(("read_document_chunks", "read_range", "aggregate")):
-            key = "read:" + str(payload.get("document_ref") or "")
-            self.failures[key] = "DOCUMENT_READ_INCOMPLETE"
-            self.attempts[key] = self.attempts.get(key, 0) + 1
+            keys = self._aggregate_keys(payload) if name.endswith("aggregate") else ["read:" + str(payload.get("document_ref") or "")]
+            for key in keys:
+                self.failures.setdefault(key, "DOCUMENT_READ_INCOMPLETE")
+                self.attempts[key] = self.attempts.get(key, 0) + 1
 
     def observe(self, name, payload, content, success):
         values = result_objects(content)
         code = result_error(content)
         if code == "DOCUMENT_ARGUMENT_INVALID" and name.endswith(("parse_documents", "read_range", "aggregate", "read_document_chunks")):
-            keys = ["parse:" + str(item.get("file_id") or "") for item in payload.get("documents", []) if isinstance(item, Mapping)] if name.endswith("parse_documents") else ["read:" + str(payload.get("document_ref") or "")]
+            keys = ["parse:" + str(item.get("file_id") or "") for item in payload.get("documents", []) if isinstance(item, Mapping)] if name.endswith("parse_documents") else [("aggregate-argument:" if name.endswith("aggregate") else "read:") + str(payload.get("document_ref") or "")]
             for key in keys:
                 self.argument_failures[key] = self.argument_failures.get(key, 0) + 1
         if name.endswith("read_range"):
@@ -220,6 +282,15 @@ class DocumentReadLedger:
                         if doc.file_id == file_id and old_ref != ref:
                             del self.documents[old_ref]
                             self.failures.pop("read:" + old_ref, None)
+                            self._clear_aggregate_reference(old_ref)
+                    existing = self.documents.get(ref)
+                    if existing:
+                        if existing.file_id != file_id or existing.inventory != inventory:
+                            existing.error = "DOCUMENT_READ_INCOMPLETE"
+                            continue
+                        self.failures.pop("parse:" + file_id, None)
+                        self.attempts.pop("parse:" + file_id, None)
+                        continue
                     self.documents[ref] = _Read(
                         file_id, sum(inventory.values()), inventory=inventory,
                         inventory_complete=raw_inventory.get("inventory_complete", True) is True,
@@ -241,6 +312,9 @@ class DocumentReadLedger:
                     if doc.file_id == file_id and old_ref != ref:
                         del self.documents[old_ref]
                         self.failures.pop("read:" + old_ref, None)
+                        self._clear_aggregate_reference(old_ref)
+                if mode == "inline" and isinstance(ref, str) and ref:
+                    self.documents[ref] = _Read(file_id, 0, terminal=True)
                 if mode == "chunked":
                     existing = self.documents.get(ref)
                     if existing and (existing.file_id != file_id or existing.total != count):
@@ -306,6 +380,7 @@ class DocumentReadLedger:
         return
 
     def _observe_structured_chunks(self, payload, values, doc, key):
+        doc.last_range_complete = False
         value = values[0]
         chunks = value.get("chunks")
         offset = doc.cursors.get(payload.get("cursor") or None)
@@ -337,13 +412,15 @@ class DocumentReadLedger:
             evidence.append((index, digest, sheet, rows))
         if more and next_cursor in doc.cursors and doc.cursors[next_cursor] != offset + len(chunks):
             return
+        advanced = False
         for index, digest, sheet, rows in evidence:
+            advanced = index not in doc.chunks or advanced
             doc.chunks[index] = digest
-            doc.add_range(sheet, *rows)
+            advanced = doc.add_range(sheet, *rows) or advanced
             doc.touched.add(sheet)
         if more:
             doc.cursors[next_cursor] = offset + len(chunks)
-        doc.no_progress = 0
+        doc.no_progress = 0 if advanced else doc.no_progress + 1
         doc.error = ""
         self.failures.pop(key, None)
         self.attempts.pop(key, None)
@@ -353,6 +430,8 @@ class DocumentReadLedger:
         ref = str(payload.get("document_ref") or "")
         key = "read:" + ref
         doc = self.documents.get(ref)
+        if doc:
+            doc.last_range_complete = False
         if not success or code or not values or doc is None or not doc.structured:
             self.failures[key] = code or "DOCUMENT_READ_INCOMPLETE"
             if doc:
@@ -364,17 +443,25 @@ class DocumentReadLedger:
             return
         if payload.get("format") == "cell" and value.get("content_mode") == "cell":
             if value.get("sheet") in doc.inventory and isinstance(value.get("text"), str):
+                signature = hashlib.sha256(json.dumps([payload, value], sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+                advanced = signature not in doc.cell_fragments
+                doc.cell_fragments.add(signature)
                 doc.touched.add(value["sheet"])
-                doc.no_progress = 0
+                doc.no_progress = 0 if advanced else doc.no_progress + 1
                 self.failures.pop(key, None)
                 self.attempts.pop(key, None)
                 self.argument_failures.pop(key, None)
             return  # A cell fragment does not prove whole-row coverage.
         if payload.get("format") == "inventory" and value.get("content_mode") == "inventory":
+            before = (dict(doc.inventory), set(doc.column_names), doc.inventory_complete)
             inventory = value.get("inventory")
             if isinstance(inventory, Mapping):
                 for meta in inventory.get("sheets", []):
                     if isinstance(meta, Mapping) and isinstance(meta.get("name"), str) and type(meta.get("rows")) is int:
+                        if meta["name"] in doc.inventory and doc.inventory[meta["name"]] != meta["rows"]:
+                            doc.error = "DOCUMENT_READ_INCOMPLETE"
+                            self.failures[key] = doc.error
+                            return
                         doc.inventory[meta["name"]] = meta["rows"]
                         doc.column_names.update(c["name"] for c in meta.get("columns", []) if isinstance(c, Mapping) and isinstance(c.get("name"), str))
                 # All sheet names must be known, including earlier pages.
@@ -382,7 +469,8 @@ class DocumentReadLedger:
             for meta in value.get("metadata", []):
                 if isinstance(meta, Mapping) and meta.get("kind") == "column" and isinstance(meta.get("name"), str):
                     doc.column_names.add(meta["name"])
-            doc.no_progress = 0
+            advanced = before != (doc.inventory, doc.column_names, doc.inventory_complete)
+            doc.no_progress = 0 if advanced else doc.no_progress + 1
             self.failures.pop(key, None)
             self.attempts.pop(key, None)
             self.argument_failures.pop(key, None)
@@ -400,11 +488,22 @@ class DocumentReadLedger:
             doc.no_progress += 1
             self.failures[key] = "DOCUMENT_READ_INCOMPLETE"
             return
+        advanced = sheet not in doc.touched
         if value.get("all_columns", True):
-            doc.add_range(sheet, start, end)
+            advanced = doc.add_range(sheet, start, end) or advanced
+        elif isinstance(payload.get("columns"), list):
+            projection = json.dumps([sheet, start, end, sorted(payload["columns"])], ensure_ascii=False)
+            advanced = projection not in doc.projections or advanced
+            doc.projections.add(projection)
         doc.touched.add(sheet)
-        # An identical successful range retry is valid, not stalled progress.
-        doc.no_progress = 0
+        requested = payload.get('rows')
+        doc.last_range_complete = (
+            isinstance(requested, list) and len(requested) == 2
+            and all(type(row) is int for row in requested)
+            and requested == [start, end]
+            and payload.get('row_cursor') in (None, start)
+            and value.get('all_columns', True) is True)
+        doc.no_progress = 0 if advanced else doc.no_progress + 1
         doc.error = ""
         self.failures.pop(key, None)
         self.attempts.pop(key, None)
@@ -412,30 +511,26 @@ class DocumentReadLedger:
 
     def _observe_aggregate(self, name, payload, values, code, success):
         ref = str(payload.get("document_ref") or "")
-        key = "read:" + ref
         doc = self.documents.get(ref)
         if not success or code or not values or doc is None or not doc.structured:
-            self.failures[key] = code or "DOCUMENT_READ_INCOMPLETE"
-            if doc:
-                doc.no_progress += 1
+            self._fail_aggregate(payload, code or "DOCUMENT_READ_INCOMPLETE")
             return
         value = values[0]
         if (any(v != value for v in values) or value.get("document_ref") != ref
                 or type(value.get("truncated")) is not bool):
-            self.failures[key] = "DOCUMENT_READ_INCOMPLETE"
+            self._fail_aggregate(payload, "DOCUMENT_READ_INCOMPLETE")
             return
         results = value.get("results")
         if not isinstance(results, list) or not results:
-            doc.no_progress += 1
-            self.failures[key] = "DOCUMENT_READ_INCOMPLETE"
+            self._fail_aggregate(payload, "DOCUMENT_READ_INCOMPLETE")
             return
         ops = payload.get("ops")
         if not isinstance(ops, list) or len(ops) != len(results):
-            self.failures[key] = "DOCUMENT_READ_INCOMPLETE"
+            self._fail_aggregate(payload, "DOCUMENT_READ_INCOMPLETE")
             return
         if value['truncated'] and not any(isinstance(result, Mapping) and result.get('groups_complete') is False
-                                          and 'group_cursor' in op for op, result in zip(ops, results) if isinstance(op, Mapping)):
-            self.failures[key] = 'DOCUMENT_READ_INCOMPLETE'
+                                          and 'next_group_cursor' in result for op, result in zip(ops, results) if isinstance(op, Mapping)):
+            self._fail_aggregate(payload, 'DOCUMENT_READ_INCOMPLETE')
             return
         evidence = []
         pages = []
@@ -445,7 +540,7 @@ class DocumentReadLedger:
                     or result.get("metrics") != op.get("metrics")
                     or (result.get("group_by") or []) != (op.get("group_by") or [])
                     or result.get("filter") != (op.get("filter") or None)):
-                self.failures[key] = "DOCUMENT_READ_INCOMPLETE"
+                self._fail_aggregate(payload, "DOCUMENT_READ_INCOMPLETE")
                 return
             names = set()
             for source in sources:
@@ -456,28 +551,29 @@ class DocumentReadLedger:
                         or any(type(v) is not int for v in rng)
                         or rng[0] < 1 or rng[1] > total or rng[1] < rng[0] - 1
                         or source.get("rows_scanned") != max(0, rng[1] - rng[0] + 1)):
-                    self.failures[key] = "DOCUMENT_READ_INCOMPLETE"
+                    self._fail_aggregate(payload, "DOCUMENT_READ_INCOMPLETE")
                     return
                 names.add(name)
             if (not op.get("cross_sheet_union") and
                     (len(names) != 1 or (op.get("sheet") and names != {op["sheet"]}))):
-                self.failures[key] = "DOCUMENT_READ_INCOMPLETE"
+                self._fail_aggregate(payload, "DOCUMENT_READ_INCOMPLETE")
                 return
-            if 'group_cursor' in op:
-                offset, total, groups = op['group_cursor'], result.get('group_count'), result.get('groups')
+            if 'group_cursor' in op or 'groups_complete' in result:
+                offset, total, groups = op.get('group_cursor', 0), result.get('group_count'), result.get('groups')
                 if (type(offset) is not int or type(total) is not int or offset < 0 or total < 0
                         or not isinstance(groups, list) or offset + len(groups) > total
                         or (not groups and (total != 0 or offset != 0))
                         or result.get('next_group_cursor') != (offset + len(groups) if offset + len(groups) < total else None)
                         or result.get('groups_complete') is not (offset == 0 and len(groups) == total)):
-                    self.failures[key] = 'DOCUMENT_READ_INCOMPLETE'
+                    self._fail_aggregate(payload, 'DOCUMENT_READ_INCOMPLETE')
                     return
-                identity = json.dumps({'op': {k: v for k, v in op.items() if k != 'group_cursor'},
+                identity = json.dumps({'op': self._aggregate_scope(op),
                                        'sources': sources, 'total': total}, sort_keys=True, ensure_ascii=False)
                 pages.append((identity, offset, offset + len(groups), total, dict(result)))
             else:
                 evidence.append(dict(result))
         for identity, start, end, total, result in pages:
+            before = doc.aggregate_pages.get(identity, [])
             intervals = sorted([*doc.aggregate_pages.get(identity, []), [start, end]])
             merged = []
             for lower, upper in intervals:
@@ -488,20 +584,25 @@ class DocumentReadLedger:
             doc.aggregate_pages[identity] = merged
             doc.touched.update(source['sheet'] for source in result['sources'])
             if merged == [[0, total]]:
+                doc.aggregate_stalls.pop(identity, None)
                 # All result pages were observed; this still proves statistics,
                 # never raw row/text coverage. Do not retain every group's data.
                 result.update(groups=[], groups_complete=True, next_group_cursor=None)
                 evidence.append(result)
+            else:
+                doc.aggregate_stalls[identity] = (
+                    0 if merged != before else doc.aggregate_stalls.get(identity, 0) + 1)
         for item in evidence:
             if item not in doc.aggregates:
                 doc.aggregates.append(item)
+            else:
+                doc.repeated_statistics = True
             doc.touched.update(source["sheet"] for source in item["sources"])
-        # A successful statistic is progress, but never raw-content coverage.
-        doc.no_progress = 0
-        doc.error = ""
-        self.failures.pop(key, None)
-        self.attempts.pop(key, None)
-        self.argument_failures.pop(key, None)
+        # Do not clear raw-read errors, coverage or stall counters here.
+        for key in [*self._aggregate_keys(payload), "aggregate-argument:" + ref]:
+            self.failures.pop(key, None)
+            self.attempts.pop(key, None)
+            self.argument_failures.pop(key, None)
 
     def _observe_search(self, payload, values, success):
         ref = str(payload.get("document_ref") or "")
@@ -513,12 +614,36 @@ class DocumentReadLedger:
                 doc.touched.add(hit["sheet"])
 
     def declaration_conflict(self, text):
+        """Check affirmative claims separately; a disclaimer cannot license a later claim."""
+        if not isinstance(text, str):
+            return ""
+        text = re.sub(r'(?:原文(?:写着|写道|为)|引用|措辞为)[：:]?\s*[“「][^”」]*[”」]', '', text)
+        # Commas inside an explicit row total are numeric separators, not
+        # independent claims (e.g. 合计7,445条).
+        text = re.sub(r"((?:合计|总计)\s*)(\d{1,3}(?:[,，]\d{3})+)(\s*[条行笔项])",
+                      lambda match: match[1] + re.sub(r"[,，]", "", match[2]) + match[3], text)
+        for clause, table_header in _claim_units(text):
+            clause = clause.strip()
+            # Only explicit scope exclusions are exempt. Do not skip an entire
+            # answer or a clause containing a later affirmative assertion.
+            clause = re.sub(r'(?:尚未|还未|没有|未能|无法|不能)(?:完成)?(?:完整读取|读完|读取全部内容|完整分析)', '', clause)
+            clause = re.sub(r'(?:不代表|不涵盖|不包含|未覆盖|不涉及)(?:全部|所有)工作表', '', clause)
+            conflict = self._clause_conflict(clause, table_header=table_header)
+            if conflict:
+                return conflict
+        return ""
+
+    def _clause_conflict(self, text, *, table_header=""):
         """Raw coverage and scoped aggregate evidence prove different claims."""
         if not isinstance(text, str) or not any(key in text for key in FULL_CLAIM_KEYWORDS):
             return ""
         claim_all = any(key in text for key in ALL_SHEET_KEYWORDS)
+        if claim_all and self.failures:
+            return "DOCUMENT_READ_INCOMPLETE"
         for doc in self.documents.values():
             if not doc.structured:
+                if not doc.complete:
+                    return "DOCUMENT_READ_INCOMPLETE"
                 continue
             if claim_all and not doc.inventory_complete:
                 return "DOCUMENT_READ_INCOMPLETE"
@@ -528,9 +653,49 @@ class DocumentReadLedger:
                 return "DOCUMENT_READ_INCOMPLETE"
             if all(doc.sheet_full(name) for name in required):
                 continue
-            if not _statistic_supported(doc, required, text, claim_all):
+            if not _statistic_supported(doc, required, text, claim_all, table_header=table_header):
                 return "DOCUMENT_READ_INCOMPLETE"
         return ""
+
+    def independent_scopes(self):
+        """Only full documents, whole sheets or verified statistics support a partial handoff."""
+        scopes = []
+        for doc in self.documents.values():
+            if doc.error:
+                continue
+            if doc.complete:
+                scopes.append({'file_id': doc.file_id, 'kind': 'document'})
+            elif doc.structured:
+                for sheet in doc.inventory:
+                    if doc.inventory[sheet] > 0 and doc.sheet_full(sheet):
+                        scopes.append({'file_id': doc.file_id, 'kind': 'sheet', 'sheet': sheet})
+                if doc.aggregates:
+                    scopes.append({'file_id': doc.file_id, 'kind': 'statistics'})
+        return scopes
+
+    def unfinished_scopes(self):
+        gaps = []
+        known_files = set()
+        for ref, doc in self.documents.items():
+            known_files.add(doc.file_id)
+            if doc.complete:
+                continue
+            if doc.structured:
+                for sheet in doc.inventory:
+                    if not doc.sheet_full(sheet):
+                        gaps.append({'kind': 'sheet', 'file_id': doc.file_id, 'target': sheet, 'impact': 'scope_unread'})
+            else:
+                gaps.append({'kind': 'document', 'file_id': doc.file_id, 'impact': 'scope_unread'})
+        for key in self.failures:
+            if key.startswith('parse:') and key[6:] not in known_files:
+                gaps.append({'kind': 'document', 'file_id': key[6:], 'impact': 'scope_unread'})
+        return gaps
+
+    def permits_scoped_answer(self, text):
+        if any(code in FILE_POLICY_CODES or code == 'MINERU_SUBMIT_AMBIGUOUS' for code in self.failures.values()):
+            return False
+        return bool(self.independent_scopes() and self.unfinished_scopes() and text.strip()
+                    and not self.declaration_conflict(text))
 
     def recover_sources(self, file_ids, *, preserve_file_id=""):
         for file_id in file_ids:
@@ -541,10 +706,32 @@ class DocumentReadLedger:
                 if doc.file_id == file_id and file_id != preserve_file_id:
                     del self.documents[ref]
                     self.failures.pop("read:" + ref, None)
+                    self._clear_aggregate_reference(ref)
 
 
 _STATISTIC_WORDS = {"sum": ("合计", "总计", "总和"), "avg": ("平均",), "median": ("中位数",),
                     "count": ("数量", "计数"), "count_distinct": ("去重数量",), "min": ("最小",), "max": ("最大",)}
+
+
+def _claim_units(text):
+    """Keep a Markdown table with its own header; never borrow adjacent prose."""
+    lines = text.splitlines()
+    index = 0
+    while index < len(lines):
+        header = lines[index].strip()
+        if (header.startswith('|') and header.endswith('|') and index + 1 < len(lines)
+                and re.fullmatch(r'\s*\|(?:\s*:?-{3,}:?\s*\|)+\s*', lines[index + 1])
+                and header.count('|') == lines[index + 1].count('|')):
+            end = index + 2
+            while end < len(lines) and lines[end].strip().startswith('|') and lines[end].strip().endswith('|'):
+                end += 1
+            yield '\n'.join(lines[index:end]), header
+            index = end
+        else:
+            for clause in re.split(r'[。！？；;，,]|但是|但|然而', lines[index]):
+                yield clause, ''
+            index += 1
+
 
 def _mentioned_names(names, text):
     # Longest names first: 金额#2 must not also match the distinct 金额 column.
@@ -556,12 +743,41 @@ def _mentioned_names(names, text):
     return found
 
 
-def _statistic_supported(doc, required, text, claim_all):
+def _table_columns(header, names):
+    """Resolve display labels like 金额合计（元） against actual column names.
+
+    Do not strip units or guess aliases: only an inserted statistic word is
+    removable, and ambiguous labels remain unsupported.
+    """
+    resolved, functions = set(), set()
+    for cell in header.strip('|').split('|'):
+        label = cell.strip().strip('*').strip()
+        if label in names:
+            resolved.add(label)
+            continue
+        candidates = set()
+        for name in names:
+            unit = re.search(r'[（(][^（）()]+[）)]$', name)
+            stem, suffix = (name[:unit.start()], unit[0]) if unit else (name, '')
+            for fn, words in _STATISTIC_WORDS.items():
+                if any(label in (word + name, name + word, stem + word + suffix) for word in words):
+                    candidates.add((name, fn))
+        if len(candidates) == 1:
+            functions.update(candidates)
+            resolved.update(name for name, _ in candidates)
+        elif candidates:
+            return None
+        elif any(word in label for words in _STATISTIC_WORDS.values() for word in words):
+            return None
+    return resolved, functions
+
+
+def _statistic_supported(doc, required, text, claim_all, *, table_header=""):
     if any(word in text for word in ("读完", "完整读取", "全部内容", "全文", "全量明细", "完整分析")):
         return False
     for evidence in doc.aggregates:
         sources = evidence["sources"]
-        if {source["sheet"] for source in sources} != required:
+        if {source["sheet"] for source in sources if doc.inventory[source["sheet"]] > 0} != {name for name in required if doc.inventory[name] > 0}:
             continue
         rule = evidence.get("filter")
         if rule:
@@ -578,19 +794,44 @@ def _statistic_supported(doc, required, text, claim_all):
             continue
         metrics = evidence.get("metrics") or []
         groups = evidence.get("group_by") or []
-        if groups and ("分组" not in text or any(group not in text for group in groups)):
+        group_scope = table_header or text
+        if groups and ((not table_header and not any(word in text for word in ("分组", "按", "汇总", "统计", "分布")))
+                       or any(group not in group_scope for group in groups)):
             continue
         allowed = {m.get("column") for m in metrics} | set(groups)
         if rule:
             allowed.add(rule.get("column"))
-        if _mentioned_names(doc.column_names, text) - allowed:
+        column_names = doc.column_names | {name for name in allowed if isinstance(name, str)}
+        mentioned_columns = _mentioned_names(column_names, text.replace(table_header, '', 1) if table_header else text)
+        if table_header:
+            table_columns = _table_columns(table_header, column_names)
+            if table_columns is None:
+                continue
+            names, functions = table_columns
+            if not functions.issubset({(m.get('column'), m.get('fn')) for m in metrics}):
+                continue
+            mentioned_columns.update(names)
+        if mentioned_columns - allowed:
             continue
-        claimed_functions = {fn for fn, words in _STATISTIC_WORDS.items() if any(word in text for word in words)}
+        # Normalize only the adjacent count-total phrase. An additional sum
+        # claim elsewhere in this clause must still have independent evidence.
+        function_text = re.sub(r"(数量|计数)(?:合计|总计)", r"\1", text)
+        row_totals = re.findall(r"(?:合计|总计)\s*(\d{1,12})\s*[条行笔项]", text)
+        if row_totals:
+            function_text = re.sub(r"(?:合计|总计)\s*\d{1,12}\s*[条行笔项]", "计数", function_text)
+        claimed_functions = {fn for fn, words in _STATISTIC_WORDS.items() if any(word in function_text for word in words)}
         if "去重数量" in text and "数量" not in text.replace("去重数量", ""):
             claimed_functions.discard("count")
         if not claimed_functions.issubset({m.get("fn") for m in metrics}):
             continue
-        mentioned = [metric for metric in metrics if str(metric.get("column") or "\0") in text]
+        if (row_totals and type(evidence.get("rows_matched")) is int
+                and any(int(value) != evidence["rows_matched"] for value in row_totals)):
+            continue
+        if (row_totals and not groups and claimed_functions == {"count"}
+                and type(evidence.get("rows_matched")) is int
+                and all(int(value) == evidence["rows_matched"] for value in row_totals)):
+            return True
+        mentioned = [metric for metric in metrics if metric.get("column") in mentioned_columns]
         if mentioned and all(any(word in text for word in _STATISTIC_WORDS.get(metric.get("fn"), ())) for metric in mentioned):
             return True
     return False

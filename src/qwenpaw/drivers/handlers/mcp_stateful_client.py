@@ -431,11 +431,14 @@ class _MCPClientMixin:
         self._validate_connection()
 
         try:
-            from ..mcp_context import current_mcp_metadata
+            from ..mcp_context import current_mcp_metadata, current_mcp_timeout
+            options = {}
             metadata = current_mcp_metadata()
             if metadata:
-                return await self.session.call_tool(name, arguments or {}, meta=metadata)
-            return await self.session.call_tool(name, arguments or {})
+                options["meta"] = metadata
+            if current_mcp_timeout() is not None:
+                options["read_timeout_seconds"] = current_mcp_timeout()
+            return await self.session.call_tool(name, arguments or {}, **options)
         except Exception as exc:
             self._handle_transport_error(exc)
             raise

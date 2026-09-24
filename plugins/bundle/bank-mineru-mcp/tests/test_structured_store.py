@@ -475,3 +475,28 @@ def test_union_echoes_every_source_sheet_instead_of_first_sheet(tmp_path):
     assert result['sheet'] == '*'
     assert result['sources'] == [{'sheet':'支行01','range':[1,20],'rows_scanned':20},{'sheet':'支行02','range':[1,20],'rows_scanned':20}]
     assert result['filter'] is None
+
+
+def test_batched_category_pages_keep_every_operation_and_default_to_first_page(tmp_path):
+    source = _source(tmp_path, 'categories.csv', '.csv', 'text/csv')
+    source.path.write_text('类别,风险,编号\n' + '\n'.join(f'类别{i:03d},风险{i%3},{i}' for i in range(600)), encoding='utf-8')
+    work = tmp_path / 'work'
+    inventory = extract_workbook(source.path, work, stem='file_001')
+    store = _store(tmp_path, max_groups=500)
+    ref = store.write(source, inventory, work).document_ref
+    ops = [{'group_by': [column], 'metrics': [{'column': '编号', 'fn': 'count'}]} for column in ['类别', '风险']]
+    result = store.aggregate(ref, ops)
+    assert len(result['results']) == 2
+    first, second = result['results']
+    assert first['groups_complete'] is False
+    assert first['next_group_cursor'] == len(first['groups'])
+    assert sum(group['编号:count'] for group in second['groups']) == 600
+    assert second['groups_complete'] is True
+    groups = list(first['groups'])
+    cursor = first['next_group_cursor']
+    while cursor is not None:
+        page = store.aggregate(ref, [{**ops[0], 'group_cursor': cursor}])['results'][0]
+        groups.extend(page['groups'])
+        cursor = page['next_group_cursor']
+    assert len(groups) == 600
+    assert sum(group['编号:count'] for group in groups) == 600

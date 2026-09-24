@@ -774,3 +774,23 @@ async def test_exhausted_renderer_layout_stops_diagnostic_generation_in_same_tur
     with pytest.raises(Exception) as raised:
         await middleware.on_model_call(None, {}, None)
     assert raised.value.message == "PPTX_LAYOUT_CAPACITY|5|chart_conclusion"
+
+
+def test_factory_captures_trusted_runtime_model_policy(monkeypatch):
+    from bank_runtime.sandbox.executor import RuntimeSandboxExecutor
+    monkeypatch.setattr(RuntimeSandboxExecutor, 'from_request', lambda **kwargs: None)
+    gateway = {'protocol':'preflight_guard_result_v2', 'base_url':'http://127.0.0.1:8765',
+        'endpoint':'/runtime/v1/tool-calls', 'token':'test-only', 'task_id':'task_001',
+        'session_id':'session_001', 'tool_session_id':'wts_001', 'policy_snapshot_id':'policy_001',
+        'task_scope_id':'scope_001', 'capability_snapshot_hash':'sha256:capability',
+        'worker_protocol_version':'runtime-worker/v1', 'trace_id':'trace_001', 'worker_agent_id':'bank-assistant'}
+    policy = {'idle_seconds':300, 'no_output_retry_attempts':0, 'truncation_recovery_attempts':0}
+    request = SimpleNamespace(channel='bank-runtime', runtime_tool_gateway=gateway,
+        request_context={'runtime_tool_gateway':gateway,'runtime_model_budget_seconds':900,'runtime_model_policy':policy})
+    middleware = bank_runtime_middleware_factory(SimpleNamespace(request=request, agent_id='bank-assistant'), SimpleNamespace())
+    assert not middleware.configuration_error
+    assert middleware.model_reliability.idle_seconds == 300
+    assert middleware.model_reliability.no_output_retry is False
+    assert middleware.model_reliability.truncation_recovery is False
+    policy['idle_seconds'] = 900
+    assert middleware.model_reliability.idle_seconds == 300
