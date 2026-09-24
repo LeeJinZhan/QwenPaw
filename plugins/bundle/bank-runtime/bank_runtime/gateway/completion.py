@@ -7,7 +7,7 @@ def operation_keys(name, payload):
     if name.endswith("parse_documents"):
         return {"parse:" + str(item.get("file_id") or item.get("file_ref"))
                 for item in payload.get("documents", []) if isinstance(item, Mapping)}
-    if name not in {"artifact_generate", "artifact_revise", "artifact_convert", "template_fill_docx"}:
+    if name not in {"artifact_generate", "artifact_revise", "artifact_convert", "template_fill_docx", "chart_generate"}:
         return set()
     # Full payload and tool identity prevent same-name/source operations from
     # erasing one another. Parameter rejections are tracked separately because

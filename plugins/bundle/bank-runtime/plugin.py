@@ -31,6 +31,7 @@ from bank_runtime.sandbox.hooks import (
     BankRuntimeSandboxInstallHook,
 )
 from bank_runtime.bank_assistant import bank_assistant
+from bank_runtime.chart_tools import chart_generate
 from bank_runtime.artifact_tools import (
     ArtifactDeliveryErrorHook,
     artifact_convert,
@@ -129,6 +130,8 @@ class BankRuntimePlugin:
             tool_type="network",
             target_param="skill_ref",
         )
+        api.register_tool(tool_name="chart_generate", tool_func=chart_generate,
+                          description="生成可编辑图表", icon="📊", enabled=False, tool_type="internal")
         api.register_tool(
             tool_name="artifact_generate",
             tool_func=artifact_generate,

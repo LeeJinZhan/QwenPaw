@@ -49,7 +49,7 @@ from ..artifact_tools import (
 from ..sandbox.executor import RuntimeSandboxExecutor, is_physical_tool
 
 _BLOCKED_NESTED_TOOLS = frozenset({"run_tool_batch"})
-_RUNTIME_EXECUTED_TOOLS = ARTIFACT_WORKER_TOOL_NAMES
+_RUNTIME_EXECUTED_TOOLS = ARTIFACT_WORKER_TOOL_NAMES | {"chart_generate"}
 _logger = logging.getLogger("qwenpaw.plugins.bank_runtime.gateway.middleware")
 
 
@@ -727,7 +727,8 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
                         self.conversion_coverage.observe(delivered.get("generated_file_ids") or [], report,
                                                          requires_read=self._requires_conversion_read(tool_input))
                 keys = operation_keys(tool_name, tool_input)
-                if result.get("status") == "success" and delivered.get("artifact_status") == "succeeded" and delivered.get("generated_file_ids"):
+                chart_ready = tool_name == "chart_generate" and delivered.get("chart_status") == "ready" and delivered.get("chart_id") and delivered.get("version_id")
+                if result.get("status") == "success" and (chart_ready or (delivered.get("artifact_status") == "succeeded" and delivered.get("generated_file_ids"))):
                     self.unresolved_file_operations.difference_update(keys)
                     if not self.unresolved_file_operations:
                         self.artifact_input_failures = 0
@@ -736,6 +737,7 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
                 response = _runtime_tool_response(
                     str(getattr(tool_call, "id", "") or tool_call_id),
                     result,
+                    tool_name=tool_name,
                 )
                 if tool_name == "artifact_convert" and result.get("status") == "success":
                     from ..sandbox.tools import converted_attachment_blocks
@@ -1137,10 +1139,15 @@ def _sandbox_tool_response(
 def _runtime_tool_response(
     response_id: str,
     result: Mapping[str, Any],
+    tool_name: str = "",
 ) -> ToolResponse:
     status = str(result.get("status") or "")
     state = ToolResultState.SUCCESS if status == "success" else ToolResultState.ERROR
-    safe = artifact_model_result(result)
+    if tool_name == "chart_generate" or (isinstance(result.get("result"), Mapping) and "chart_status" in result["result"]):
+        from ..chart_tools import chart_model_result
+        safe = chart_model_result(result)
+    else:
+        safe = artifact_model_result(result)
     return ToolResponse(
         id=response_id,
         content=[

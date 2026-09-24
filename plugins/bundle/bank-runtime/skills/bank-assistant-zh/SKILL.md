@@ -2,7 +2,7 @@
 name: bank_assistant
 description: "用于通用问答、任务分工与受控文件处理；制度资料问答、写作和审核按需使用对应专项技能。"
 metadata:
-  builtin_skill_version: "2.7"
+  builtin_skill_version: "2.8"
   trust_level: "trusted-plugin-guidance"
 ---
 
@@ -134,3 +134,7 @@ metadata:
 - `objects` 的 `static` 表示只保留可见静态展示；当前解析工具仅返回 Markdown，读完 DOCX 或 PDF 的文字不证明图形含义、连线关系和底层数据已完整识别，回答必须保留“图形语义未核验”的范围说明，不生成完整图形分析报告。含图表/Visio 可用内部 PDF 辅助解析，但不能仅凭转换或文字分页完成解除该限制。`extracted` 当前仅表示受控文字提取，不含附件完整布局及图形，coverage 必须为 partial；`unreadable` 表示未读取。底层数据、附件全文与静态预览不同；未读部分不能混入结论。
 - 只转换或得到部分内容不能满足完整分析报告生成要求。先补齐来源；无法补齐时提供明确范围的文本答复，不通过其他写文件工具绕过限制。
 - 工具返回固定不可恢复转换原因、`retryable=false` 时，说明具体失败原因并停止相同参数重试；不能通过换输出文件名、shell、脚本或另一个未经授权工具绕过。
+
+## 可编辑图表
+
+用户需要网页中可编辑的图表、关系/架构图、流程/泳道/时序图或统计图时，按需读取 bank-chart 并调用已授权的 chart_generate。纯图片请求仍可使用既有固定图片成果；PPT 内图表继续按 bank-presentation。普通图表知识问答不强制调用工具。

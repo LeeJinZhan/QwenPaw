@@ -44,6 +44,7 @@ def capability_manifest() -> dict:
             "tool-gateway/2.0",
             "sandbox-files/2.0",
             "physical-sandbox/1.0",
+            "chart/1",
         ],
         "capabilities": dict(_CAPABILITIES),
         "disabled_features": list(_DISABLED_FEATURES),

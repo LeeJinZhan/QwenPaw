@@ -123,9 +123,10 @@ def test_delivery_manifest_pins_source_and_blocks_unknown_image_digest() -> None
     assert delivery["production_profile"]["dependency_lock"] == (
         "production-python311-linux-amd64.lock"
     )
-    assert delivery["bank_runtime_protocol_versions"][-2:] == [
+    assert delivery["bank_runtime_protocol_versions"][-3:] == [
         "sandbox-files/2.0",
         "physical-sandbox/1.0",
+        "chart/1",
     ]
     assert delivery["stable_rollback"] == {
         "git_ref": "refs/heads/rollback/bank-runtime-1.1.12-92785ad6",
@@ -136,6 +137,7 @@ def test_delivery_manifest_pins_source_and_blocks_unknown_image_digest() -> None
     assert delivery["promotion_blockers"] == [
         "stable_image_digest_missing",
         "candidate_image_digest_missing",
+        "chart_visio2016_and_integrated_acceptance_pending",
     ]
 
 
@@ -156,6 +158,7 @@ def test_plugin_registers_router_channel_hook_and_middleware(
     assert [item.hook_name for item in fresh_registry.get_startup_hooks()] == [
         "register_tool_bank-runtime_bank_assistant",
         "register_tool_bank-runtime_activate_personal_skill",
+        "register_tool_bank-runtime_chart_generate",
         "register_tool_bank-runtime_artifact_generate",
         "register_tool_bank-runtime_artifact_revise",
         "register_tool_bank-runtime_artifact_convert",
@@ -235,6 +238,7 @@ def test_capability_endpoint_is_safe_and_declares_managed_session_state(
             "tool-gateway/2.0",
             "sandbox-files/2.0",
             "physical-sandbox/1.0",
+            "chart/1",
         ],
         "capabilities": {
             "agent_scoped_chat": True,
@@ -333,12 +337,12 @@ def test_duplicate_registration_fails_before_adding_partial_state(
 
     assert app.routes == expected_routes
     assert len(fresh_registry.get_http_router_registrations()) == 1
-    assert len(fresh_registry.get_startup_hooks()) == 23
+    assert len(fresh_registry.get_startup_hooks()) == 24
     assert len(fresh_registry.get_middleware_factories()) == 1
 
     with pytest.raises(ValueError, match="already registered"):
         module.BankRuntimePlugin().register(api)
 
     assert len(fresh_registry.get_http_router_registrations()) == 1
-    assert len(fresh_registry.get_startup_hooks()) == 23
+    assert len(fresh_registry.get_startup_hooks()) == 24
     assert len(fresh_registry.get_middleware_factories()) == 1

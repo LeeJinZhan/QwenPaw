@@ -48,6 +48,7 @@ def test_initial_config_aligns_general_assistant_and_governed_document_tools(
         assert {name for name, item in tools.items() if item["enabled"]} == {
             "activate_personal_skill",
             "artifact_generate",
+            "chart_generate",
             "artifact_revise",
             "artifact_convert",
         }
