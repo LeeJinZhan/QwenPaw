@@ -49,6 +49,7 @@ def test_initial_config_aligns_general_assistant_and_governed_document_tools(
             "activate_personal_skill",
             "artifact_generate",
             "chart_generate",
+            "chart_export",
             "artifact_revise",
             "artifact_convert",
         }

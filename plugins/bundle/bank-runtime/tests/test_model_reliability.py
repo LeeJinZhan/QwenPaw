@@ -8,8 +8,118 @@ from qwenpaw.exceptions import ModelExecutionException
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from bank_runtime.model_reliability import BankModelReliability
 
+@pytest.mark.parametrize('status, expected', [
+    (429, 'http_status_429'),
+    (502, 'http_status_502'),
+    ('503', 'http_status_503'),
+    ('private provider context', 'unspecified'),
+    ('503 private provider context', 'unspecified'),
+    (True, 'unspecified'),
+    (200, 'unspecified'),
+])
+def test_api_error_diagnostic_only_exposes_bounded_http_error_codes(status, expected):
+    import httpx
+    import openai
+    from bank_runtime.model_reliability import failure_diagnostic
+    error = openai.APIError('private model context',
+        request=httpx.Request('POST', 'https://provider.invalid/chat'),
+        body={'code': status, 'message': 'private provider context'})
+    assert failure_diagnostic(error) == expected
+
+def api_stream_error(code):
+    import httpx
+    import openai
+    return openai.APIError('private model context',
+        request=httpx.Request('POST', 'https://provider.invalid/chat'),
+        body={'code': code, 'message': 'private provider context'})
+
+@pytest.mark.parametrize('status, expected', [
+    (429, 'MODEL_UPSTREAM_UNAVAILABLE'),
+    (502, 'MODEL_UPSTREAM_UNAVAILABLE'),
+    ('503', 'MODEL_UPSTREAM_UNAVAILABLE'),
+    (400, 'MODEL_REQUEST_REJECTED'),
+    ('401', 'MODEL_REQUEST_REJECTED'),
+    (403, 'MODEL_REQUEST_REJECTED'),
+    ('unknown', 'MODEL_EXECUTION_ERROR'),
+    ('503 private provider context', 'MODEL_EXECUTION_ERROR'),
+    (True, 'MODEL_EXECUTION_ERROR'),
+    (200, 'MODEL_EXECUTION_ERROR'),
+])
+def test_streaming_sdk_status_uses_existing_http_failure_semantics(status, expected):
+    from bank_runtime.model_reliability import failure_code
+    assert failure_code(api_stream_error(status)) == expected
+
+def test_actual_http_status_has_priority_over_stream_error_code():
+    from bank_runtime.model_reliability import failure_code, failure_diagnostic
+    error = api_stream_error(503)
+    error.status_code = 400
+    assert failure_code(error) == 'MODEL_REQUEST_REJECTED'
+    assert failure_diagnostic(error) == 'http_status_400'
+
 async def collect(policy, model, **kwargs):
     return [c async for c in await policy.call(model, **kwargs)]
+
+@pytest.mark.asyncio
+async def test_stream_error_retries_only_current_model_call_after_completed_tool():
+    policy = BankModelReliability(10)
+    proposal_calls, response_calls = [], []
+    async def propose(**kwargs):
+        proposal_calls.append(kwargs)
+        return ChatResponse([ToolCallBlock(id='saved', name='chart_generate', input='{}')], True)
+    proposal = await collect(policy, propose)
+    assert proposal[-1].content[0].id == 'saved'
+    history = [UserMsg('user', 'tool result already saved')]
+    async def respond(**kwargs):
+        response_calls.append(kwargs)
+        if len(response_calls) == 1:
+            raise api_stream_error(503)
+        return ChatResponse([TextBlock(text='图表已生成。')], True)
+    result = await collect(policy, respond, messages=history, tools=[])
+    assert result[-1].content[0].text == '图表已生成。'
+    assert len(proposal_calls) == 1
+    assert len(response_calls) == 2
+    assert all(call['messages'] is history and call['tools'] == [] for call in response_calls)
+    assert policy.recovery_used is True
+    async def later(**kwargs):
+        response_calls.append(kwargs)
+        raise api_stream_error(429)
+    with pytest.raises(Exception) as caught:
+        await collect(policy, later)
+    assert caught.value.error_code == 'MODEL_UPSTREAM_UNAVAILABLE'
+    assert len(response_calls) == 3
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('block', [TextBlock(text='partial'), ThinkingBlock(thinking='partial'),
+    ToolCallBlock(id='partial', name='chart_generate', input='{')])
+async def test_stream_error_after_any_output_never_retries(block):
+    calls = []
+    async def model(**kwargs):
+        calls.append(kwargs)
+        async def stream():
+            yield ChatResponse([block], False)
+            raise api_stream_error(503)
+        return stream()
+    with pytest.raises(Exception) as caught:
+        await collect(BankModelReliability(10), model)
+    assert caught.value.error_code == 'MODEL_UPSTREAM_UNAVAILABLE'
+    assert len(calls) == 1
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('code, budget, expected', [
+    (400, 1, 'MODEL_REQUEST_REJECTED'),
+    (401, 1, 'MODEL_REQUEST_REJECTED'),
+    ('unknown', 1, 'MODEL_EXECUTION_ERROR'),
+    (503, 0, 'MODEL_UPSTREAM_UNAVAILABLE'),
+])
+async def test_stream_error_preserves_rejection_unknown_and_disabled_retry(code, budget, expected):
+    calls = []
+    async def model(**kwargs):
+        calls.append(kwargs)
+        raise api_stream_error(code)
+    with pytest.raises(Exception) as caught:
+        await collect(BankModelReliability(10, no_output_retry_attempts=budget), model)
+    assert caught.value.error_code == expected
+    assert len(calls) == 1
 
 @pytest.mark.asyncio
 async def test_no_output_retries_once_and_latches_failure():
@@ -26,6 +136,18 @@ async def test_no_output_retries_once_and_latches_failure():
         await collect(policy, model)
     assert len(calls) == 2
     assert 'private' not in str(caught.value)
+
+@pytest.mark.asyncio
+async def test_failure_log_exposes_safe_diagnostic_without_provider_content(caplog):
+    async def model(**kwargs):
+        raise ModelExecutionException('upstream', details={
+            'stream_error': 'missing_finish_reason', 'provider_body': 'private model context',
+        })
+    with pytest.raises(Exception):
+        await collect(BankModelReliability(10), model)
+    assert 'reason=missing_finish_reason' in caplog.text
+    assert 'error_type=ModelExecutionException' in caplog.text
+    assert 'private model context' not in caplog.text
 
 @pytest.mark.asyncio
 async def test_partial_output_timeout_never_restarts_request():

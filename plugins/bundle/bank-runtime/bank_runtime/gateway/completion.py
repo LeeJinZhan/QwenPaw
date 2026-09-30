@@ -1,19 +1,53 @@
 """Request-local evidence for attempted file operations, never model prose."""
 from collections.abc import Mapping
 import json
+import math
 
 
 def operation_keys(name, payload):
     if name.endswith("parse_documents"):
         return {"parse:" + str(item.get("file_id") or item.get("file_ref"))
                 for item in payload.get("documents", []) if isinstance(item, Mapping)}
-    if name not in {"artifact_generate", "artifact_revise", "artifact_convert", "template_fill_docx", "chart_generate"}:
+    if name not in {"artifact_generate", "artifact_revise", "artifact_convert", "template_fill_docx", "chart_generate", "chart_export"}:
         return set()
     # Full payload and tool identity prevent same-name/source operations from
     # erasing one another. Parameter rejections are tracked separately because
     # no file operation has started at preflight.
     from .protocol import canonical_payload_hash
-    return {f"artifact:{name}:{canonical_payload_hash(payload)}"}
+    return {f"artifact:{name}:{canonical_payload_hash(_operation_payload(name, payload))}"}
+
+
+def _operation_payload(name, payload):
+    """Match bounded Runtime normalization without changing the request or permit."""
+    if name == "chart_export":
+        return {"version_id": "", **payload}
+    if name != "artifact_generate" or payload.get("artifact_type") not in {"png", "svg"}:
+        return payload
+    content = payload.get("content")
+    if not isinstance(content, Mapping) or content.get("kind") != "chart":
+        return payload
+    series = content.get("series")
+    if not isinstance(series, list):
+        return payload
+    return {**payload, "content": {**content, "series": [
+        {**item, "values": [_chart_number(value) for value in item["values"]]}
+        if isinstance(item, Mapping) and isinstance(item.get("values"), list) else item
+        for item in series
+    ]}}
+
+
+def _chart_number(value):
+    # Match Runtime artifacts.content_schemas._normalize_chart_number exactly.
+    # Other fields and spreadsheet cells retain their original JSON types.
+    if not isinstance(value, str):
+        return value
+    try:
+        number = float(value.strip())
+    except ValueError:
+        return value
+    if not math.isfinite(number):
+        return value
+    return int(number) if number.is_integer() else number
 
 
 def _result_values(text):

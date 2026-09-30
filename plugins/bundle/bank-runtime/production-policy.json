@@ -21,6 +21,7 @@
       "activate_personal_skill",
       "append_file",
       "chart_generate",
+            "chart_export",
       "artifact_generate",
       "artifact_revise",
       "artifact_convert",
@@ -58,6 +59,7 @@
     "reachable_tools": [
       "activate_personal_skill",
       "chart_generate",
+            "chart_export",
       "artifact_generate",
       "artifact_revise",
       "artifact_convert",

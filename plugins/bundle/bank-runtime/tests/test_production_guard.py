@@ -52,6 +52,7 @@ def _approved_snapshot(**overrides: object) -> ProductionSnapshot:
             "append_file",
             "artifact_generate",
             "chart_generate",
+            "chart_export",
             "artifact_revise",
             "artifact_convert",
             "ast_search",
@@ -90,6 +91,7 @@ def _approved_snapshot(**overrides: object) -> ProductionSnapshot:
             "activate_personal_skill",
             "artifact_generate",
             "chart_generate",
+            "chart_export",
             "artifact_revise",
             "artifact_convert",
             "bank_assistant",
@@ -369,6 +371,7 @@ def test_delivery_examples_survive_native_qwenpaw_validation() -> None:
         "artifact_convert",
         "artifact_generate",
         "chart_generate",
+            "chart_export",
         "artifact_revise",
     }
     assert agent.running.reme_light_memory_config.memory_search_enabled is False

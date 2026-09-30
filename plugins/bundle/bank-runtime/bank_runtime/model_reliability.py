@@ -29,6 +29,42 @@ MODEL_FAILURE_MESSAGES = {
     'WORKER_TIMEOUT': '本次任务已达到处理时限。',
 }
 
+_SAFE_FAILURE_REASONS = frozenset({
+    'length', 'content_filter', 'error', 'missing_finish_reason',
+    'unsupported_finish_reason', 'content_after_finish',
+    'reasoning_after_unclassified_content', 'nested_thinking_tag',
+    'unexpected_thinking_end', 'unclosed_thinking_tag',
+    'incomplete_thinking_tag', 'unclassified_content_limit',
+})
+
+
+def _model_http_status(error):
+    status = getattr(error, 'status_code', 0)
+    if isinstance(error, openai.APIError) and not (type(status) is int and 100 <= status <= 599):
+        # HTTP 200 SSE error events become APIError rather than APIStatusError.
+        # Only the SDK's bounded numeric code may stand in for missing status.
+        code = getattr(error, 'code', None)
+        if isinstance(code, str) and len(code) == 3 and code.isascii() and code.isdecimal():
+            code = int(code)
+        if type(code) is int and 400 <= code <= 599:
+            return code
+    return status
+
+
+def failure_diagnostic(error):
+    """Only internal reason codes are loggable; provider bodies are private."""
+    details = getattr(error, 'details', None)
+    if isinstance(details, dict):
+        for field in ('stream_error', 'finish_reason'):
+            reason = details.get(field)
+            if isinstance(reason, str) and reason in _SAFE_FAILURE_REASONS:
+                return reason
+    if isinstance(error, openai.APIError):
+        status = _model_http_status(error)
+        if type(status) is int and 400 <= status <= 599:
+            return f'http_status_{status}'
+    return 'unspecified'
+
 
 def failure_code(error):
     details = getattr(error, 'details', None)
@@ -44,7 +80,7 @@ def failure_code(error):
         return 'MODEL_TIMEOUT'
     if isinstance(error, (httpx.TransportError, openai.APIConnectionError)):
         return 'MODEL_UPSTREAM_UNAVAILABLE'
-    status = getattr(error, 'status_code', 0)
+    status = _model_http_status(error)
     if isinstance(status, int) and (status == 429 or status >= 500):
         return 'MODEL_UPSTREAM_UNAVAILABLE'
     if isinstance(status, int) and 400 <= status < 500:
@@ -166,8 +202,9 @@ class BankModelReliability:
                 raise
             except Exception as error:
                 code = failure_code(error)
-                LOG.warning('bank_model_call_failed code=%s attempt=%d elapsed_ms=%d progress=%s',
-                            code, attempt, int((time.monotonic()-started)*1000), progress)
+                LOG.warning('bank_model_call_failed code=%s attempt=%d elapsed_ms=%d progress=%s error_type=%s reason=%s',
+                            code, attempt, int((time.monotonic()-started)*1000), progress,
+                            type(error).__name__, failure_diagnostic(error))
                 # Existing governed DOCX/PPTX draft recovery owns this proposal.
                 # Charge the same allowance; its next call still uses this deadline.
                 if (allow_parameter_recovery and not self.recovery_used

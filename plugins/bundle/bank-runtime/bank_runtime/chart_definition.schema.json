@@ -1,0 +1,903 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "urn:bank-runtime:chart:1",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "chart/1"
+    },
+    "kind": {
+      "enum": [
+        "relationship",
+        "flow",
+        "swimlane",
+        "sequence",
+        "statistical"
+      ]
+    },
+    "scenario": {
+      "type": "string",
+      "maxLength": 2000
+    },
+    "title": {
+      "type": "string",
+      "maxLength": 2000,
+      "minLength": 1
+    },
+    "nodes": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/node"
+      },
+      "maxItems": 1000,
+      "minItems": 1
+    },
+    "edges": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/edge"
+      },
+      "maxItems": 4000
+    },
+    "groups": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/group"
+      },
+      "maxItems": 200
+    },
+    "lanes": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/lane"
+      },
+      "maxItems": 20
+    },
+    "participants": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/participant"
+      },
+      "maxItems": 30,
+      "minItems": 1
+    },
+    "messages": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/message"
+      },
+      "maxItems": 500
+    },
+    "chart_type": {
+      "enum": [
+        "bar",
+        "column",
+        "line",
+        "pie",
+        "donut",
+        "area"
+      ]
+    },
+    "categories": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "maxLength": 2000,
+        "minLength": 1
+      },
+      "maxItems": 10000,
+      "minItems": 1
+    },
+    "series": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/series"
+      },
+      "maxItems": 20,
+      "minItems": 1
+    },
+    "unit": {
+      "type": "string",
+      "maxLength": 2000
+    },
+    "legend": {
+      "type": "boolean"
+    },
+    "axis_labels": {
+      "type": "boolean"
+    },
+    "missing_values": {
+      "enum": [
+        "gap",
+        "zero"
+      ]
+    },
+    "layout_preference": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "direction": {
+          "enum": [
+            "top_to_bottom",
+            "left_to_right"
+          ]
+        }
+      },
+      "required": []
+    }
+  },
+  "required": [
+    "schema_version",
+    "kind",
+    "title"
+  ],
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "relationship"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "nodes",
+          "edges"
+        ],
+        "not": {
+          "anyOf": [
+            {
+              "required": [
+                "axis_labels"
+              ]
+            },
+            {
+              "required": [
+                "categories"
+              ]
+            },
+            {
+              "required": [
+                "chart_type"
+              ]
+            },
+            {
+              "required": [
+                "lanes"
+              ]
+            },
+            {
+              "required": [
+                "legend"
+              ]
+            },
+            {
+              "required": [
+                "messages"
+              ]
+            },
+            {
+              "required": [
+                "missing_values"
+              ]
+            },
+            {
+              "required": [
+                "participants"
+              ]
+            },
+            {
+              "required": [
+                "series"
+              ]
+            },
+            {
+              "required": [
+                "unit"
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "flow"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "nodes",
+          "edges"
+        ],
+        "not": {
+          "anyOf": [
+            {
+              "required": [
+                "axis_labels"
+              ]
+            },
+            {
+              "required": [
+                "categories"
+              ]
+            },
+            {
+              "required": [
+                "chart_type"
+              ]
+            },
+            {
+              "required": [
+                "lanes"
+              ]
+            },
+            {
+              "required": [
+                "legend"
+              ]
+            },
+            {
+              "required": [
+                "messages"
+              ]
+            },
+            {
+              "required": [
+                "missing_values"
+              ]
+            },
+            {
+              "required": [
+                "participants"
+              ]
+            },
+            {
+              "required": [
+                "series"
+              ]
+            },
+            {
+              "required": [
+                "unit"
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "swimlane"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "nodes",
+          "edges",
+          "lanes"
+        ],
+        "not": {
+          "anyOf": [
+            {
+              "required": [
+                "axis_labels"
+              ]
+            },
+            {
+              "required": [
+                "categories"
+              ]
+            },
+            {
+              "required": [
+                "chart_type"
+              ]
+            },
+            {
+              "required": [
+                "legend"
+              ]
+            },
+            {
+              "required": [
+                "messages"
+              ]
+            },
+            {
+              "required": [
+                "missing_values"
+              ]
+            },
+            {
+              "required": [
+                "participants"
+              ]
+            },
+            {
+              "required": [
+                "series"
+              ]
+            },
+            {
+              "required": [
+                "unit"
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "sequence"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "participants",
+          "messages"
+        ],
+        "not": {
+          "anyOf": [
+            {
+              "required": [
+                "axis_labels"
+              ]
+            },
+            {
+              "required": [
+                "categories"
+              ]
+            },
+            {
+              "required": [
+                "chart_type"
+              ]
+            },
+            {
+              "required": [
+                "edges"
+              ]
+            },
+            {
+              "required": [
+                "groups"
+              ]
+            },
+            {
+              "required": [
+                "lanes"
+              ]
+            },
+            {
+              "required": [
+                "legend"
+              ]
+            },
+            {
+              "required": [
+                "missing_values"
+              ]
+            },
+            {
+              "required": [
+                "nodes"
+              ]
+            },
+            {
+              "required": [
+                "series"
+              ]
+            },
+            {
+              "required": [
+                "unit"
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "statistical"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "chart_type",
+          "categories",
+          "series"
+        ],
+        "not": {
+          "anyOf": [
+            {
+              "required": [
+                "edges"
+              ]
+            },
+            {
+              "required": [
+                "groups"
+              ]
+            },
+            {
+              "required": [
+                "lanes"
+              ]
+            },
+            {
+              "required": [
+                "messages"
+              ]
+            },
+            {
+              "required": [
+                "nodes"
+              ]
+            },
+            {
+              "required": [
+                "participants"
+              ]
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "color": {
+      "type": "string",
+      "pattern": "^#[0-9a-fA-F]{6}$"
+    },
+    "style": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "fill": {
+          "$ref": "#/$defs/color"
+        },
+        "stroke": {
+          "$ref": "#/$defs/color"
+        },
+        "color": {
+          "$ref": "#/$defs/color"
+        },
+        "font_size": {
+          "type": "number",
+          "minimum": 8,
+          "maximum": 72
+        },
+        "stroke_width": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 10
+        },
+        "line_style": {
+          "enum": [
+            "solid",
+            "dashed",
+            "dotted"
+          ]
+        },
+        "arrow_start": {
+          "enum": [
+            "none",
+            "triangle"
+          ]
+        },
+        "arrow_end": {
+          "enum": [
+            "none",
+            "triangle"
+          ]
+        },
+        "bold": {
+          "type": "boolean"
+        }
+      },
+      "required": []
+    },
+    "point": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "x": {
+          "type": "number",
+          "minimum": -100000,
+          "maximum": 100000
+        },
+        "y": {
+          "type": "number",
+          "minimum": -100000,
+          "maximum": 100000
+        }
+      },
+      "required": [
+        "x",
+        "y"
+      ]
+    },
+    "node": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[A-Za-z][A-Za-z0-9_-]{0,63}$"
+        },
+        "label": {
+          "type": "string",
+          "maxLength": 2000,
+          "minLength": 1
+        },
+        "style": {
+          "$ref": "#/$defs/style"
+        },
+        "entity_type": {
+          "enum": [
+            "company",
+            "person",
+            "system",
+            "service",
+            "role",
+            "step",
+            "other"
+          ]
+        },
+        "business_id": {
+          "type": "string",
+          "maxLength": 2000
+        },
+        "description": {
+          "type": "string",
+          "maxLength": 2000
+        },
+        "shape": {
+          "enum": [
+            "rectangle",
+            "rounded",
+            "ellipse",
+            "diamond",
+            "text"
+          ]
+        },
+        "parent_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z][A-Za-z0-9_-]{0,63}$"
+        },
+        "lane_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z][A-Za-z0-9_-]{0,63}$"
+        }
+      },
+      "required": [
+        "id",
+        "label",
+        "shape"
+      ]
+    },
+    "edge": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[A-Za-z][A-Za-z0-9_-]{0,63}$"
+        },
+        "label": {
+          "type": "string",
+          "maxLength": 2000,
+          "minLength": 1
+        },
+        "style": {
+          "$ref": "#/$defs/style"
+        },
+        "source_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z][A-Za-z0-9_-]{0,63}$"
+        },
+        "target_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z][A-Za-z0-9_-]{0,63}$"
+        },
+        "relation_type": {
+          "type": "string",
+          "maxLength": 2000
+        },
+        "ratio": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+          "maxLength": 64
+        }
+      },
+      "required": [
+        "id",
+        "source_id",
+        "target_id"
+      ]
+    },
+    "group": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[A-Za-z][A-Za-z0-9_-]{0,63}$"
+        },
+        "label": {
+          "type": "string",
+          "maxLength": 2000,
+          "minLength": 1
+        },
+        "style": {
+          "$ref": "#/$defs/style"
+        },
+        "parent_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z][A-Za-z0-9_-]{0,63}$"
+        }
+      },
+      "required": [
+        "id",
+        "label"
+      ]
+    },
+    "lane": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[A-Za-z][A-Za-z0-9_-]{0,63}$"
+        },
+        "label": {
+          "type": "string",
+          "maxLength": 2000,
+          "minLength": 1
+        },
+        "style": {
+          "$ref": "#/$defs/style"
+        },
+        "order": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "id",
+        "label",
+        "order"
+      ]
+    },
+    "participant": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[A-Za-z][A-Za-z0-9_-]{0,63}$"
+        },
+        "label": {
+          "type": "string",
+          "maxLength": 2000,
+          "minLength": 1
+        },
+        "style": {
+          "$ref": "#/$defs/style"
+        },
+        "order": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "id",
+        "label",
+        "order"
+      ]
+    },
+    "message": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[A-Za-z][A-Za-z0-9_-]{0,63}$"
+        },
+        "label": {
+          "type": "string",
+          "maxLength": 2000,
+          "minLength": 1
+        },
+        "style": {
+          "$ref": "#/$defs/style"
+        },
+        "from_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z][A-Za-z0-9_-]{0,63}$"
+        },
+        "to_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z][A-Za-z0-9_-]{0,63}$"
+        },
+        "order": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "message_type": {
+          "enum": [
+            "request",
+            "return"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "label",
+        "from_id",
+        "to_id",
+        "order",
+        "message_type"
+      ]
+    },
+    "series": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[A-Za-z][A-Za-z0-9_-]{0,63}$"
+        },
+        "name": {
+          "type": "string",
+          "maxLength": 2000,
+          "minLength": 1
+        },
+        "values": {
+          "type": "array",
+          "items": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+            "maxLength": 64
+          },
+          "maxItems": 10000
+        },
+        "color": {
+          "$ref": "#/$defs/color"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "values"
+      ]
+    },
+    "geometry": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "x": {
+          "type": "number",
+          "minimum": -100000,
+          "maximum": 100000
+        },
+        "y": {
+          "type": "number",
+          "minimum": -100000,
+          "maximum": 100000
+        },
+        "width": {
+          "type": "number",
+          "minimum": 1,
+          "maximum": 100000
+        },
+        "height": {
+          "type": "number",
+          "minimum": 1,
+          "maximum": 100000
+        },
+        "collapsed": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "x",
+        "y",
+        "width",
+        "height"
+      ]
+    },
+    "edge_layout": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "vertices": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/point"
+          },
+          "maxItems": 100
+        },
+        "source_port": {
+          "enum": [
+            "top",
+            "bottom",
+            "left",
+            "right"
+          ]
+        },
+        "target_port": {
+          "enum": [
+            "top",
+            "bottom",
+            "left",
+            "right"
+          ]
+        },
+        "label_position": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      },
+      "required": []
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "enum": [
+            "conversation",
+            "file",
+            "tool_result"
+          ]
+        },
+        "ref_id": {
+          "type": "string",
+          "maxLength": 128,
+          "minLength": 1
+        },
+        "location": {
+          "type": "string",
+          "maxLength": 2000
+        },
+        "complete": {
+          "type": "boolean"
+        },
+        "note": {
+          "type": "string",
+          "maxLength": 2000
+        }
+      },
+      "required": [
+        "kind",
+        "ref_id",
+        "complete"
+      ]
+    }
+  }
+}

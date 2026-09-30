@@ -24,6 +24,60 @@ def test_different_source_success_cannot_clear_another_failure():
     assert not keys
 
 
+@pytest.mark.parametrize("artifact_type", ["png", "svg"])
+@pytest.mark.parametrize("text,number", [("1", 1), (" 2.5 ", 2.5), ("1e2", 100), ("-0", 0)])
+def test_fixed_chart_numeric_retry_recovers_same_operation_without_mutation(artifact_type, text, number):
+    payload = {"artifact_type": artifact_type, "content": {
+        "kind": "chart", "series": [{"name": "金额", "values": [text]}]}}
+    before = json.dumps(payload, ensure_ascii=False)
+    canonical = {**payload, "content": {"kind": "chart", "series": [
+        {"name": "金额", "values": [number]}]}}
+    unresolved = operation_keys("artifact_generate", payload)
+    unresolved.difference_update(operation_keys("artifact_generate", canonical))
+    assert not unresolved
+    assert json.dumps(payload, ensure_ascii=False) == before
+
+
+@pytest.mark.parametrize("changed", [
+    {"content": {"kind": "chart", "series": [{"name": "金额", "values": [2]}]}},
+    {"source_refs": [{"source_type": "session_file", "source_id": "other"}]},
+    {"artifact_type": "svg"},
+    {"output_name": "other.png"},
+])
+def test_fixed_chart_retry_keeps_independent_delivery_failure(changed):
+    payload = {"artifact_type": "png", "output_name": "chart.png",
+               "source_refs": [{"source_type": "session_file", "source_id": "source"}],
+               "content": {"kind": "chart", "series": [{"name": "金额", "values": ["1"]}]}}
+    unresolved = operation_keys("artifact_generate", payload)
+    unresolved.difference_update(operation_keys("artifact_generate", {**payload, **changed}))
+    assert unresolved
+
+
+def test_xlsx_cell_types_remain_distinct_operations():
+    payload = {"artifact_type": "xlsx", "content": {"sheets": [{"rows": [["1"]]}]}}
+    numeric = {**payload, "content": {"sheets": [{"rows": [[1]]}]}}
+    assert operation_keys("artifact_generate", payload) != operation_keys("artifact_generate", numeric)
+
+
+@pytest.mark.parametrize("value", ["nan", "inf", "-inf", "1e999", "text", ""])
+def test_fixed_chart_nonfinite_or_text_values_are_preserved(value):
+    payload = {"artifact_type": "png", "content": {
+        "kind": "chart", "series": [{"values": [value]}]}}
+    numeric = {**payload, "content": {"kind": "chart", "series": [{"values": [0]}]}}
+    assert operation_keys("artifact_generate", payload) != operation_keys("artifact_generate", numeric)
+
+
+def test_chart_export_empty_version_matches_default_without_mutation():
+    payload = {"chart_id": "chart", "format": "png"}
+    assert operation_keys("chart_export", payload) == operation_keys(
+        "chart_export", {**payload, "version_id": ""})
+    assert "version_id" not in payload
+    assert operation_keys("chart_export", payload) != operation_keys(
+        "chart_export", {**payload, "version_id": "saved-version"})
+    assert operation_keys("chart_export", payload) != operation_keys(
+        "chart_export", {**payload, "format": "svg"})
+
+
 @pytest.mark.asyncio
 async def test_turn_cannot_complete_with_unresolved_file_processing():
     middleware = BankRuntimeGatewayMiddleware(None)

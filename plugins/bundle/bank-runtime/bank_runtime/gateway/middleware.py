@@ -39,6 +39,8 @@ from ..conversion_reports import (ConversionCoverage, validate_conversion_report
 from ..model_context import prepare_public_model_context
 from ..delivery_state import current_delivery_state
 from ..artifact_schema import describe_docx_tools, docx_retry_schema_hint
+from ..chart_schema import describe_chart_tools
+from ..chart_tools import normalize_chart_input
 from ..docx_draft import controlled_docx_call, draft_request
 from ..pptx_draft import controlled_pptx_call, draft_request as pptx_draft_request
 from ..artifact_tools import (
@@ -52,7 +54,7 @@ from ..artifact_tools import (
 from ..sandbox.executor import RuntimeSandboxExecutor, is_physical_tool
 
 _BLOCKED_NESTED_TOOLS = frozenset({"run_tool_batch"})
-_RUNTIME_EXECUTED_TOOLS = ARTIFACT_WORKER_TOOL_NAMES | {"chart_generate"}
+_RUNTIME_EXECUTED_TOOLS = ARTIFACT_WORKER_TOOL_NAMES | {"chart_generate", "chart_export"}
 _logger = logging.getLogger("qwenpaw.plugins.bank_runtime.gateway.middleware")
 
 
@@ -296,6 +298,7 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
         input_kwargs["tools"] = describe_docx_tools(
             input_kwargs.get("tools"), self.artifact_intent or self._artifact_schema_hint,
         )
+        input_kwargs["tools"] = describe_chart_tools(input_kwargs["tools"])
         if self.model_reliability is not None:
             raw_handler = next_handler
             async def reliable_handler(**kwargs):
@@ -832,7 +835,7 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
             tool_name, tool_input, self.artifact_intent
         )
         partial_report = self._partial_report(tool_name, tool_input) is not None
-        normalized = self.document_input(tool_name, tool_input)
+        normalized = normalize_chart_input(tool_name, self.document_input(tool_name, tool_input))
         if normalized != tool_input:
             original_handler = next_handler
             bound_call = copy(tool_call)
@@ -1079,7 +1082,7 @@ class GatewayPermissionEngine:
         tool_input = complete_artifact_tool_input(
             tool_name, tool_input, self.middleware.artifact_intent
         )
-        tool_input = self.middleware.document_input(tool_name, tool_input)
+        tool_input = normalize_chart_input(tool_name, self.middleware.document_input(tool_name, tool_input))
         reason = self.middleware._conversion_retry_reason(tool_name, tool_input)
         if reason:
             return _deny(REASONS[reason])
@@ -1336,7 +1339,10 @@ def _runtime_tool_response(
 ) -> ToolResponse:
     status = str(result.get("status") or "")
     state = ToolResultState.SUCCESS if status == "success" else ToolResultState.ERROR
-    if tool_name == "chart_generate" or (isinstance(result.get("result"), Mapping) and "chart_status" in result["result"]):
+    if tool_name == "chart_export":
+        from ..chart_tools import chart_export_model_result
+        safe = chart_export_model_result(result)
+    elif tool_name == "chart_generate" or (isinstance(result.get("result"), Mapping) and "chart_status" in result["result"]):
         from ..chart_tools import chart_model_result
         safe = chart_model_result(result)
     else:
