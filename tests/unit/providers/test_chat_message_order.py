@@ -46,8 +46,14 @@ async def test_real_msgs_reach_sdk_with_one_leading_system(monkeypatch, stream, 
     wire = capture.call_args.kwargs
     actual = wire['messages']
     assert [m['role'] for m in actual] == ['system', 'user', 'assistant', 'tool']
-    assert actual[0]['content'] == [{'type': 'text', 'text': text} for text in ('base', 'use metrics.fn', 'answer guidance')]
-    assert actual[1:] == [m for m in expected if m['role'] != 'system']
+    assert actual[0]['content'] == 'base\n\nuse metrics.fn\n\nanswer guidance'
+    expected_conversation = [m for m in expected if m['role'] != 'system']
+    for actual_msg, expected_msg in zip(actual[1:], expected_conversation):
+        content = expected_msg.get('content')
+        if isinstance(content, list) and content and all(set(b) == {'type', 'text'} for b in content):
+            assert actual_msg == {**expected_msg, 'content': '\n\n'.join(b['text'] for b in content)}
+        else:
+            assert actual_msg == expected_msg
     assert actual[2]['tool_calls'][0]['id'] == actual[3]['tool_call_id'] == 'call1'
     assert messages == before
     assert model.formatter is formatter
@@ -145,3 +151,61 @@ def test_normalization_is_idempotent_and_conflicting_metadata_is_not_lost():
     messages[-1]['name'] = 'other'
     with pytest.raises(ValueError, match='metadata'):
         normalize_system_messages(messages)
+
+
+@pytest.mark.asyncio
+async def test_plain_text_history_reaches_actual_sdk_as_strings(monkeypatch):
+    """Text-only chat must survive services whose templates expect strings."""
+    from agentscope.credential import OpenAICredential
+    from agentscope.message import SystemMsg, UserMsg, AssistantMsg, TextBlock
+
+    class RequestCaptured(Exception):
+        pass
+
+    capture = AsyncMock(side_effect=RequestCaptured)
+    monkeypatch.setattr('openai.AsyncClient', lambda **kwargs: SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=capture))))
+    model = OpenAIChatModelCompat(
+        credential=OpenAICredential(id='history-probe', api_key='unused', base_url='http://127.0.0.1:1/v1'),
+        model='compatible-chat-service', stream=False)
+    messages = [SystemMsg('system', 'base'), UserMsg('user', 'Discuss a plan'),
+                AssistantMsg('assistant', [TextBlock(text='A. Discuss the framework'),
+                                           TextBlock(text='B. Review the supplied plan')]),
+                UserMsg('user', 'A'), SystemMsg('system', 'Retain effective context')]
+    before = deepcopy(messages)
+    formatter = model.formatter
+    with pytest.raises(RequestCaptured):
+        await model._call_api('compatible-chat-service', messages)
+    actual = capture.call_args.kwargs['messages']
+    assert [m['role'] for m in actual] == ['system', 'user', 'assistant', 'user']
+    assert [m['content'] for m in actual] == [
+        'base\n\nRetain effective context', 'Discuss a plan',
+        'A. Discuss the framework\n\nB. Review the supplied plan', 'A']
+    assert messages == before
+    assert model.formatter is formatter
+
+
+@pytest.mark.asyncio
+async def test_text_canonicalization_preserves_media_metadata_and_tool_pairs():
+    from qwenpaw.providers.chat_message_order import SystemMessageOrderFormatter
+    image = {'type': 'image_url', 'image_url': {'url': 'https://example.com/image.png'}}
+    cache = {'type': 'text', 'text': 'cached policy', 'cache_control': {'type': 'ephemeral'}}
+    messages = [
+        {'role': 'system', 'content': [cache]},
+        {'role': 'user', 'content': [{'type': 'text', 'text': 'explain'}, image]},
+        {'role': 'assistant', 'content': [{'type': 'text', 'text': 'Checking'}],
+         'reasoning_content': 'provider signature',
+         'tool_calls': [{'id': 'call1', 'type': 'function', 'function': {'name': 'read', 'arguments': '{}'}}]},
+        {'role': 'tool', 'tool_call_id': 'call1', 'content': [{'type': 'text', 'text': 'confirmed'}]},
+        {'role': 'assistant', 'content': None},
+    ]
+    before = deepcopy(messages)
+    base = SimpleNamespace(format=AsyncMock(return_value=messages))
+    actual = await SystemMessageOrderFormatter(base).format([])
+    assert actual[:2] == before[:2]
+    assert actual[2] == {**before[2], 'content': 'Checking'}
+    assert actual[3] == {**before[3], 'content': 'confirmed'}
+    assert actual[4] == before[4]
+    assert messages == before
+    base.format.return_value = actual
+    assert await SystemMessageOrderFormatter(base).format([]) is actual

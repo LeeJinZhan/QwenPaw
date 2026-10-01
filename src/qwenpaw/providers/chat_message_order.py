@@ -30,7 +30,40 @@ class SystemMessageOrderFormatter:
         self._formatter = formatter
 
     async def format(self, messages: Any) -> Any:
-        return normalize_system_messages(await self._formatter.format(messages))
+        ordered = normalize_system_messages(await self._formatter.format(messages))
+        return normalize_text_content(ordered)
+
+
+def normalize_text_content(messages: Any) -> Any:
+    """Use canonical strings for plain text at the compatible API boundary.
+
+    Some compatible serving templates do not consume assistant text arrays.
+    Media and annotated blocks still require their original representation.
+    This projection changes neither conversation roles nor persisted objects.
+    """
+    if not isinstance(messages, (list, tuple)):
+        return messages
+    projected = []
+    changed = False
+    for message in messages:
+        content = message.get("content") if isinstance(message, dict) else None
+        if (
+            isinstance(message, dict)
+            and message.get("role") in {"system", "developer", "user", "assistant", "tool"}
+            and isinstance(content, list)
+            and content
+            and all(
+                isinstance(block, dict)
+                and set(block) == {"type", "text"}
+                and block["type"] == "text"
+                and isinstance(block["text"], str)
+                for block in content
+            )
+        ):
+            message = {**message, "content": "\n\n".join(block["text"] for block in content)}
+            changed = True
+        projected.append(message)
+    return projected if changed else messages
 
 
 def normalize_system_messages(messages: Any) -> Any:
