@@ -87,14 +87,16 @@ async def test_reading5_same_name_revision_statistics_and_raw_coverage(tmp_path,
         assert sum(g['金额（元）:sum'] for g in groups) == (8800 if revision else 7800)
         ledger = ledgers[revision]
         assert not ledger.pending and not ledger.documents[ref].complete
-        table = '| 风险等级 | 记录数 | 金额合计（元） | 平均金额（元） |\n| --- | --- | --- | --- |\n'
-        table += '\n'.join(f"| {g['group']['风险等级']} | {g['记录编号:count']} | {g['金额（元）:sum']} | {g['金额（元）:avg']} |" for g in groups)
-        assert ledger.declaration_conflict(table) == ''
-        assert ledger.declaration_conflict('已完整读取台账全文。' + table) == 'DOCUMENT_READ_INCOMPLETE'
+        evidence = ledger.evidence_snapshot()['documents'][0]
+        assert evidence['file_id'] == f'file_{revision}' and not evidence['complete']
+        assert evidence['statistics'][0]['metrics'] == args['ops'][0]['metrics']
+        assert evidence['statistics'][0]['group_by'] == ['风险等级']
+        assert not ledger.sources_complete([f'file_{revision}'])
         page = await invoke(revision, 'read_range', {'document_ref': ref, 'sheet': '台账', 'rows': [1, 12]})
         assert page['all_columns'] is True and page['rows_returned'] == [1, 12]
         assert ledger.documents[ref].complete
-        assert ledger.declaration_conflict('已完整读取台账全文。\n' + table) == ''
+        assert ledger.evidence_snapshot()['documents'][0]['complete']
+        assert ledger.sources_complete([f'file_{revision}'])
     assert refs[0] != refs[1]
     # Replaying the original query after the revision must retain its original result.
     assert await invoke(0, 'aggregate', statistics[0][0]) == statistics[0][1]
@@ -159,7 +161,8 @@ async def test_five_sheet_excel_wire_pagination_and_coverage(tmp_path):
                 projected = await call("read_range", {"document_ref": ref, "sheet": "规划总览", "columns": ["编号"]})
                 assert projected["all_columns"] is False
                 assert ledger.documents[ref].covered_rows("规划总览") == 0
-                assert ledger.declaration_conflict("所有工作表全量总结") == "DOCUMENT_READ_INCOMPLETE"
+                assert not ledger.sources_complete(['file_test'])
+                assert ledger.evidence_snapshot()['documents'][0]['sheets'][0]['covered_ranges'] == []
                 cursor = None
                 pages = 0
                 while True:
@@ -174,7 +177,8 @@ async def test_five_sheet_excel_wire_pagination_and_coverage(tmp_path):
                 assert not ledger.pending
                 assert ledger.documents[ref].complete
                 assert {name: ledger.documents[ref].covered_rows(name) for name in expected} == expected
-                assert ledger.declaration_conflict("所有工作表全量总结") == ""
+                assert ledger.sources_complete(['file_test'])
+                assert all(sheet['complete'] for sheet in ledger.evidence_snapshot()['documents'][0]['sheets'])
                 # A restarted store can resume the same authorized reference.
                 restarted = StructuredStore(root=tmp_path)
                 assert restarted.read_range(ref, sheet="年度规划", rows=[1, 3])["rows_scanned"] == 3
@@ -293,10 +297,11 @@ async def test_ledger_workbook_batch_statistics_finish_without_reading_every_row
     for operation in result['results']:
         assert sum(group['问题描述:count'] for group in operation['groups']) == row_count
     assert not ledger.pending
-    assert ledger.declaration_conflict(f'全表按问题大类/问题小类统计问题描述数量合计{row_count}条') == ''
-    assert ledger.declaration_conflict('全表按风险等级统计问题描述计数') == ''
-    assert ledger.declaration_conflict(f'全表合计{row_count:,}条') == ''
-    assert ledger.declaration_conflict('已完整读取全部内容') == 'DOCUMENT_READ_INCOMPLETE'
+    evidence = ledger.evidence_snapshot()['documents'][0]
+    assert len(evidence['statistics']) == 3
+    assert [statistic['group_by'] for statistic in evidence['statistics']] == [operation.get('group_by', []) for operation in operations]
+    assert all(statistic['metrics'] == metrics for statistic in evidence['statistics'])
+    assert not evidence['complete'] and not ledger.sources_complete([source.file_id])
     assert ledger.documents[ref].covered_rows('Sheet1') == 0
     assert spy.await_count == 1  # One batch; no find/read/statistics loop.
     assert await invoke('aggregate', {'document_ref':ref, 'ops':operations}) == result

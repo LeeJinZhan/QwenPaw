@@ -116,6 +116,8 @@ async def test_real_mcp_current_task_authorization_and_source_lifecycle(tmp_path
                     failed = await invoke("aggregate", conflict)
                     assert failed["argument_error"]["reason"] == "METRIC_FUNCTION_FIELD"
                     assert "fn" in failed["recovery_hint"]
+                    assert "剩余恢复预算" in failed["recovery_hint"]
+                    assert "最多重试一次" not in failed["recovery_hint"]
                     corrected = {"document_ref":ref,"ops":[{"metrics":[{"column":"amount","fn":"sum"}]}]}
                     success = await invoke("aggregate", corrected)
                     assert success['results'][0]['groups'][0]['amount:sum'] == 50

@@ -178,7 +178,7 @@ class MinerUMcpService:
                     result["argument_error"] = exc.argument_error
                     logger.warning("Aggregate argument rejected: reason=%s field=%s",
                                    exc.argument_error["reason"], exc.argument_error["field"])
-                    result["recovery_hint"] = exc.argument_error["hint"] + " 保留 document_ref，修正后最多重试一次；不要原样重复调用或转换文件。"
+                    result["recovery_hint"] = exc.argument_error["hint"] + " 保留有效 document_ref，根据具体诊断与剩余恢复预算修正；不原样重复失败请求，不以转换文件规避参数或权限检查。"
                 return result
 
         @self.mcp.tool(

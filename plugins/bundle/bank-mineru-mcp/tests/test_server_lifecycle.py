@@ -13,6 +13,12 @@ from bank_mineru_mcp.tools import ToolContractError
 from bank_mineru_mcp.recovery import recovery_hint
 
 
+def test_unknown_failure_hint_checks_state_instead_of_blind_retry():
+    hint = recovery_hint('UNRECOGNIZED_ERROR')
+    assert '结果未知' in hint and '不重复提交' in hint
+    assert '允许恢复' in hint
+
+
 class _Client:
     def __init__(self) -> None:
         self.probes = 0
