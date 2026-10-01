@@ -11,10 +11,10 @@ _INTERNAL = re.compile(
     r"artifact[_ .](?:generate|revise|convert|job)|execute_shell|"
     r"\b(?:browser|shell|Skill)\b|\b[a-zA-Z][\w]*__[\w]+\b|"
     r"\b(?:task|gfile|trace|call|file|document_ref)_[\w-]+|"
-    r"\b[a-z]+_[a-z_]+\b|\b[A-Z]+_[A-Z_]+\b|"
     r"工具(?:调用|网关|名称)|系统提示词|内部(?:路径|配置)|"
     r"https?://|file://|/(?:Users|etc|data|tmp|var)/|"
-    r"token|password|secret|authorization|api[_ -]?key",
+    r"\b(?:token|password|secret|authorization|api[_ -]?key)\s*[\"']?\s*[:=]\s*\S+|"
+    r"\bBearer\s+[a-zA-Z0-9._~+/-]+|\bsk-[a-zA-Z0-9_-]{16,}",
     re.IGNORECASE,
 )
 _SEGMENT_END = re.compile(r"[\n。！？]")
@@ -32,6 +32,10 @@ class PublicThinkingStream:
                 "answer.chunk", "answer.completed", "answer.failed", "answer.phase", "answer.retracted",
             } else []
             return result + [event]
+        if event.get("content_type") in {"private_reasoning", "reasoning", "thinking"}:
+            # Native provider reasoning is private regardless of its wording.
+            # Flush only the prior explicitly public segment, never this text.
+            return self._finish()
         message_id = str(event.get("message_id") or "")
         result = self._finish() if message_id != self.message_id else []
         self.message_id = message_id

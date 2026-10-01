@@ -296,11 +296,11 @@ def test_stream_projects_incremental_thinking_and_answer_with_one_terminal(
     events = _response_events(response)
     assert [event["event"] for event in events] == [
         "status.changed",
-        "answer.thinking",
         "answer.chunk",
         "answer.completed",
     ]
-    assert [event.get("text") for event in events[1:3]] == ["思考", "答案"]
+    assert [event.get("text") for event in events if event['event'] == 'answer.chunk'] == ["答案"]
+    assert not any(event['event'] == 'answer.thinking' for event in events)
     assert (
         sum(event["event"] in {"answer.completed", "answer.failed"} for event in events)
         == 1
@@ -402,10 +402,9 @@ def test_stream_keeps_reasoning_content_deltas_out_of_answer_chunks(monkeypatch)
     events = _response_events(response)
     assert [event["event"] for event in events] == [
         "status.changed",
-        "answer.thinking",
         "answer.completed",
     ]
-    assert [event.get("text") for event in events[1:2]] == ["思考"]
+    assert not any(event['event'] == 'answer.thinking' for event in events)
     assert not any(event["event"] == "answer.chunk" for event in events)
 
 

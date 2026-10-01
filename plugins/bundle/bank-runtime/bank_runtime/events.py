@@ -135,7 +135,14 @@ class CompactEventProjector:
             return []
         if event_name in {"answer.thinking", "answer.chunk"}:
             content = _text(raw_event)
-            return [{"event": event_name, "text": content}] if content else []
+            if not content:
+                return []
+            projected = {"event": event_name, "text": content}
+            if event_name == "answer.thinking" and raw_event.get("content_type") in {
+                "private_reasoning", "reasoning", "thinking",
+            }:
+                projected["content_type"] = "private_reasoning"
+            return [projected]
         if event_name in {"message", "message_delta", "delta"}:
             content = _text(raw_event.get("delta") or raw_event.get("text"))
             return [{"event": "answer.chunk", "text": content}] if content else []
@@ -238,6 +245,8 @@ class CompactEventProjector:
                 return []
             self._streamed_text_messages.add(message_id)
         payload = {"event": event, "text": chunk}
+        if is_thinking:
+            payload["content_type"] = "private_reasoning"
         if is_thinking or self._active_message_id == message_id:
             payload["message_id"] = message_id
         return [payload]
