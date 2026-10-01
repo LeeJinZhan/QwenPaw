@@ -82,26 +82,26 @@ async def chart_export(chart_id: str, format: str, version_id: str = '') -> dict
             version. Never invent IDs or reconstruct a definition for export.
         format: Requested png, svg, pdf or vsdx (vsdx excludes statistical charts).
             Honor the user's explicit format. A render failure is not permission
-            to replace PNG with SVG or to change numeric values and retry.
+            to substitute another format or alter business data without evidence.
     """
     raise RuntimeError("图表导出必须通过 Bank Runtime Tool Gateway 执行。")
 
 
 def chart_export_model_result(envelope):
-    from .presentation import failure_message
+    from .presentation import failure_message, failure_metadata
     raw = envelope.get('result') or {}
     result = {key: raw[key] for key in ('chart_id', 'version_id', 'export_job_id', 'format',
               'artifact_status', 'generated_file_ids', 'mime_type') if key in raw}
     ready = (envelope.get('status') == 'success' and result.get('artifact_status') == 'succeeded'
              and result.get('generated_file_ids') and result.get('chart_id') and result.get('version_id'))
     if envelope.get('status') != 'success':
-        result['retryable'] = False
+        result.update(failure_metadata(envelope))
         result['reason'] = str(envelope.get('error_code') or 'CHART_EXPORT_FAILED')
     message = ('图表已按指定格式导出，可通过文件卡片打开或下载。' if ready else
                failure_message(str(envelope.get('error_code') or '')) +
-               ' 指定格式尚未交付；不要改用其他格式或修改数值类型重试。')
+               ' 指定格式尚未交付；恢复仍应遵守原交付目标。')
     return {'status': envelope.get('status'), 'result': result,
-            'presentation': {'outcome': 'completed' if ready else 'failed' if envelope.get('status') != 'success' else 'unknown',
+            'presentation': {'outcome': 'completed' if ready else 'failed' if envelope.get('status') != 'success' and result.get('execution_status') != 'execution_unknown' else 'unknown',
                              'message': message}}
 
 

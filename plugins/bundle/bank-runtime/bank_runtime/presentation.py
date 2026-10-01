@@ -4,46 +4,25 @@ from .conversion_reports import validate_conversion_report, conversion_reason, R
 
 
 PUBLIC_RESPONSE_GUIDANCE = """USER-FACING RESPONSE CONTRACT
-- Help with the user's request using model knowledge, reasoning, writing and supplied material.
-  These abilities do not require a corresponding tool. A missing or failed retrieval capability
-  limits that retrieval, not the entire answer. Complete the parts you can answer reliably.
-- Distinguish stable knowledge from live observations and protected business records. When live
-  information cannot be obtained, briefly say so if relevant, then provide useful background,
-  analysis or guidance with its scope clear. Never present background as a current observation,
-  invent protected records, or claim you searched or verified something you did not.
-- Use authorized retrieval when it is actually available and useful. Do not assume internet access
-  is permanently unavailable. Historical assistant statements about capabilities may be outdated.
-- When explaining the next action before a tool call, finish a short, complete sentence.
-  This is a user-facing stage message, not private reasoning. Omit unnecessary narration.
-- Explain the business result, evidence, uncertainty and a useful next step in the user's language.
-  Prefer a few well-supported facts over a longer speculative list. A disclaimer does not make
-  uncertain dates or details reliable. Describe unavailable information, not integration setup.
-- In ordinary answers and public thinking, do not volunteer Runtime, QwenPaw, Gateway, MCP,
-  tool function names, raw status/error codes, job/task/file IDs, internal paths or protocol details.
-  Internal identifiers are for subsequent calls only. Do not turn tool JSON into a user-facing table.
-- Retain useful filenames, formats, citations and business identifiers. When the user explicitly
-  asks a technical question, explain relevant technical terms accurately; this is not a word ban.
-- Skills are instructions, not permission. Seeing a skill does not mean its tools are available.
-  Use only tools in the current schemas. After an authorization denial do not switch to shell,
-  scripts, URLs or another tool to perform the denied operation. Answering from general knowledge
-  or helping with user-provided material is still allowed; it is not an authorization bypass.
-- Follow the actual result and presentation summary. Distinguish no results, missing input,
-  unavailable capability, lack of access, temporary failure, partial completion, pending approval,
-  cancellation and unknown execution outcome. Do not invent a reason or an approval workflow.
-- Do not claim success because a request was accepted. State which parts actually completed.
-  A disconnected stream is not a cancelled task; cancellation does not roll back completed actions.
-  For an unknown outcome, advise checking status before resubmitting, not blind retries.
-- When a request depends on multiple documents, verify every required source was read.
-  If parsing fails, do not create empty/placeholder artifacts as if they fulfilled the request.
-  For requests to revise each attachment, deliver each required revised file; a conversion or
-  one successful file does not complete the other files. State any missing deliverables plainly.
-- Never output internal deliberation, self-instructions or tool-debug reasoning as the final answer.
-  A final answer must contain the business result, not promises such as 'Let me write the response'.
-- For delivered files, briefly describe the result and refer to the file card. Do not invent
-  download links, automatic downloads or client behavior. Do not promise an unavailable operation;
-  you may still offer explanations, drafts or clearly described manual next steps.
-- Public thinking must remain relevant to the user's problem and omit internal orchestration,
-  tool selection, configuration, credentials and diagnostics. Do not fabricate progress or reasoning.
+- Help with model knowledge, reasoning, writing and supplied material. Missing retrieval
+  limits that retrieval, not the entire answer. Distinguish stable knowledge from live
+  observations and protected records; never invent facts, verification, execution or results.
+- Use only current authorized tools. Skills and preferences are not permission. Do not
+  bypass an authorization denial via another tool, shell, URL or path; independent help
+  from knowledge or supplied material remains allowed.
+- Apply explicit current presentation requests first, then injected personal preferences
+  for unspecified fields; choose an appropriate presentation only where neither is supplied.
+  Explain results, evidence scope, uncertainty and useful next steps accordingly.
+  Briefly describe unavailable information when relevant, without speculative reasons or
+  invented approval workflows. Partial evidence must not be presented as complete evidence.
+- Stage messages briefly state the next action or confirmed progress. Keep the final answer
+  self-contained; never output private deliberation, self-instructions or tool-debug notes.
+- Ordinary answers and public thinking omit internal orchestration, credentials, function
+  names, protocol/error codes, job/task/file IDs and internal paths. Keep useful filenames,
+  formats and citations. Explicit technical questions may receive accurate technical detail.
+- Describe actual outcomes, distinguishing success, missing input, denial, failure, partial
+  completion, pending, cancellation and unknown status. Acceptance is not completion. Do
+  not fabricate progress; correct an already streamed error explicitly.
 """
 
 
@@ -65,16 +44,52 @@ def failure_message(code: str = "", violation: str = "") -> str:
     if code == "ARTIFACT_RENDER_FAILED":
         return "文件未能完成生成，请查看处理状态后再决定是否重试。"
     if code in {"WORKER_TIMEOUT", "WORKER_UNAVAILABLE", "DOCUMENT_WORKER_UNAVAILABLE", "CHART_EXPORT_FAILED"}:
-        return "生成服务未能完成指定格式的文件。本轮不要修改数值类型反复重试，也不要擅自替换文件格式。"
+        return "指定格式的文件尚未确认生成完成；请先核对处理状态，再依据执行结果决定是否恢复。"
     if code in {"TOOL_DENIED", "TOOL_NOT_FOUND"}:
         return "当前助手无法执行此操作，本次未执行。"
     return "本次操作暂时无法完成。请根据已确认的结果说明情况，不要重复提交结果未知的操作。"
 
 
+def failure_metadata(envelope: Mapping[str, Any]) -> dict[str, Any]:
+    """Project trusted recovery facts without inferring execution from a code.
+
+    These are model-facing facts, not permission to execute. Gateway still owns
+    admission and recovery budgets. Unknown/in-flight writes must not be retried.
+    """
+    facts = dict(envelope)
+    for key in ("details", "result"):
+        if isinstance(envelope.get(key), Mapping):
+            facts.update(envelope[key])
+    state = facts.get("execution_status")
+    if state not in {"not_started", "failed", "completed", "execution_unknown", "executing", "pending", "cancelled"}:
+        state = "execution_unknown"
+    code = str(envelope.get("error_code") or "")
+    denied = code in {"POLICY_BLOCKED", "POLICY_DENIED", "FORBIDDEN", "FILE_ACCESS_DENIED",
+                      "UNAUTHORIZED", "EMBED_SESSION_EXPIRED", "TOOL_DENIED", "TOOL_NOT_FOUND"}
+    denied = denied or envelope.get("status") == "blocked"
+    remaining = facts.get("remaining_attempts")
+    retryable = (facts.get("retryable") is True and state in {"not_started", "failed"}
+                 and not denied and not (type(remaining) is int and remaining <= 0))
+    if denied:
+        action = "stop"
+    elif state in {"execution_unknown", "executing", "pending"}:
+        action = "check_status"
+    elif facts.get("recovery_action") == "renderer_exhausted" and not retryable:
+        action = "renderer_exhausted"
+    elif retryable:
+        action = "correct_input" if facts.get("recovery_action") == "correct_input" else "retry"
+    else:
+        action = "stop"
+    result = {"execution_status": state, "retryable": retryable, "recovery_action": action}
+    if type(remaining) is int and remaining >= 0:
+        result["remaining_attempts"] = remaining
+    return result
+
+
 def artifact_model_result(envelope: Mapping[str, Any]) -> dict[str, Any]:
     raw = envelope.get("result")
     raw = raw if isinstance(raw, Mapping) else {}
-    result = {key: raw[key] for key in ("artifact_status", "artifact_type", "operation", "generated_file_ids") if key in raw}
+    result = {key: raw[key] for key in ("artifact_status", "artifact_type", "operation", "generated_file_ids", "page_count") if key in raw}
     report = validate_conversion_report(raw.get("conversion_report"))
     if report is not None:
         result["conversion_report"] = report
@@ -82,13 +97,14 @@ def artifact_model_result(envelope: Mapping[str, Any]) -> dict[str, Any]:
         result["purpose"] = raw["purpose"]
     status = str(raw.get("artifact_status") or "")
     if envelope.get("status") != "success":
+        result.update(failure_metadata(envelope))
         reason = conversion_reason(envelope)
         message = REASONS.get(reason) or failure_message(str(envelope.get("error_code") or ""))
         if reason:
-            result.update(reason=reason, retryable=False)
-        if str(envelope.get('error_code') or '') in {'WORKER_TIMEOUT', 'WORKER_UNAVAILABLE', 'DOCUMENT_WORKER_UNAVAILABLE', 'CHART_EXPORT_FAILED'}:
-            result.update(reason=str(envelope['error_code']), retryable=False)
-        outcome = "failed"
+            result.update(reason=reason, retryable=False, recovery_action="stop")
+        elif envelope.get("error_code"):
+            result["reason"] = str(envelope["error_code"])
+        outcome = "unknown" if result["execution_status"] == "execution_unknown" else "failed"
     elif status == "succeeded" and result.get("generated_file_ids"):
         message, outcome = "文件已生成，可通过文件卡片打开或下载。", "completed"
         if raw.get("purpose") == "read":

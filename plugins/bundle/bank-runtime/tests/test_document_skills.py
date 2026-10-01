@@ -101,16 +101,23 @@ def test_real_native_viewer_returns_complete_document_rules_without_reference_re
 
     writing = asyncio.run(_read_native_skill("bank-document-writing"))
     assert "bank-official-docx-v1" in writing and '"blocks"' in writing
-    assert "template_fill_docx" in writing and "15000" in writing
+    assert "template_fill_docx" in writing and "用户指定的篇幅" in writing
+    assert "在已确定的公文 DOCX 任务中" in writing
     for name in ("bank-document-review", "bank-document-qa"):
         assert "材料" in asyncio.run(_read_native_skill(name))
+    general = asyncio.run(_read_native_skill("bank-assistant-zh"))
+    assert "bank-official-docx-v1" not in general
+    assert '"slides"' not in general
+    assert '"sheets"' in general  # No separate spreadsheet Skill is installed.
+    qa = asyncio.run(_read_native_skill("bank-document-qa"))
+    assert "conversion_report" in qa and "图形语义未核验" in qa
 
 
 def test_table_completeness_rules_survive_native_skill_viewer():
     import asyncio
 
     content = asyncio.run(_read_native_skill("bank-document-qa"))
-    for required in ("next_cursor", "has_more=false", "chunk_count", "按 chunk index 去重", "日均活跃用户数", "未分类项", "生成报告文件也不能替代完整性核对"):
+    for required in ("next_cursor", "has_more=false", "chunk_count", "按 chunk index 去重", "去重", "未分类项", "生成报告文件也不能替代完整性核对"):
         assert required in content
 
 
@@ -155,18 +162,28 @@ def test_presentation_complete_request_and_recovery_rules_survive_native_viewer(
     full = [json.loads(block) for block in re.findall(r"```json\s*\n(.*?)\n```", content, re.S)]
     assert any(item.get("artifact_type") == "pptx" and "content" in item for item in full)
     assert "上传 PPT 的文件编号不是" in content
-    assert "清晰确定的参数错误可作一次有实质修改的重试" in content
+    assert "retryable=false" in content and "精确页数" in content
     assert "不是仅生成了文字大纲" in content
 
 
-def test_office_interaction_rules_are_available_when_each_skill_is_loaded_alone():
+def test_office_methods_and_shared_guidance_are_available_without_duplicate_rule_copies():
     import asyncio
+    from agentscope.message import SystemMsg, UserMsg
+    from bank_runtime.model_context import prepare_public_model_context
+    from bank_runtime.presentation import PUBLIC_RESPONSE_GUIDANCE
 
-    for name in ('bank-assistant-zh', 'bank-document-writing', 'bank-document-review', 'bank-document-qa', 'bank-presentation'):
+    for name in ('bank-assistant-zh', 'bank-document-writing', 'bank-document-review', 'bank-document-qa', 'bank-presentation', 'bank-chart'):
         content = asyncio.run(_read_native_skill(name))
-        for rule in ('不要重复询问', '只有关键缺项才集中询问', '不播报字段校验', '结果未知时不重复提交'):
-            assert rule in content, (name, rule)
-        assert '同一确定参数错误最多修正重试一次' in content
+        request = {'messages': [SystemMsg('system', PUBLIC_RESPONSE_GUIDANCE),
+                                UserMsg('user', '按已确认要求继续处理')], 'tools': []}
+        prepared = prepare_public_model_context(request)
+        context = '\n'.join(message.get_text_content() for message in prepared['messages'])
+        assert context.count(PUBLIC_RESPONSE_GUIDANCE) == 1
+        assert '沿用仍有效的用户授权' in context
+        assert '结果未知' in context
+        assert '同一确定参数错误最多修正重试一次' not in content
+        assert '用户未给出具体内容时，使用安全的 `cover`' not in content
+        assert '## 交互与执行节奏' not in content
 
 
 def test_official_document_maintenance_reference_matches_native_delivery_rules():
@@ -196,4 +213,35 @@ def test_native_office_skills_end_with_conditional_public_delivery_guidance():
         assert '```json' not in delivery
         assert '文件' in delivery
         assert '未' in delivery
-        assert '技术原因' in content
+
+
+def test_native_writing_scope_covers_arbitrary_length_and_document_type():
+    import asyncio
+    content = asyncio.run(_read_native_skill('bank-document-writing'))
+    assert '用户指定的篇幅' in content and '15000' not in content
+    assert '关键缺项使任务无法继续' in content
+    assert '按实际文种选择 document_type' in content
+    assert '例如【待填写】或【待核实】' in content
+    assert '该文件的请示初稿' not in content
+    assert '不使用×××占位' not in content
+    before_docx = content.split('## 已确定 DOCX 交付时的文种与版式')[0]
+    assert '先区分“写什么”和“交付什么”' in before_docx
+
+
+def test_native_presentation_repairs_fields_not_incident_words_and_allows_labelled_examples():
+    import asyncio
+    content = asyncio.run(_read_native_skill('bank-presentation'))
+    assert '已登记字段值与合法正文' in content
+    assert '普通正文中的编程词汇如 for' not in content
+    assert 'book、shield、chart 等已登记 icon' not in content
+    assert '按任务需要使用明确标注的示例数据' in content
+    assert 'retryable=false' in content and '精确页数' in content
+
+
+def test_native_chart_generation_scope_is_not_editor_browsing_depth():
+    import asyncio
+    content = asyncio.run(_read_native_skill('bank-chart'))
+    assert '关系范围按用户要求与实际取得材料确定' in content
+    assert '上下各三层' not in content
+    assert '用户明确指定导出格式时按该格式交付' in content
+    assert 'schema_version="chart/1"' in content and 'source_refs' in content

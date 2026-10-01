@@ -356,8 +356,10 @@ async def artifact_convert(
     reading copy for charts/Visio. Read the returned attachment before analysis.
     A converted file alone is not a completed analysis or a revised deliverable.
     Use purpose=read for internal recognition, including a supported PDF visual
-    derivative. Read every returned chunk; conversion_report coverage=partial
-    requires a scoped answer that names omitted content, never a complete report.
+    derivative. Read the requested analysis scope and its pagination before
+    answering. Full-source conclusions require complete coverage;
+    conversion_report coverage=partial requires naming omitted content and
+    limiting conclusions to verified evidence, not abandoning independent help.
 
     Args:
         source_generated_file_id: Existing generated source; omit for uploaded files.

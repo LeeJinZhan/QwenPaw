@@ -14,6 +14,34 @@ from bank_runtime.gateway.middleware import BankRuntimeGatewayMiddleware
 from bank_runtime.artifact_tools import ArtifactDeliveryIntent
 
 
+@pytest.mark.parametrize('goal,suggestion,reply,tool_name', [
+    ('讨论助手形象方向', '可以画图或先讨论文案', '结合顺德和银行元素一起考虑一下', 'chart_generate'),
+    ('讨论活动主题', '可以制作一份PPT', '再考虑预算和参与人数', 'artifact_generate'),
+    ('解释表格中的波动', '可以生成一份分析报告', '重点说说第二季度', 'artifact_generate'),
+    ('给我写一封邮件草稿', '草稿已写好，也可以发送', '语气再自然一点', 'send_email'),
+    ('画一个A到B的流程图', '两个节点已经确定', '把B改为审批', 'chart_generate'),
+    ('分析方案利弊', '可以比较成本或制作汇报文件', '继续比较成本', 'artifact_generate'),
+])
+def test_shared_goal_guidance_preserves_context_and_tool_choice(goal, suggestion, reply, tool_name):
+    history = [UserMsg('user', goal),
+               AssistantMsg('assistant', suggestion),
+               UserMsg('user', reply)]
+    tools = [{'type': 'function', 'function': {'name': tool_name}}]
+    request = {'messages': history, 'tools': tools}
+    before = copy.deepcopy(request)
+    prepared = prepare_public_model_context(request)
+    reminder = prepared['messages'][-1].get_text_content()
+    assert '用户明确新增或改变目标时更新任务' in reminder
+    assert '仅补充条件不自动采纳助手另提的制作或执行建议' in reminder
+    assert '用户采纳前保持为未选择' in reminder
+    assert '自主选择必要的工具和步骤' in reminder
+    assert '沿用仍有效的用户授权' in reminder
+    assert all(case not in reminder for case in ('顺德', 'IP形象', '补充地域', '好，画成关系图'))
+    assert prepared['tools'] == tools
+    assert request == before
+    assert prepared['messages'][-2].get_text_content() == reply
+
+
 @pytest.mark.asyncio
 async def test_document_schema_guidance_precedes_user_facing_answer_guidance():
     middleware = BankRuntimeGatewayMiddleware(None, artifact_intent=ArtifactDeliveryIntent(
@@ -161,7 +189,8 @@ async def test_real_bank_context_reaches_strict_provider_with_one_leading_system
         else:
             assert '直接复用' in str(messages[0]['content'])
             if completed_read_repeats:
-                assert '同一明确行范围已经完整返回' in str(messages[0]['content'])
+                assert '已返回的相同行范围请复用' in str(messages[0]['content'])
+                assert '其他独立工作继续' in str(messages[0]['content'])
                 assert not kwargs.get('tools')
         seen.append(messages)
         return response
@@ -203,4 +232,6 @@ async def test_followup_contract_reaches_current_model_request_after_history(mod
     normalized = normalize_system_messages(wire)
     assert [m['role'] for m in normalized] == ['system', 'user', 'assistant', 'user']
     assert '<bank_followups>' in str(normalized[0]['content'])
+    assert '用户点击后原样作为下一轮消息发送' in str(normalized[0]['content'])
+    assert '业务问题本身可以是是非问句' in str(normalized[0]['content'])
     assert normalized[-1]['content'] == wire[-2]['content']

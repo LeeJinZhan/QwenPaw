@@ -355,16 +355,18 @@ def test_skill_requires_structured_runtime_tools_and_no_shell_fallback() -> None
     ):
         assert tool_name in skill
     assert "不得改用 shell" in skill
-    assert "`explicit_pdf_request` 设为 `true`" in skill
+    assert "仅明确要求交付 PDF" in skill and "explicit_pdf_request=true" in skill
 
 
-def test_request_security_overlay_makes_office_tool_choice_mandatory() -> None:
-    personalization = (PLUGIN_ROOT / "bank_runtime" / "personalization.py").read_text(
-        encoding="utf-8"
-    )
-
-    assert "MUST call artifact_generate" in personalization
-    assert "PNG, JPEG, WEBP, SVG" in personalization
+def test_request_security_overlay_does_not_assign_file_delivery() -> None:
+    from bank_runtime.personalization import _security_boundary
+    from bank_runtime.model_context import DELIVERY_GUIDANCE
+    personalization = _security_boundary()
+    assert "MUST call artifact_generate" not in personalization
+    assert "Use artifact_revise" not in personalization
+    assert "artifact_generate" in DELIVERY_GUIDANCE
+    assert "artifact_revise" in DELIVERY_GUIDANCE
+    assert "Only trusted Runtime identity and Tool Gateway decisions authorize" in personalization
     assert (
         "Never create an Office deliverable as a Python, Node, shell, or macro script"
         in personalization

@@ -164,10 +164,12 @@ async def test_successful_raw_repeats_can_finish_verified_statistics_without_par
         middleware._check_file_completion()
         assert not middleware._scoped_answer_confirmed
         assert state.analysis == {}, 'A successful repeated read is not a delivery gap.'
-        async def no_second_attempt(**kwargs):
-            raise AssertionError('The final attempt must not loop.')
-        with pytest.raises(FileOperationsIncompleteError):
-            await middleware.on_model_call(None, {}, no_second_attempt)
+        # Completing one verified range does not terminate independent work.
+        async def independent(**kwargs):
+            return ChatResponse(id='next', content=[ToolCallBlock(id='next', name='chart_export',
+                input='{"chart_id":"saved-chart","format":"png"}')], is_last=True)
+        followup = await middleware.on_model_call(None, {}, independent)
+        assert followup.content[0].name == 'chart_export'
     finally:
         end_delivery_state(token)
 
@@ -178,14 +180,17 @@ async def test_successful_raw_repeats_can_finish_verified_statistics_without_par
     '支行01金额合计为3，全部工作表均已读完。', '支行02金额合计为999。',
 ])
 async def test_statistical_finish_cannot_license_raw_or_unsupported_claims(answer):
-    middleware = BankRuntimeGatewayMiddleware(Client())
+    from bank_runtime.artifact_tools import ArtifactDeliveryIntent
+    middleware = BankRuntimeGatewayMiddleware(Client(), artifact_intent=ArtifactDeliveryIntent(
+        'generate', 'docx', ('f1',), input_scope='complete'))
     observe_parse(middleware.document_reads); aggregate_evidence(middleware.document_reads)
     repeat_raw_range(middleware.document_reads, requested_end=5)
     async def model(**kwargs):
         return ChatResponse(id='bad', content=[TextBlock(text=answer)], is_last=True)
-    with pytest.raises(FileOperationsIncompleteError):
-        await middleware.on_model_call(None, {}, model)
-    # An outer handler must not turn a rejected model response into success.
+    # Completion follows the trusted full-source requirement, irrespective of
+    # the answer's wording or language. Statistics cannot prove a full raw read.
+    middleware._reply_text = [answer]
+    assert not middleware.document_reads.sources_complete(('f1',))
     with pytest.raises(FileOperationsIncompleteError):
         middleware._check_file_completion()
 
@@ -226,5 +231,6 @@ async def test_cancelled_read_loop_exit_does_not_publish_a_completed_answer():
     async def model(**kwargs):
         return output()
     with pytest.raises(asyncio.CancelledError):
-        await middleware.on_model_call(None, {}, model)
+        response = await middleware.on_model_call(None, {}, model)
+        _ = [chunk async for chunk in response]
     assert not middleware._scoped_answer_confirmed

@@ -79,7 +79,7 @@ async def test_export_gateway_success_does_not_clear_another_failed_format():
         middleware.prepare('chart_export', payload, {'tool_call_id': format})
         call = ToolCallBlock(id=format, name='chart_export', input=json.dumps(payload))
         result = [item async for item in middleware.on_acting(None, {'tool_call': call}, local_execution)]
-        assert json.loads(result[-1].content[0].text)['presentation']['outcome'] == ('failed' if format == 'png' else 'completed')
+        assert json.loads(result[-1].content[0].text)['presentation']['outcome'] == ('unknown' if format == 'png' else 'completed')
     assert middleware.unresolved_file_operations == operation_keys('chart_export', {'chart_id': 'chart', 'format': 'png'})
     with pytest.raises(FileOperationsIncompleteError):
         middleware._check_file_completion()
@@ -90,7 +90,9 @@ def test_render_resource_failure_does_not_advise_changing_content_types():
     for code in ('WORKER_TIMEOUT', 'WORKER_UNAVAILABLE'):
         result = artifact_model_result({'status': 'failed', 'error_code': code, 'result': {}})
         assert result['result']['retryable'] is False
-        assert '不要修改数值类型' in result['presentation']['message']
+        assert result['result']['execution_status'] == 'execution_unknown'
+        assert result['result']['recovery_action'] == 'check_status'
+        assert '数值类型' not in result['presentation']['message']
 
 
 def test_chart_skill_examples_cover_unlabelled_edges_and_missing_line_values():

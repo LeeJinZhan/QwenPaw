@@ -13,7 +13,7 @@ from bank_runtime.gateway.middleware import BankRuntimeGatewayMiddleware
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('streamed', [False, True])
-async def test_malformed_model_arguments_share_budget_before_gateway(streamed):
+async def test_identical_malformed_arguments_are_bounded_without_blocking_other_operations(streamed):
     middleware = BankRuntimeGatewayMiddleware(None)
     seen = []
     async def model(**kwargs):
@@ -36,7 +36,15 @@ async def test_malformed_model_arguments_share_budget_before_gateway(streamed):
     assert 'content' in str(seen[1].get('messages'))
     with pytest.raises(ArtifactInputRetryExhaustedError):
         await middleware.on_model_call(None, {"tools": [{"function": {"name": "artifact_generate"}}]}, model)
-    assert len(seen) == 2
+    # The model may propose an independent operation; only repeating this same
+    # malformed input is rejected after the response is inspected.
+    assert len(seen) == 3
+    async def independent_model(**kwargs):
+        return ChatResponse(content=[ToolCallBlock(
+            id='independent', name='chart_export', input='{"chart_id":"chart-b"}',
+        )], is_last=True)
+    independent = await middleware.on_model_call(None, {}, independent_model)
+    assert independent.content[0].name == 'chart_export'
 
 
 @pytest.mark.asyncio
@@ -55,7 +63,7 @@ async def test_valid_final_arguments_do_not_count_partial_stream_as_failure():
 
 
 @pytest.mark.asyncio
-async def test_malformed_and_runtime_validation_share_one_correction():
+async def test_malformed_and_runtime_validation_have_distinct_recovery_progress():
     from types import SimpleNamespace
     from agentscope.permission import PermissionBehavior
     from bank_runtime.gateway.client import GatewayError
@@ -71,7 +79,11 @@ async def test_malformed_and_runtime_validation_share_one_correction():
     decision = await engine.check_permission(SimpleNamespace(name='artifact_generate'), {'artifact_type': 'docx'})
     assert decision.behavior == PermissionBehavior.DENY
     assert middleware.artifact_input_failures == 2
-    with pytest.raises(ArtifactInputRetryExhaustedError):
-        await middleware.on_model_call(None, {"tools": [{"function": {"name": "artifact_generate"}}]}, model)
+    async def repaired_model(**kwargs):
+        return ChatResponse(content=[ToolCallBlock(id='fixed', name='artifact_generate', input=json.dumps({
+            'artifact_type': 'docx', 'content': {'paragraphs': ['Valid content']},
+        }))], is_last=True)
+    response = await middleware.on_model_call(None, {"tools": [{"function": {"name": "artifact_generate"}}]}, repaired_model)
+    assert json.loads(response.content[0].input)['content']['paragraphs'] == ['Valid content']
     with pytest.raises(ArtifactInputRetryExhaustedError):
         middleware._check_file_completion()

@@ -680,9 +680,12 @@ async def test_pdf_confirmation_is_identical_for_preflight_guard_and_execution()
 
 
 @pytest.mark.asyncio
-async def test_repeated_artifact_input_rejections_stop_before_next_model_call():
+async def test_repeated_artifact_input_rejections_stop_only_same_operation():
+    from agentscope.model import ChatResponse
     class InvalidClient(_Client):
+        calls = 0
         async def preflight(self, *args, **kwargs):
+            self.calls += 1
             raise GatewayError("invalid", code="INVALID_REQUEST", violation="tool_input_field_not_allowed")
     client = InvalidClient()
     middleware = BankRuntimeGatewayMiddleware(client)
@@ -695,10 +698,13 @@ async def test_repeated_artifact_input_rejections_stop_before_next_model_call():
     async def model(**kwargs):
         nonlocal called
         called = True
+        return ChatResponse(content=[ToolCallBlock(id="independent", name="chart_export", input='{"chart_id":"chart-a"}')], is_last=True)
+    await middleware.on_model_call(None, {}, model)
+    assert called
+    assert client.calls == 2
     with pytest.raises(Exception) as caught:
-        await middleware.on_model_call(None, {}, model)
+        middleware._check_file_completion()
     assert getattr(caught.value, "error_code", "") == "ARTIFACT_VALIDATION_FAILED"
-    assert not called
 
 
 @pytest.mark.asyncio
@@ -728,9 +734,10 @@ async def test_permission_failure_is_not_misreported_as_invalid_artifact_input()
 
 @pytest.mark.asyncio
 async def test_execution_validation_failures_share_the_preflight_budget():
+    from agentscope.model import ChatResponse
     class Client(_Client):
         async def execute_runtime_tool(self, *args):
-            return {"status": "failed", "error_code": "ARTIFACT_VALIDATION_FAILED", "result": {"artifact_status": "failed"}}
+            return {"status": "failed", "execution_status": "not_started", "error_code": "ARTIFACT_VALIDATION_FAILED", "result": {"artifact_status": "failed"}}
     client = Client()
     middleware = BankRuntimeGatewayMiddleware(client)
     engine = GatewayPermissionEngine(_DelegateEngine(PermissionBehavior.ALLOW, client.events), middleware)
@@ -743,13 +750,19 @@ async def test_execution_validation_failures_share_the_preflight_budget():
         call = ToolCallBlock(id=f"call-{i}", name="artifact_generate", input=json.dumps(payload))
         _ = [item async for item in middleware.on_acting(SimpleNamespace(), {"tool_call": call}, forbidden)]
     assert middleware.artifact_input_failures == 2
+    assert (await engine.check_permission(SimpleNamespace(name="artifact_generate"), payload)).behavior == PermissionBehavior.DENY
+    assert (await engine.check_permission(SimpleNamespace(name="artifact_generate"), {"artifact_type": "pptx"})).behavior == PermissionBehavior.ALLOW
+    async def independent_model(**kwargs):
+        return ChatResponse(content=[ToolCallBlock(id="independent", name="artifact_generate", input='{"artifact_type":"pptx"}')], is_last=True)
+    await middleware.on_model_call(None, {}, independent_model)
     with pytest.raises(Exception) as error:
-        await middleware.on_model_call(None, {}, None)
+        middleware._check_file_completion()
     assert getattr(error.value, "error_code", "") == "ARTIFACT_VALIDATION_FAILED"
 
 
 @pytest.mark.asyncio
-async def test_exhausted_renderer_layout_stops_diagnostic_generation_in_same_turn():
+async def test_exhausted_renderer_layout_stops_same_operation_and_preserves_final_failure():
+    from agentscope.model import ChatResponse
     from bank_runtime.gateway.client import _response_error
     class Client(_Client):
         executions = 0
@@ -765,14 +778,17 @@ async def test_exhausted_renderer_layout_stops_diagnostic_generation_in_same_tur
         raise AssertionError("must not execute locally")
         yield
     for i in range(2):
-        payload = {"artifact_type": "pptx", "output_name": "报告.pptx" if i == 0 else "测试.pptx"}
+        payload = {"artifact_type": "pptx", "output_name": "报告.pptx"}
         middleware.prepare("artifact_generate", payload, {"tool_call_id": f"call-{i}"})
         call = ToolCallBlock(id=f"call-{i}", name="artifact_generate", input=json.dumps(payload))
         with pytest.raises(Exception):
             _ = [x async for x in middleware.on_acting(None, {"tool_call": call}, forbidden)]
     assert client.executions == 1
+    async def independent_model(**kwargs):
+        return ChatResponse(content=[ToolCallBlock(id="independent", name="artifact_generate", input='{"artifact_type":"docx"}')], is_last=True)
+    await middleware.on_model_call(None, {}, independent_model)
     with pytest.raises(Exception) as raised:
-        await middleware.on_model_call(None, {}, None)
+        middleware._raise_layout_failure()
     assert raised.value.message == "PPTX_LAYOUT_CAPACITY|5|chart_conclusion"
 
 

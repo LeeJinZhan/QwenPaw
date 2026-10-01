@@ -17,6 +17,7 @@ class Client:
     def __init__(self):
         self.reports = []
         self.executions = []
+        self.handler_calls = []
 
     async def report_guard(self, *args): pass
 
@@ -54,6 +55,7 @@ async def test_unobserved_reference_denial_is_not_reported_as_incomplete_read(to
 async def invoke(middleware, name, payload, result, state=ToolResultState.SUCCESS):
     middleware.prepare(name, payload, {"tool_call_id": "call"})
     async def handler():
+        middleware.client.handler_calls.append((name, payload))
         yield ToolResponse(id="call", state=state, content=[TextBlock(text=json.dumps(result))])
     return [item async for item in middleware.on_acting(None, {"tool_call": ToolCallBlock(
         id="call", name=name, input=json.dumps(payload))}, handler)]
@@ -130,15 +132,25 @@ async def test_retry_failure_recovers_only_same_page_and_reports_safe_reason():
 
 
 @pytest.mark.asyncio
-async def test_no_progress_is_bounded_and_does_not_call_model_again():
+async def test_no_progress_blocks_same_request_but_allows_independent_proposal():
     middleware = BankRuntimeGatewayMiddleware(Client())
     await parse(middleware)
-    for _ in range(4):
+    for _ in range(3):
         await read(middleware, 0, 2)
-    async def model(**kwargs): pytest.fail("no further model retry")
+    calls = len(middleware.client.handler_calls)
     with pytest.raises(FileOperationsIncompleteError) as error:
-        await middleware.on_model_call(None, {}, model)
+        await read(middleware, 0, 2)
     assert error.value.error_code == "DOCUMENT_READ_NO_PROGRESS"
+    assert len(middleware.client.handler_calls) == calls
+    proposal = ChatResponse(id='next', content=[ToolCallBlock(
+        id='next', name='MinerU__read_document_chunks',
+        input='{"document_ref":"doc","cursor":"2","limit":2}')], is_last=True)
+    async def model(**kwargs): return proposal
+    response = await middleware.on_model_call(None, {}, model)
+    assert any(isinstance(block, ToolCallBlock) for block in response.content)
+    await read(middleware, 2, 4)
+    assert len(middleware.client.handler_calls) == calls + 1
+    assert middleware.document_reads.coverage('doc') == (4, 24)
 
 
 @pytest.mark.asyncio
@@ -173,7 +185,7 @@ async def test_chunked_parse_without_any_read_fails_at_reply_completion():
 
 
 @pytest.mark.asyncio
-async def test_truncated_text_preparation_stops_model_and_writer(tmp_path):
+async def test_truncated_text_allows_proposal_but_rejects_unsupported_completion(tmp_path):
     from types import SimpleNamespace
     from bank_runtime.sandbox.processor import AttachmentProcessor
     from bank_runtime.sandbox.tools import set_sandbox_tool_state, reset_sandbox_tool_state
@@ -186,7 +198,14 @@ async def test_truncated_text_preparation_stops_model_and_writer(tmp_path):
     token = set_sandbox_tool_state(SimpleNamespace(processor=processor))
     try:
         middleware = BankRuntimeGatewayMiddleware(Client())
-        async def model(**kwargs): pytest.fail("truncated source cannot yield a full-data answer")
+        async def proposal(**kwargs):
+            return ChatResponse(id='next', content=[ToolCallBlock(
+                id='next', name='MinerU__parse_documents', input='{"documents":[{"file_id":"f"}]}')], is_last=True)
+        response = await middleware.on_model_call(None, {}, proposal)
+        assert any(isinstance(block, ToolCallBlock) for block in response.content)
+        assert middleware.client.handler_calls == []
+        async def model(**kwargs):
+            return ChatResponse(id='done', content=[TextBlock(text='全量结果已完成')], is_last=True)
         with pytest.raises(FileOperationsIncompleteError) as error:
             await middleware.on_model_call(None, {}, model)
         assert error.value.error_code == "DOCUMENT_TEXT_TRUNCATED"
@@ -224,10 +243,20 @@ async def test_ambiguous_submit_stops_before_retry_and_is_not_a_transient_read()
     middleware = BankRuntimeGatewayMiddleware(Client())
     await invoke(middleware, "MinerU__parse_documents", {"documents": [{"file_id": "f1"}]},
                  {"status": "failed", "items": [], "error_code": "MINERU_SUBMIT_AMBIGUOUS"})
-    async def model(**kwargs): pytest.fail("do not resubmit an unknown remote job")
+    calls = len(middleware.client.handler_calls)
+    async def model(**kwargs):
+        return ChatResponse(id='next', content=[ToolCallBlock(
+            id='next', name='MinerU__parse_documents', input='{"documents":[{"file_id":"f2"}]}')], is_last=True)
+    response = await middleware.on_model_call(None, {}, model)
+    assert any(isinstance(block, ToolCallBlock) for block in response.content)
     with pytest.raises(FileOperationsIncompleteError) as error:
-        await middleware.on_model_call(None, {}, model)
+        await invoke(middleware, "MinerU__parse_documents", {"documents": [{"file_id": "f1"}]}, {})
     assert error.value.error_code == "MINERU_SUBMIT_AMBIGUOUS"
+    assert len(middleware.client.handler_calls) == calls
+    await invoke(middleware, "MinerU__parse_documents", {"documents": [{"file_id": "f2"}]},
+                 {"items": [{"file_id": "f2", "status": "completed", "content_mode": "inline", "markdown": "独立资料"}]})
+    assert len(middleware.client.handler_calls) == calls + 1
+    assert middleware.document_reads.failures['parse:f1'] == 'MINERU_SUBMIT_AMBIGUOUS'
 
 
 @pytest.mark.asyncio
@@ -281,10 +310,18 @@ async def test_argument_retry_stops_with_original_reason():
     for _ in range(2):
         await invoke(middleware, 'MinerU__aggregate', {'document_ref':'doc','ops':[{}]},
                      {'status':'failed','error_code':'DOCUMENT_ARGUMENT_INVALID'})
-    async def model(**kwargs): pytest.fail('argument correction budget exhausted')
+    calls = len(middleware.client.handler_calls)
+    async def model(**kwargs):
+        return ChatResponse(id='next', content=[ToolCallBlock(
+            id='next', name='MinerU__read_document_chunks', input='{"document_ref":"doc","limit":2}')], is_last=True)
+    response = await middleware.on_model_call(None, {}, model)
+    assert any(isinstance(block, ToolCallBlock) for block in response.content)
     with pytest.raises(FileOperationsIncompleteError) as error:
-        await middleware.on_model_call(None, {}, model)
+        await invoke(middleware, 'MinerU__aggregate', {'document_ref':'doc','ops':[{}]}, {})
     assert error.value.error_code == 'DOCUMENT_ARGUMENT_INVALID'
+    assert len(middleware.client.handler_calls) == calls
+    await read(middleware, 0, 2)
+    assert len(middleware.client.handler_calls) == calls + 1
 
 
 @pytest.mark.asyncio
@@ -440,7 +477,7 @@ async def test_partial_report_uses_same_admitted_payload_and_marks_file_and_body
         end_delivery_state(token)
 
 @pytest.mark.asyncio
-async def test_explicit_complete_report_and_disclaimer_followed_by_total_stay_blocked():
+async def test_explicit_complete_report_requires_all_source_evidence():
     from bank_runtime.delivery_state import begin_delivery_state, end_delivery_state
     from bank_runtime.artifact_tools import ArtifactDeliveryIntent
     middleware = BankRuntimeGatewayMiddleware(Client(), artifact_intent=ArtifactDeliveryIntent('generate','docx',('f1','f2'), input_scope='complete'))
@@ -451,7 +488,7 @@ async def test_explicit_complete_report_and_disclaimer_followed_by_total_stay_bl
     try:
         payload = {'artifact_type':'docx','content':{'paragraphs':['第一份材料的审批流程。']}}
         assert middleware.document_input('artifact_generate', payload) == payload
-        assert not middleware.document_reads.permits_scoped_answer('部分文件尚未读取，但是所有材料的总计为100。')
+        assert not middleware.document_reads.sources_complete(middleware.artifact_intent.source_refs)
         async def model(**kwargs):
             return ChatResponse(id='partial',content=[TextBlock(text='第一份材料的审批流程。')],is_last=True)
         with pytest.raises(FileOperationsIncompleteError):

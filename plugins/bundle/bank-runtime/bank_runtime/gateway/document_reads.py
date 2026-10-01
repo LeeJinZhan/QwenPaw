@@ -3,7 +3,6 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 import hashlib
 import json
-import re
 
 from .completion import _result_values
 
@@ -22,14 +21,6 @@ def is_read_recovery_tool(name):
     )) or name in {
         "Skill", "artifact_convert", "runtime_sandbox_files_search", "runtime_sandbox_files_select",
     }
-
-
-FULL_CLAIM_KEYWORDS = (
-    "全量", "全表", "全部材料", "所有材料", "全部文件", "所有文件", "全部sheet", "全部 sheet", "所有sheet", "所有 sheet",
-    "所有工作表", "合计", "总计", "读完", "完整读取", "全部内容", "全文", "完整分析",
-    "平均", "中位数", "计数", "去重数量", "最小", "最大",
-)
-ALL_SHEET_KEYWORDS = ("全量", "全表", "全部", "所有", "所有工作表")
 
 
 def result_objects(content):
@@ -123,6 +114,17 @@ class DocumentReadLedger:
         self.failures: dict[str, str] = {}
         self.attempts: dict[str, int] = {}
         self.argument_failures: dict[str, int] = {}
+        self.request_results: dict[str, tuple[str, int]] = {}
+        self.request_errors: dict[str, str] = {}
+
+    def repeated_request(self, name, payload):
+        key = name + json.dumps(payload, sort_keys=True, ensure_ascii=False)
+        error = self.request_errors.get(key, '')
+        if error == 'MINERU_SUBMIT_AMBIGUOUS' or error in FILE_POLICY_CODES:
+            return error
+        if self.request_results.get(key, ('', 0))[1] >= (2 if error == 'DOCUMENT_ARGUMENT_INVALID' else 3):
+            return error or 'DOCUMENT_READ_NO_PROGRESS'
+        return ''
 
     @property
     def pending(self):
@@ -227,6 +229,12 @@ class DocumentReadLedger:
                 self.attempts[key] = self.attempts.get(key, 0) + 1
 
     def observe(self, name, payload, content, success):
+        if name.endswith(('read_document_chunks', 'read_range', 'aggregate', 'parse_documents')):
+            key = name + json.dumps(payload, sort_keys=True, ensure_ascii=False)
+            result = hashlib.sha256(json.dumps(result_objects(content), sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+            previous, count = self.request_results.get(key, ('', 0))
+            self.request_results[key] = (result, count + 1 if previous == result else 1)
+            self.request_errors[key] = result_error(content)
         values = result_objects(content)
         code = result_error(content)
         if code == "DOCUMENT_ARGUMENT_INVALID" and name.endswith(("parse_documents", "read_range", "aggregate", "read_document_chunks")):
@@ -613,49 +621,33 @@ class DocumentReadLedger:
             if isinstance(hit, Mapping) and hit.get("sheet") in doc.inventory:
                 doc.touched.add(hit["sheet"])
 
-    def declaration_conflict(self, text):
-        """Check affirmative claims separately; a disclaimer cannot license a later claim."""
-        if not isinstance(text, str):
-            return ""
-        text = re.sub(r'(?:原文(?:写着|写道|为)|引用|措辞为)[：:]?\s*[“「][^”」]*[”」]', '', text)
-        # Commas inside an explicit row total are numeric separators, not
-        # independent claims (e.g. 合计7,445条).
-        text = re.sub(r"((?:合计|总计)\s*)(\d{1,3}(?:[,，]\d{3})+)(\s*[条行笔项])",
-                      lambda match: match[1] + re.sub(r"[,，]", "", match[2]) + match[3], text)
-        for clause, table_header in _claim_units(text):
-            clause = clause.strip()
-            # Only explicit scope exclusions are exempt. Do not skip an entire
-            # answer or a clause containing a later affirmative assertion.
-            clause = re.sub(r'(?:尚未|还未|没有|未能|无法|不能)(?:完成)?(?:完整读取|读完|读取全部内容|完整分析)', '', clause)
-            clause = re.sub(r'(?:不代表|不涵盖|不包含|未覆盖|不涉及)(?:全部|所有)工作表', '', clause)
-            conflict = self._clause_conflict(clause, table_header=table_header)
-            if conflict:
-                return conflict
-        return ""
+    def evidence_snapshot(self):
+        """Describe observed scope; never claim to verify free-form assertions."""
+        return {
+            'documents': [{
+                'file_id': doc.file_id, 'complete': doc.complete,
+                'inventory_complete': doc.inventory_complete,
+                'sheets': [{'name': name, 'total_rows': total,
+                            'covered_ranges': [list(pair) for pair in doc.covered.get(name, [])],
+                            'complete': doc.sheet_full(name)}
+                           for name, total in doc.inventory.items()],
+                'chunks_read': len(doc.chunks), 'chunks_total': doc.total,
+                'statistics': [{key: value for key, value in evidence.items()
+                                if key in {'sources', 'metrics', 'filter', 'group_by', 'rows_matched'}}
+                               for evidence in doc.aggregates],
+                'pending_statistics': bool(doc.aggregate_stalls),
+            } for doc in self.documents.values()],
+            'gaps': self.unfinished_scopes(),
+        }
 
-    def _clause_conflict(self, text, *, table_header=""):
-        """Raw coverage and scoped aggregate evidence prove different claims."""
-        if not isinstance(text, str) or not any(key in text for key in FULL_CLAIM_KEYWORDS):
-            return ""
-        claim_all = any(key in text for key in ALL_SHEET_KEYWORDS)
-        if claim_all and self.failures:
-            return "DOCUMENT_READ_INCOMPLETE"
-        for doc in self.documents.values():
-            if not doc.structured:
-                if not doc.complete:
-                    return "DOCUMENT_READ_INCOMPLETE"
-                continue
-            if claim_all and not doc.inventory_complete:
-                return "DOCUMENT_READ_INCOMPLETE"
-            named = _mentioned_names(doc.inventory, text)
-            required = set(doc.inventory) if claim_all else (named or doc.touched)
-            if not required:
-                return "DOCUMENT_READ_INCOMPLETE"
-            if all(doc.sheet_full(name) for name in required):
-                continue
-            if not _statistic_supported(doc, required, text, claim_all, table_header=table_header):
-                return "DOCUMENT_READ_INCOMPLETE"
-        return ""
+    def sources_complete(self, file_ids):
+        for file_id in file_ids:
+            matching = [doc for doc in self.documents.values() if doc.file_id == file_id]
+            if not matching or not all(doc.complete for doc in matching):
+                return False
+            if 'parse:' + file_id in self.failures:
+                return False
+        return True
 
     def independent_scopes(self):
         """Only full documents, whole sheets or verified statistics support a partial handoff."""
@@ -694,8 +686,7 @@ class DocumentReadLedger:
     def permits_scoped_answer(self, text):
         if any(code in FILE_POLICY_CODES or code == 'MINERU_SUBMIT_AMBIGUOUS' for code in self.failures.values()):
             return False
-        return bool(self.independent_scopes() and self.unfinished_scopes() and text.strip()
-                    and not self.declaration_conflict(text))
+        return bool(self.independent_scopes() and self.unfinished_scopes() and text.strip())
 
     def recover_sources(self, file_ids, *, preserve_file_id=""):
         for file_id in file_ids:
@@ -707,131 +698,3 @@ class DocumentReadLedger:
                     del self.documents[ref]
                     self.failures.pop("read:" + ref, None)
                     self._clear_aggregate_reference(ref)
-
-
-_STATISTIC_WORDS = {"sum": ("合计", "总计", "总和"), "avg": ("平均",), "median": ("中位数",),
-                    "count": ("数量", "计数"), "count_distinct": ("去重数量",), "min": ("最小",), "max": ("最大",)}
-
-
-def _claim_units(text):
-    """Keep a Markdown table with its own header; never borrow adjacent prose."""
-    lines = text.splitlines()
-    index = 0
-    while index < len(lines):
-        header = lines[index].strip()
-        if (header.startswith('|') and header.endswith('|') and index + 1 < len(lines)
-                and re.fullmatch(r'\s*\|(?:\s*:?-{3,}:?\s*\|)+\s*', lines[index + 1])
-                and header.count('|') == lines[index + 1].count('|')):
-            end = index + 2
-            while end < len(lines) and lines[end].strip().startswith('|') and lines[end].strip().endswith('|'):
-                end += 1
-            yield '\n'.join(lines[index:end]), header
-            index = end
-        else:
-            for clause in re.split(r'[。！？；;，,]|但是|但|然而', lines[index]):
-                yield clause, ''
-            index += 1
-
-
-def _mentioned_names(names, text):
-    # Longest names first: 金额#2 must not also match the distinct 金额 column.
-    found = set()
-    for name in sorted(names, key=len, reverse=True):
-        if name in text:
-            found.add(name)
-            text = text.replace(name, "")
-    return found
-
-
-def _table_columns(header, names):
-    """Resolve display labels like 金额合计（元） against actual column names.
-
-    Do not strip units or guess aliases: only an inserted statistic word is
-    removable, and ambiguous labels remain unsupported.
-    """
-    resolved, functions = set(), set()
-    for cell in header.strip('|').split('|'):
-        label = cell.strip().strip('*').strip()
-        if label in names:
-            resolved.add(label)
-            continue
-        candidates = set()
-        for name in names:
-            unit = re.search(r'[（(][^（）()]+[）)]$', name)
-            stem, suffix = (name[:unit.start()], unit[0]) if unit else (name, '')
-            for fn, words in _STATISTIC_WORDS.items():
-                if any(label in (word + name, name + word, stem + word + suffix) for word in words):
-                    candidates.add((name, fn))
-        if len(candidates) == 1:
-            functions.update(candidates)
-            resolved.update(name for name, _ in candidates)
-        elif candidates:
-            return None
-        elif any(word in label for words in _STATISTIC_WORDS.values() for word in words):
-            return None
-    return resolved, functions
-
-
-def _statistic_supported(doc, required, text, claim_all, *, table_header=""):
-    if any(word in text for word in ("读完", "完整读取", "全部内容", "全文", "全量明细", "完整分析")):
-        return False
-    for evidence in doc.aggregates:
-        sources = evidence["sources"]
-        if {source["sheet"] for source in sources if doc.inventory[source["sheet"]] > 0} != {name for name in required if doc.inventory[name] > 0}:
-            continue
-        rule = evidence.get("filter")
-        if rule:
-            # Filtered totals need an explicit filter in the claim, and can
-            # never establish an unqualified full-sheet/workbook conclusion.
-            words = {"eq": ("等于", "为", "="), "ne": ("不等于", "不为", "!="),
-                     "gt": ("大于", ">"), "gte": ("大于等于", ">="), "lt": ("小于", "<"),
-                     "lte": ("小于等于", "<="), "contains": ("包含",)}.get(rule.get("op"), ())
-            if claim_all or not any(str(rule.get("column")) + word + str(rule.get("value")) in text for word in words):
-                continue
-        if any(source["range"] != [1, doc.inventory[source["sheet"]]] and
-               not re.search(r"第?" + str(source["range"][0]) + r"[–—~至-]" + str(source["range"][1]) + r"行", text)
-               for source in sources):
-            continue
-        metrics = evidence.get("metrics") or []
-        groups = evidence.get("group_by") or []
-        group_scope = table_header or text
-        if groups and ((not table_header and not any(word in text for word in ("分组", "按", "汇总", "统计", "分布")))
-                       or any(group not in group_scope for group in groups)):
-            continue
-        allowed = {m.get("column") for m in metrics} | set(groups)
-        if rule:
-            allowed.add(rule.get("column"))
-        column_names = doc.column_names | {name for name in allowed if isinstance(name, str)}
-        mentioned_columns = _mentioned_names(column_names, text.replace(table_header, '', 1) if table_header else text)
-        if table_header:
-            table_columns = _table_columns(table_header, column_names)
-            if table_columns is None:
-                continue
-            names, functions = table_columns
-            if not functions.issubset({(m.get('column'), m.get('fn')) for m in metrics}):
-                continue
-            mentioned_columns.update(names)
-        if mentioned_columns - allowed:
-            continue
-        # Normalize only the adjacent count-total phrase. An additional sum
-        # claim elsewhere in this clause must still have independent evidence.
-        function_text = re.sub(r"(数量|计数)(?:合计|总计)", r"\1", text)
-        row_totals = re.findall(r"(?:合计|总计)\s*(\d{1,12})\s*[条行笔项]", text)
-        if row_totals:
-            function_text = re.sub(r"(?:合计|总计)\s*\d{1,12}\s*[条行笔项]", "计数", function_text)
-        claimed_functions = {fn for fn, words in _STATISTIC_WORDS.items() if any(word in function_text for word in words)}
-        if "去重数量" in text and "数量" not in text.replace("去重数量", ""):
-            claimed_functions.discard("count")
-        if not claimed_functions.issubset({m.get("fn") for m in metrics}):
-            continue
-        if (row_totals and type(evidence.get("rows_matched")) is int
-                and any(int(value) != evidence["rows_matched"] for value in row_totals)):
-            continue
-        if (row_totals and not groups and claimed_functions == {"count"}
-                and type(evidence.get("rows_matched")) is int
-                and all(int(value) == evidence["rows_matched"] for value in row_totals)):
-            return True
-        mentioned = [metric for metric in metrics if metric.get("column") in mentioned_columns]
-        if mentioned and all(any(word in text for word in _STATISTIC_WORDS.get(metric.get("fn"), ())) for metric in mentioned):
-            return True
-    return False

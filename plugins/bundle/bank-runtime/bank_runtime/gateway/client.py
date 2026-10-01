@@ -29,7 +29,7 @@ _RESULT_ATTEMPTS = 3
 class GatewayError(RuntimeError):
     """Gateway mediation failed safely."""
 
-    def __init__(self, message: str, *, code: str = "", violation: str = "", validation_hint: str = "", layout_failure: tuple[int, str] | None = None, conversion_failure: str = "") -> None:
+    def __init__(self, message: str, *, code: str = "", violation: str = "", validation_hint: str = "", layout_failure: tuple[int, str] | None = None, conversion_failure: str = "", failure_metadata: Mapping[str, Any] | None = None) -> None:
         super().__init__(message)
         self.code = str(code or "")
         self.violation = str(violation or "")
@@ -37,6 +37,16 @@ class GatewayError(RuntimeError):
         self.conversion_failure = conversion_failure if isinstance(conversion_failure, str) and conversion_failure in REASONS else ""
         self.validation_hint = str(validation_hint or "")[:500] if code == "ARTIFACT_VALIDATION_FAILED" else ""
         self.layout_failure = layout_failure
+        supplied_facts = dict(failure_metadata or {})
+        for key in ("details", "result"):
+            if isinstance(supplied_facts.get(key), Mapping):
+                supplied_facts.update(supplied_facts[key])
+        self.recovery_stop_explicit = supplied_facts.get("retryable") is False
+        from ..presentation import failure_metadata as project_failure_metadata
+        self.failure_metadata = project_failure_metadata({
+            **dict(failure_metadata or {}), "error_code": self.code,
+        })
+        self.execution_status = self.failure_metadata["execution_status"]
 
 
 @dataclass(frozen=True)
@@ -234,9 +244,13 @@ class GatewayClient:
         }
         response = await self._post(payload)
         if response.get("tool_call_id") != payload["tool_call_id"]:
-            raise GatewayError("Runtime tool execution acknowledgement is invalid")
+            raise GatewayError("Runtime tool execution acknowledgement is invalid", failure_metadata={
+                "execution_status": "execution_unknown", "retryable": False,
+            })
         if response.get("status") not in {"success", "failed", "blocked"}:
-            raise GatewayError("Runtime tool execution result is invalid")
+            raise GatewayError("Runtime tool execution result is invalid", failure_metadata={
+                "execution_status": "execution_unknown", "retryable": False,
+            })
         return response
 
     async def report_result(
@@ -307,6 +321,11 @@ class GatewayClient:
         return f"{self.config.base_url}{self.config.endpoint}"
 
     async def _post(self, payload: dict[str, Any]) -> dict[str, Any]:
+        # A missing execute response is not evidence that the write did not run.
+        transport_failure = {
+            "execution_status": "not_started" if payload.get("phase") == "preflight" else "execution_unknown",
+            "retryable": False,
+        }
         try:
             async with httpx.AsyncClient(
                 timeout=httpx.Timeout(300 if payload.get("phase") == "execute" else 10, connect=10),
@@ -322,15 +341,16 @@ class GatewayClient:
                     },
                 )
         except httpx.HTTPError as exc:
-            raise GatewayError("Runtime Tool Gateway request failed") from exc
+            raise GatewayError("Runtime Tool Gateway request failed", failure_metadata=transport_failure) from exc
         try:
             body = response.json()
         except ValueError as exc:
-            raise GatewayError("Runtime Tool Gateway response is invalid") from exc
+            raise GatewayError("Runtime Tool Gateway response is invalid", failure_metadata=transport_failure) from exc
         if not isinstance(body, dict):
-            raise GatewayError("Runtime Tool Gateway response is invalid")
+            raise GatewayError("Runtime Tool Gateway response is invalid", failure_metadata=transport_failure)
         if response.status_code >= 400:
-            raise _response_error(body, "Runtime Tool Gateway request failed")
+            raise _response_error(body, "Runtime Tool Gateway request failed",
+                                  execution_status="not_started" if payload.get("phase") == "preflight" else None)
         return body
 
     async def _flush_pending_results(self) -> None:
@@ -357,7 +377,7 @@ class GatewayClient:
         await self.outbox.flush(self.config.task_id, sender)
 
 
-def _response_error(payload: Mapping[str, Any], fallback: str) -> GatewayError:
+def _response_error(payload: Mapping[str, Any], fallback: str, *, execution_status: str | None = None) -> GatewayError:
     detail = payload.get("detail")
     if not isinstance(detail, Mapping):
         detail = payload
@@ -373,6 +393,12 @@ def _response_error(payload: Mapping[str, Any], fallback: str) -> GatewayError:
         and details.get("element") in ("text", "title", "chart_conclusion")
     ):
         location = (details["page_index"], details["element"])
+    metadata = {**detail, **details}
+    if execution_status is not None:
+        metadata["execution_status"] = execution_status
+    if location is not None:
+        metadata.update(execution_status="failed", retryable=False,
+                        recovery_action="renderer_exhausted")
     return GatewayError(
         str(detail.get("message") or fallback),
         code=str(detail.get("code") or ""),
@@ -380,6 +406,7 @@ def _response_error(payload: Mapping[str, Any], fallback: str) -> GatewayError:
         validation_hint=str(details.get("validation_hint") or ""),
         layout_failure=location,
         conversion_failure=details.get("reason", ""),
+        failure_metadata=metadata,
     )
 
 

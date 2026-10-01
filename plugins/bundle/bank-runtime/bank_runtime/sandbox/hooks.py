@@ -250,7 +250,7 @@ def _sandbox_guidance(current_count: int, installed_names: set[str]) -> str:
         guidance.extend(
             [
                 f"- Search only metadata for earlier conversation or assistant files; current and selected files together must not exceed {MAX_TASK_FILES}.",
-                "- If a selected historical file is actually used, end the answer with a '参考文件' section listing its display name.",
+                "- If a selected historical file is actually used, cite it by listing its display name and available location; follow current presentation requests and applicable citation preferences, without inventing locations or omitting necessary evidence.",
             ]
         )
     return "\n".join(guidance)
