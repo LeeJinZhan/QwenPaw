@@ -146,6 +146,7 @@ def build_ingress_router() -> APIRouter:
             lambda item: project_sse_stream(
                 channel.stream_one(item),
                 runtime_task_id,
+                str(getattr(agent_request, "trace_id", "") or ""),
             ),
             owner=workspace,
         )

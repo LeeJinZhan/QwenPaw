@@ -431,14 +431,65 @@ class _MCPClientMixin:
         self._validate_connection()
 
         try:
-            from ..mcp_context import current_mcp_metadata, current_mcp_timeout
+            from ..mcp_context import (
+                current_mcp_metadata,
+                current_mcp_request_observer,
+                current_mcp_timeout,
+            )
             options = {}
             metadata = current_mcp_metadata()
             if metadata:
                 options["meta"] = metadata
             if current_mcp_timeout() is not None:
                 options["read_timeout_seconds"] = current_mcp_timeout()
-            return await self.session.call_tool(name, arguments or {}, **options)
+            observer = current_mcp_request_observer()
+            if observer is None:
+                return await self.session.call_tool(name, arguments or {}, **options)
+
+            # One record per actual session dispatch. A failed connection check
+            # or a Gateway preflight denial never reaches this point.
+            from datetime import datetime, timezone
+            import time
+            import uuid
+
+            request_id = str(uuid.uuid4())
+            sent_at = datetime.now(timezone.utc).isoformat()
+            started = time.monotonic()
+            terminal_status = "error"
+            error_code = "MCP_REQUEST_FAILED"
+            try:
+                result = await self.session.call_tool(name, arguments or {}, **options)
+                if bool(getattr(result, "isError", False)):
+                    error_code = "MCP_RESULT_ERROR"
+                else:
+                    terminal_status = "success"
+                    error_code = ""
+                return result
+            except asyncio.CancelledError:
+                terminal_status = "cancelled"
+                error_code = "MCP_REQUEST_CANCELLED"
+                raise
+            except (asyncio.TimeoutError, TimeoutError):
+                error_code = "MCP_TIMEOUT"
+                raise
+            except (ConnectionError, BrokenPipeError):
+                error_code = "MCP_TRANSPORT_ERROR"
+                raise
+            finally:
+                try:
+                    observer({
+                        "request_id": request_id,
+                        "server_code": str(self.name),
+                        "tool_code": str(name),
+                        "sent_at_utc": sent_at,
+                        "ended_at_utc": datetime.now(timezone.utc).isoformat(),
+                        "duration_ms": max(0, round((time.monotonic() - started) * 1000)),
+                        "terminal_status": terminal_status,
+                        "error_code": error_code,
+                    })
+                except Exception:
+                    # Telemetry must never change the outcome of a tool call.
+                    pass
         except Exception as exc:
             self._handle_transport_error(exc)
             raise

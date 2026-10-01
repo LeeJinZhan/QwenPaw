@@ -10,6 +10,8 @@ from typing import Any
 from .public_thinking import PublicThinkingStream
 from .delivery_state import DeliveryState, delivery_scope, current_delivery_state
 
+_OPERATION_CODE = re.compile(r"[A-Za-z0-9_.:/-]{1,128}\Z")
+
 _TERMINAL_EVENTS = {"answer.completed", "answer.failed"}
 _CODE_EXAMPLE = re.compile(r"(`+).*?(?:\1|$)", re.DOTALL)
 _THINK_MARKUP = re.compile(r"(?<!\\)</?think>", re.IGNORECASE)
@@ -308,12 +310,45 @@ def _decode_sse_block(block: str) -> list[dict[str, Any]]:
     return events
 
 
+def _operation_code(value: Any) -> str:
+    """Only identifiers, never arguments, URLs with query strings, or bodies."""
+    candidate = value if isinstance(value, str) else ""
+    if "://" in candidate or "//" in candidate:
+        return ""
+    return candidate if _OPERATION_CODE.fullmatch(candidate) else ""
+
+
+def _record_mcp_request(state: DeliveryState, fact: dict[str, Any]) -> None:
+    event = {
+        "event_type": "mcp.request.completed",
+        "request_id": _operation_code(fact.get("request_id")),
+        "task_id": state.task_id,
+        "server_code": _operation_code(fact.get("server_code")),
+        "tool_code": _operation_code(fact.get("tool_code")),
+        "sent_at_utc": fact.get("sent_at_utc"),
+        "ended_at_utc": fact.get("ended_at_utc"),
+        "duration_ms": fact.get("duration_ms"),
+        "terminal_status": fact.get("terminal_status"),
+        "error_code": fact.get("error_code"),
+    }
+    if state.trace_id:
+        event["trace_id"] = _operation_code(state.trace_id)
+    state.operations_events.append(event)
+
+
+def _drain_operations_events(state: DeliveryState) -> list[str]:
+    events = state.operations_events[:]
+    state.operations_events.clear()
+    return [_encode({"metadata": {"runtime_event": event}}) for event in events]
+
+
 async def project_sse_stream(
     source: AsyncIterable[str],
     runtime_task_id: str,
+    trace_id: str = "",
 ) -> AsyncIterator[str]:
     """Project an upstream SSE stream while preserving disconnect semantics."""
-    state = DeliveryState(runtime_task_id)
+    state = DeliveryState(runtime_task_id, trace_id=_operation_code(trace_id))
     projector = CompactEventProjector(runtime_task_id, state)
     public_thinking = PublicThinkingStream()
     yield _encode(
@@ -327,11 +362,24 @@ async def project_sse_stream(
     try:
         buffer = ""
         while True:
-            with delivery_scope(state):
-                try:
+            from qwenpaw.drivers.mcp_context import observe_mcp_requests
+
+            try:
+                with delivery_scope(state), observe_mcp_requests(
+                    lambda fact: _record_mcp_request(state, fact)
+                ):
                     item = await anext(iterator)
-                except StopAsyncIteration:
-                    break
+            except StopAsyncIteration:
+                break
+            except (Exception, asyncio.CancelledError):
+                # A completed MCP call can be followed by an upstream failure
+                # before the next native SSE item. Preserve its bounded fact
+                # before propagating the original failure/cancellation.
+                for operation in _drain_operations_events(state):
+                    yield operation
+                raise
+            for operation in _drain_operations_events(state):
+                yield operation
             # Native cleanup can swallow cancellation and yield a completed envelope.
             # Cancellation belongs to this producer task, not the SSE subscriber.
             task = asyncio.current_task()
@@ -350,6 +398,8 @@ async def project_sse_stream(
                 for event in projector.project(raw_event):
                     for public in public_thinking.project(event):
                         yield _encode(public)
+        for operation in _drain_operations_events(state):
+            yield operation
         for event in projector.finish():
             for public in public_thinking.project(event):
                 yield _encode(public)

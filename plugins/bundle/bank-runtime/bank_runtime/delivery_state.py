@@ -7,6 +7,8 @@ from dataclasses import dataclass, field
 class DeliveryState:
     task_id: str
     analysis: dict = field(default_factory=dict)
+    trace_id: str = ""
+    operations_events: list[dict] = field(default_factory=list)
 
 _STATE = ContextVar('bank_runtime_delivery_state', default=None)
 

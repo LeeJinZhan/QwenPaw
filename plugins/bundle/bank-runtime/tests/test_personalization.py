@@ -21,6 +21,7 @@ from bank_runtime.personal_skills import (
     PersonalSkillsRegistry,
     activate_personal_skill,
 )
+from bank_runtime.delivery_state import DeliveryState, delivery_scope
 from bank_runtime.personalization import (
     BankRuntimePersonalizationCleanupHook,
     BankRuntimePersonalizationHook,
@@ -249,6 +250,42 @@ async def test_personal_skill_url_and_redirect_fail_closed(
     if expected in {"HTTPS", "host"}:
         assert calls == 0
     assert "secret=token" not in result
+
+
+@pytest.mark.asyncio
+async def test_personal_skill_activation_records_only_catalog_metadata(monkeypatch):
+    monkeypatch.setenv("PERSONAL_SKILLS_ALLOWED_OSS_HOSTS", "oss.example.com")
+    content = _skill_bytes(body="# secret body\n")
+    catalog, manifest = _skill_payloads(content)
+
+    async def fetch(url, max_bytes):
+        return DownloadedPersonalSkill(content, url, False)
+
+    registry = PersonalSkillsRegistry.from_payloads(catalog, manifest, fetcher=fetch)
+    state = DeliveryState("task-001")
+    with delivery_scope(state):
+        assert "secret body" in await registry.activate("personal:skill_001")
+        await registry.activate("personal:skill_001")
+    assert len(state.operations_events) == 1
+    event = state.operations_events[0]
+    assert event["event_type"] == "personal_skill.activated"
+    assert event["result"] == "activated"
+    assert event["skill_id"] == "skill_001"
+    assert event["version_no"] == 3
+    assert event["content_hash"] == hashlib.sha256(content).hexdigest()
+    assert "secret body" not in str(event)
+    assert "secret=token" not in str(event)
+
+    async def failed_fetch(url, max_bytes):
+        raise RuntimeError("secret failure message")
+
+    failed = PersonalSkillsRegistry.from_payloads(catalog, manifest, fetcher=failed_fetch)
+    state = DeliveryState("task-002")
+    with delivery_scope(state):
+        await failed.activate("personal:skill_001")
+    assert state.operations_events[0]["event_type"] == "personal_skill.load_failed"
+    assert state.operations_events[0]["result"] == "load_failed"
+    assert "secret failure message" not in str(state.operations_events)
 
 
 @pytest.mark.parametrize("field", ["version_no", "content_hash", "size_bytes"])

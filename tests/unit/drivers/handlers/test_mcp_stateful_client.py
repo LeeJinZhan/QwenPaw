@@ -569,3 +569,69 @@ async def test_document_call_timeout_is_request_local_and_not_model_arguments():
         await c.call_tool('aggregate',{})
     await c.call_tool('aggregate',{})
     assert calls==[{'read_timeout_seconds':timedelta(seconds=1200)},{}]
+
+
+@pytest.mark.asyncio
+async def test_mcp_observer_records_only_dispatched_attempts_without_bodies():
+    from qwenpaw.drivers.mcp_context import observe_mcp_requests
+
+    client = _client()
+    client.is_connected = True
+    observed = []
+    calls = []
+
+    class Session:
+        async def call_tool(self, name, arguments, **kwargs):
+            calls.append((name, arguments, kwargs))
+            if len(calls) == 1:
+                raise ValueError("private-result-body")
+            return type("Result", (), {"isError": False})()
+
+    client.session = Session()
+    with observe_mcp_requests(observed.append):
+        with pytest.raises(ValueError, match="private-result-body"):
+            await client.call_tool("read", {"secret": "private-argument-body"})
+        await client.call_tool("read", {"secret": "private-argument-body"})
+    assert len(observed) == 2
+    assert observed[0]["request_id"] != observed[1]["request_id"]
+    assert [item["terminal_status"] for item in observed] == ["error", "success"]
+    assert [item["error_code"] for item in observed] == ["MCP_REQUEST_FAILED", ""]
+    assert all(item["duration_ms"] >= 0 for item in observed)
+    assert "private-argument-body" not in str(observed)
+    assert "private-result-body" not in str(observed)
+    assert len(calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_mcp_observer_distinguishes_result_error_and_cancel_without_preflight():
+    from qwenpaw.drivers.mcp_context import observe_mcp_requests
+
+    client = _client()
+    observed = []
+    with observe_mcp_requests(observed.append):
+        with pytest.raises(RuntimeError, match="not connected"):
+            await client.call_tool("read", {})
+    assert observed == []
+
+    client.is_connected = True
+
+    class ErrorSession:
+        async def call_tool(self, name, arguments, **kwargs):
+            return type("Result", (), {"isError": True})()
+
+    client.session = ErrorSession()
+    with observe_mcp_requests(observed.append):
+        await client.call_tool("read", {})
+    assert observed[-1]["terminal_status"] == "error"
+    assert observed[-1]["error_code"] == "MCP_RESULT_ERROR"
+
+    class CancelSession:
+        async def call_tool(self, name, arguments, **kwargs):
+            raise asyncio.CancelledError()
+
+    client.session = CancelSession()
+    with observe_mcp_requests(observed.append):
+        with pytest.raises(asyncio.CancelledError):
+            await client.call_tool("read", {})
+    assert observed[-1]["terminal_status"] == "cancelled"
+    assert observed[-1]["error_code"] == "MCP_REQUEST_CANCELLED"

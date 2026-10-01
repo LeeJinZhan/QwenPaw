@@ -3,6 +3,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 
 _metadata = ContextVar("mcp_call_metadata", default=None)
+_request_observer = ContextVar("mcp_request_observer", default=None)
 
 def current_mcp_metadata():
     value = _metadata.get()
@@ -15,6 +16,20 @@ def mcp_call_metadata(value):
         yield
     finally:
         _metadata.reset(token)
+
+
+@contextmanager
+def observe_mcp_requests(observer):
+    """Observe physical requests for an opted-in caller, without changing MCP wire data."""
+    token = _request_observer.set(observer)
+    try:
+        yield
+    finally:
+        _request_observer.reset(token)
+
+
+def current_mcp_request_observer():
+    return _request_observer.get()
 
 _timeout = ContextVar("mcp_call_timeout", default=None)
 
