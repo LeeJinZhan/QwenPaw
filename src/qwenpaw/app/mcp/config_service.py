@@ -180,6 +180,10 @@ class MCPConfigService:
         except HTTPException:
             return []
 
+    async def wait_for_reloads(self) -> None:
+        """Await native client activation before publishing a strict policy."""
+        await self._driver_config.wait_for_reloads()
+
     async def get_policy(self, client_key: str) -> MCPAccessPolicy:
         return mcp_access_policy_from_card(await self.load_card(client_key))
 

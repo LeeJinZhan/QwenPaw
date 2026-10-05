@@ -86,6 +86,8 @@ def _validated_chat_request(
 
 def build_ingress_router() -> APIRouter:
     router = APIRouter()
+    from .classification_operations import build_classification_router
+    router.include_router(build_classification_router())
 
     @router.get("/health")
     @router.get("/agents/{agent_id}/health")
