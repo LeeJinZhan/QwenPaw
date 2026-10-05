@@ -4,19 +4,22 @@ Schema is descriptive at the MCP boundary: validate original arguments only
 AFTER the one-use authorization digest has been consumed. Never coerce or add
 nested defaults before that boundary.
 """
-FUNCTIONS = ['sum', 'avg', 'count', 'count_distinct', 'min', 'max', 'median']
+FUNCTIONS = ['sum', 'avg', 'count', 'count_rows', 'count_nonempty', 'count_numeric', 'count_distinct', 'min', 'max', 'median']
 FILTERS = ['eq', 'ne', 'gt', 'gte', 'lt', 'lte', 'contains', 'in']
 _DETAILS = {
+    'CHUNK_CURSOR': ('cursor', '正文分块第一页使用 cursor=null；后续只原样复制正文结果的 next_cursor。next_inventory_cursor 是清单页码，请使用 read_range(format="inventory", row_cursor=next_inventory_cursor)，不能放入正文 cursor。'),
+    'CHUNK_LIMIT': ('limit', '正文分块 limit 必须为 1–10 的整数，默认 5；保留有效 document_ref 和正文 next_cursor，修正 limit 后重试。'),
     'PARSE_DOCUMENTS': ('documents', 'documents 为 1–5 个对象，每项使用当前附件的 file_id；银行 Gateway 可补全省略的 file_ref。不要增加路径或 URL 字段。'),
     'PARSE_METHOD': ('parse_method', 'parse_method 仅支持 auto、ocr、txt；一般保留默认 auto。'),
     'PARSE_LANGUAGE': ('language', 'language 仅支持 auto、zh、en；一般保留默认 auto。'),
-    'PARSE_OPTIONS': ('options', 'options 仅使用 tables、formulas 布尔值；不确定时省略 options。'),
+    'PARSE_OPTIONS': ('options', 'options 使用 tables、formulas、image_text 布尔值，header_row 为头行整数或工作表名到头行的映射（* 为默认）；0 表示无头行。'),
     'OPS': ('ops', 'ops 必须包含 1–10 个统计操作对象。'),
-    'OP_FIELDS': ('ops[]', '只使用 sheet、metrics、group_by、filter、row_range、group_cursor、cross_sheet_union 字段。'),
+    'OP_FIELDS': ('ops[]', '只使用 sheet、metrics、group_by、filter、row_range、group_cursor、cross_sheet_union、numeric_text 字段。'),
     'METRICS': ('ops[].metrics', 'metrics 必须是非空对象数组，每项指定 column 和 fn。'),
     'METRIC_FUNCTION_FIELD': ('ops[].metrics[].fn', '统计函数字段是 fn，不是 op。例如 {"column":"实际列名","fn":"count"}；仅 filter 使用 op。'),
-    'METRIC_FUNCTION': ('ops[].metrics[].fn', 'fn 仅支持 sum、avg、count、count_distinct、min、max、median。'),
+    'METRIC_FUNCTION': ('ops[].metrics[].fn', 'fn 支持 sum、avg、count、count_rows、count_nonempty、count_numeric、count_distinct、min、max、median；count 与 count_rows 都计匹配行。'),
     'METRIC_COLUMN': ('ops[].metrics[].column', 'column 必须精确复制该工作表 inventory 的列名；count 也需要有效列名，不接受 *。'),
+    'COLUMNS': ('columns', 'columns 必须是不重复的 inventory 列名。'),
     'METRIC_FIELDS': ('ops[].metrics[]', '每个 metric 只使用 column 和 fn，不使用别名字段。'),
     'GROUP_BY': ('ops[].group_by', 'group_by 必须是不重复的已有列名数组；列名从该工作表 inventory 复制。'),
     'FILTER': ('ops[].filter', 'filter 使用 {"column":"实际列名","op":"eq","value":"筛选值"}；op 为 eq/ne/gt/gte/lt/lte/contains/in，in 的 value 必须是数组。'),
@@ -40,6 +43,7 @@ _MESSAGES = {
     'row range must be ordered positive integers':'ROW_RANGE',
     'sheet parameter is required for multi-sheet workbooks':'SHEET',
     'sheet is not in this workbook':'SHEET',
+    'columns must be unique existing names':'COLUMNS',
     'cross_sheet_union is invalid':'UNION',
     'union cannot also select sheet or row_range':'UNION',
     'Union metrics or groups are invalid':'METRICS',
@@ -63,6 +67,7 @@ AGGREGATE_OPS_SCHEMA = {
     'items':{
         'type':'object', 'additionalProperties':False, 'required':['metrics'],
         'properties':{
+            'numeric_text':{'type':'string', 'enum':['strict', 'thousands'], 'description':'Explicit numeric text rule. strict never strips thousands separators; thousands accepts correctly grouped commas.'},
             'sheet':{'type':'string', 'description':'Exact inventory sheet name; required for multi-sheet workbooks unless using cross_sheet_union.'},
             'metrics':{'type':'array', 'minItems':1, 'items':{
                 'type':'object', 'additionalProperties':False, 'required':['column','fn'],
@@ -74,7 +79,7 @@ AGGREGATE_OPS_SCHEMA = {
             'row_range':{'type':'array','minItems':2,'maxItems':2,'items':{'type':'integer','minimum':1}},
             'group_cursor':{'type':'integer','minimum':0},
             'cross_sheet_union':{'type':'object','additionalProperties':False,'required':['key_column'],
-                'properties':{'key_column':_COLUMN}},
+                'properties':{'key_column':_COLUMN, 'mode':{'enum':['append', 'deduplicate_rows'], 'description':'append retains every source row; deduplicate_rows removes identical aligned complete rows, never joins or deduplicates by key alone.'}}},
         },
     },
 }
@@ -86,6 +91,8 @@ def invalid_ops(ops):
         return 'OPS'
     for op in ops:
         if set(op) - AGGREGATE_OPS_SCHEMA['items']['properties'].keys():
+            return 'OP_FIELDS'
+        if op.get('numeric_text', 'strict') not in ('strict', 'thousands'):
             return 'OP_FIELDS'
         if op.get('sheet') is not None and not isinstance(op['sheet'], str):
             return 'SHEET'
@@ -118,7 +125,8 @@ def invalid_ops(ops):
             return 'GROUP_CURSOR'
         union = op.get('cross_sheet_union')
         if union is not None and union != {}:
-            if (not isinstance(union,dict) or set(union)!={'key_column'} or not isinstance(union['key_column'],str)
+            if (not isinstance(union,dict) or set(union)-{'key_column', 'mode'} or not isinstance(union.get('key_column'),str)
+                or union.get('mode', 'append') not in {'append', 'deduplicate_rows'}
                 or not union['key_column'] or rows is not None or op.get('sheet') not in (None,'','*')):
                 return 'UNION'
     return ''

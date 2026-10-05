@@ -90,6 +90,20 @@ def test_csv_inventory_and_range_paging(tmp_path) -> None:
     assert paged["rows_returned"][0] == 11
 
 
+def test_requested_range_completion_does_not_claim_whole_source_sheet(tmp_path):
+    store, handle = _parse_csv(tmp_path)
+    result = store.read_range(handle.document_ref, rows=[1, 60], format='source')
+    assert result['has_more'] is False
+    assert result['range_complete'] is True
+    assert result['sheet_complete'] is False
+    assert result['sheet_has_more'] is True
+    assert result['coverage'] == {'coordinate_space':'source','range':[1,60], 'total_rows':61,'all_columns':True}
+    full = store.read_range(handle.document_ref, rows=[1,61], format='source')
+    assert full['sheet_complete'] is True and full['sheet_has_more'] is False
+    subset = store.read_range(handle.document_ref, rows=[1,61], columns=['姓名'], format='source')
+    assert subset['range_complete'] is True and subset['sheet_complete'] is False
+
+
 def test_range_page_respects_char_budget(tmp_path) -> None:
     source = _source(tmp_path, "big.csv", ".csv", "text/csv")
     _write_csv(source.path, rows=4000)
@@ -102,7 +116,7 @@ def test_range_page_respects_char_budget(tmp_path) -> None:
     assert page["has_more"] is True
 
 
-def test_xlsx_merged_ranges_expand(tmp_path) -> None:
+def test_xlsx_merged_ranges_preserve_raw_anchor(tmp_path) -> None:
     source = _source(
         tmp_path,
         "book.xlsx",
@@ -117,7 +131,7 @@ def test_xlsx_merged_ranges_expand(tmp_path) -> None:
     sheet = store.inventory(handle.document_ref)["sheets"][0]
     assert sheet["merged_ranges"], "merged ranges must be preserved"
     page = store.read_range(handle.document_ref, sheet="支行01", rows=[1, 20])
-    assert page["markdown"].count("团队1") == 10, "row-span values must fill down"
+    assert page["markdown"].count("团队1") == 1, "Only the source anchor contains a value"
     assert page["sheet"] == "支行01"
 
 
@@ -130,7 +144,7 @@ def test_aggregate_metrics_median_filter_and_union(tmp_path) -> None:
     )
     _write_xlsx(source.path)
     work = tmp_path / "work"
-    inventory = extract_workbook(source.path, work, stem="file_001")
+    inventory = extract_workbook(source.path, work, stem="file_001", header_row=2)
     store = _store(tmp_path)
     handle = store.write(source, inventory, work)
     result = store.aggregate(
@@ -160,9 +174,9 @@ def test_aggregate_metrics_median_filter_and_union(tmp_path) -> None:
     assert union["rows_matched"] == 40
     first_group = grouped["groups"][0]
     assert first_group["group"]["岗位"] == "团队1"
-    assert first_group["营销笔数:sum"] == sum(range(3, 13))
-    assert first_group["营销金额:median"] == 15.0
-    assert first_group["姓名:count_distinct"] == 10
+    assert first_group["营销笔数:sum"] == 3
+    assert first_group["营销金额:median"] == 6.0
+    assert first_group["姓名:count_distinct"] == 1
 
 
 def test_aggregate_invalid_metric_rejected(tmp_path) -> None:
@@ -469,7 +483,7 @@ def test_delimited_quoted_cells_preserve_linebreaks_quotes_and_separators(tmp_pa
 def test_union_echoes_every_source_sheet_instead_of_first_sheet(tmp_path):
     source=_source(tmp_path,'book.xlsx','.xlsx','application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
     _write_xlsx(source.path)
-    work=tmp_path/'work'; inventory=extract_workbook(source.path,work,stem='f')
+    work=tmp_path/'work'; inventory=extract_workbook(source.path,work,stem='f',header_row=2)
     store=_store(tmp_path); handle=store.write(source,inventory,work)
     result=store.aggregate(handle.document_ref,[{'cross_sheet_union':{'key_column':'姓名'},'metrics':[{'column':'营销金额','fn':'sum'}]}])['results'][0]
     assert result['sheet'] == '*'

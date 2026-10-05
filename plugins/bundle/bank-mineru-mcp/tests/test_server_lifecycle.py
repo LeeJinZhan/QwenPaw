@@ -94,6 +94,7 @@ async def test_service_exposes_exact_native_mcp_tools_and_stops_idempotently() -
             await session.initialize()
             tools = await session.list_tools()
     assert [tool.name for tool in tools.tools] == [
+        "analyze",
         "parse_documents",
         "read_document_chunks",
         "read_range",

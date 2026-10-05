@@ -1,6 +1,10 @@
 """Fixed public recovery guidance; never expose exception text or paths."""
 _HINTS = {
-    "DOCUMENT_ARGUMENT_INVALID": "检查 inventory 中的工作表和列名；columns 不可重复，行范围须为正整数且起点不大于终点，metrics 须指定有效列和统计函数。修正参数后重试。",
+    "DOCUMENT_ENGINE_UNAVAILABLE": "隔离文件处理服务不可用，请联系管理员核对 Runtime、解析镜像和共享目录配置；不要改走宿主 Python 或任意路径。",
+    "DOCUMENT_QUEUE_TIMEOUT": "文件处理资源排队超时，请稍后重试；当前任务及授权期限不会因排队重新延长。",
+    "DOCUMENT_EXECUTION_TIMEOUT": "本次文件处理超过执行预算，请缩小明确的处理范围或调整受控容量配置；不能将部分结果称为完整结果。",
+    "DOCUMENT_ANALYSIS_FAILED": "受控 Python 分析未完成，请核对代码和表格 SDK 参数；可先通过固定读取或统计接口验证范围。",
+    "DOCUMENT_ARGUMENT_INVALID": "检查 inventory 中的工作表和列名；columns 不可重复，行范围须为正整数且起点不大于终点，metrics 须指定有效列和统计函数。清单 next_inventory_cursor 用于 read_range.row_cursor；正文首轮 cursor=null，后续只复制正文 next_cursor。保留有效 document_ref，修正参数后重试。",
     "DOCUMENT_FORMULA_CACHE_MISSING": "工作簿含缺失或错误的公式缓存。请在 Excel 中重新计算并保存，再上传文件；当前结果不能用于完整统计。",
     "DOCUMENT_REF_EXPIRED": "文档结果已过期，请使用当前任务的 file_id 和 file_ref 重新解析，再使用新 document_ref 读取。",
     "DOCUMENT_RESULT_TOO_LARGE": "结果超过预算；读取时使用目录分页、单元格分段或 group_cursor 分页；解析时核对容量配置与可用空间，避免反复转换文件。",

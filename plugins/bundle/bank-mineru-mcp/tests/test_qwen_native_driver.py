@@ -97,6 +97,7 @@ async def test_qwen_native_driver_exposes_display_namespace_without_mcp_prefix(
         capabilities = await manager.list_capabilities(kind="tool")
         assert [item.name for item in capabilities] == [
             "aggregate",
+            "analyze",
             "parse_documents",
             "read_document_chunks",
             "read_range",
@@ -104,6 +105,7 @@ async def test_qwen_native_driver_exposes_display_namespace_without_mcp_prefix(
         ]
         assert [item.exposure.tool_name for item in capabilities] == [
             "MinerU__aggregate",
+            "MinerU__analyze",
             "MinerU__parse_documents",
             "MinerU__read_document_chunks",
             "MinerU__read_range",
@@ -136,6 +138,23 @@ async def test_qwen_native_driver_exposes_display_namespace_without_mcp_prefix(
             )
         assert result.ok is True
         assert result.value.structuredContent == {"chunks": [], "next_cursor": None, "has_more": False}
+        # Exercise FastMCP's real callable boundary, which drops unknown root
+        # fields. Approved canonical parameters must be identical on both sides.
+        from bank_runtime.gateway.document_inputs import normalize_document_input
+        from bank_runtime.gateway.document_reads import DocumentReadLedger
+        aggregate_capability = next(item for item in capabilities if item.name == 'aggregate')
+        raw={'document_ref':'dr1_test','numeric_text':'thousands',
+            'ops':[{'sheet':'test','metrics':[{'column':'amount','fn':'sum'}]}]}
+        canonical={'document_ref':'dr1_test','ops':[{'sheet':'test','numeric_text':'thousands',
+            'metrics':[{'column':'amount','fn':'sum'}]}]}
+        assert normalize_document_input('MinerU__aggregate',raw,task_id='task_001',ledger=DocumentReadLedger()) == raw
+        with approved_document_call('task_001','aggregate',canonical):
+            result=await manager.invoke_capability(DriverInvocation(aggregate_capability.capability_id,canonical))
+        assert result.value.structuredContent == {'results':[]}
+        # A genuine mismatch is still denied; schema handling must not weaken MAC.
+        with approved_document_call('task_001','aggregate',raw):
+            result=await manager.invoke_capability(DriverInvocation(aggregate_capability.capability_id,raw))
+        assert result.value.structuredContent['error_code']=='FILE_ACCESS_DENIED'
     finally:
         await manager.shutdown_all()
         await server.stop()

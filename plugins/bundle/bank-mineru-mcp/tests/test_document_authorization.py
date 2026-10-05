@@ -110,8 +110,9 @@ async def test_real_mcp_current_task_authorization_and_source_lifecycle(tmp_path
                     denied = await call("task_b", "aggregate", bad)
                     assert denied["error_code"] == "FILE_ACCESS_DENIED"
                     assert "argument_error" not in denied
-                    alias_success = await invoke("aggregate", bad)
-                    assert alias_success["results"][0]["groups"][0]["amount:sum"] == 50
+                    alias_rejected = await invoke("aggregate", bad)
+                    assert alias_rejected["argument_error"]["reason"] == "METRIC_FUNCTION_FIELD"
+                    assert "results" not in alias_rejected
                     conflict = {"document_ref":ref,"ops":[{"metrics":[{"column":"amount","fn":"count","op":"sum"}]}]}
                     failed = await invoke("aggregate", conflict)
                     assert failed["argument_error"]["reason"] == "METRIC_FUNCTION_FIELD"

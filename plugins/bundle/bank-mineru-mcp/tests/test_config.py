@@ -34,7 +34,23 @@ def test_settings_load_bounded_environment_and_redact_token(
     assert settings.submit_mode == "file_parse"
     assert settings.token == "secret-value"
     assert settings.temp_ttl_seconds == 604800
+    assert settings.ocr_batch_size == 5
     assert "secret-value" not in repr(settings)
+
+
+@pytest.mark.parametrize("size", [1, 3, 5])
+def test_office_ocr_batch_size_environment(monkeypatch, tmp_path, size):
+    _environment(monkeypatch, tmp_path)
+    monkeypatch.setenv("BANK_READING_OCR_BATCH_SIZE", str(size))
+    assert MinerUSettings.from_environment().ocr_batch_size == size
+
+
+@pytest.mark.parametrize("size", ["0", "6", "1.5", "invalid"])
+def test_office_ocr_batch_size_rejects_unbounded_values(monkeypatch, tmp_path, size):
+    _environment(monkeypatch, tmp_path)
+    monkeypatch.setenv("BANK_READING_OCR_BATCH_SIZE", size)
+    with pytest.raises(MinerUConfigError, match="OCR batch"):
+        MinerUSettings.from_environment()
 
 
 def test_official_flash_settings_need_neither_token_nor_explicit_base_url(

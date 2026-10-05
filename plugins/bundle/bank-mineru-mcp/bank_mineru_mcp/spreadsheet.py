@@ -1,6 +1,6 @@
-"""Structured spreadsheet extraction with merged-range expansion.
+"""Streaming source facts and explicit analysis views, without merge filling.
 
-Structured formats (xlsx, csv, tsv) never go through MinerU layout parsing.
+Structured formats (xlsx, xls, csv, tsv) never go through MinerU layout parsing.
 This module streams sheets into bounded row-block files plus an inventory so
 read_range/aggregate/search can address sheets and row ranges directly.
 """
@@ -25,45 +25,56 @@ class SpreadsheetExtractError(RuntimeError):
 
 
 class SourceRow(list):
-    def __init__(self, values, invalid_columns=()):
+    def __init__(self, values, invalid_columns=(), cell_facts=None):
         super().__init__(values)
         self.invalid_columns = set(invalid_columns)
+        self.cell_facts = cell_facts or {}
 
 
 def extract_workbook(path: Path, target_dir: Path, *, stem: str,
-                     max_bytes: int = 2 * 1024**3, allow_partial: bool = False) -> dict[str, Any]:
+                     max_bytes: int = 2 * 1024**3, allow_partial: bool = False,
+                     header_row: int = 1) -> dict[str, Any]:
     """Spool one sheet at a time; neither rows nor column values accumulate."""
     target_dir.mkdir(parents=True, exist_ok=True)
+    headers = header_row if isinstance(header_row, dict) else {"*": header_row}
+    if (not headers or len(headers) > 1000 or any(not isinstance(name, str) or not name or
+            type(value) is not int or not 0 <= value <= 1_048_576 for name, value in headers.items())):
+        raise SpreadsheetExtractError("DOCUMENT_ARGUMENT_INVALID", "Invalid header row")
     suffix = path.suffix.lower()
     csv.field_size_limit(max_bytes)
     if suffix in {".csv", ".tsv"}:
         sheets = _stream_delimited(path, suffix)
     elif suffix == ".xlsx":
         sheets = _stream_xlsx(path, target_dir, allow_partial)
+    elif suffix == ".xls":
+        sheets = _stream_xls(path)
     else:
-        raise SpreadsheetExtractError("FILE_TYPE_UNSUPPORTED", "Structured extraction supports xlsx/csv/tsv")
+        raise SpreadsheetExtractError("FILE_TYPE_UNSUPPORTED", "Structured extraction supports xlsx/xls/csv/tsv")
     inventory_sheets = []
     used = 0
     try:
         for index, (name, rows, merged, quality) in enumerate(sheets):
-            meta, size = _spool_sheet(target_dir, index, name, rows, merged, quality, max_bytes - used)
+            selected_header = headers.get(name, headers.get("*", 1))
+            meta, size = _spool_sheet(target_dir, index, name, rows, merged, quality, max_bytes - used, selected_header)
             inventory_sheets.append(meta)
             used += size
     finally:
         sheets.close()
-    return {"engine": "ooxml-1" if suffix == ".xlsx" else "delimited-1",
-            "format_version": 2, "title": path.name, "sheet_count": len(inventory_sheets),
+    if set(headers) - {"*", *(sheet["name"] for sheet in inventory_sheets)}:
+        raise SpreadsheetExtractError("DOCUMENT_ARGUMENT_INVALID", "Header map names an absent sheet")
+    return {"engine": "table-facts-3", "value_semantics": "raw_anchor",
+            "source_format": suffix, "excluded": ["embedded_images"], "format_version": 3, "title": path.name, "sheet_count": len(inventory_sheets),
             "total_rows": sum(s["rows"] for s in inventory_sheets), "sheets": inventory_sheets}
 
 
-def _spool_sheet(target_dir, index, name, rows, merged, quality, budget):
+def _spool_sheet(target_dir, index, name, rows, merged, quality, budget, header_row):
     spool = target_dir / f"sheet_{index:02d}.spool"
     width = 0
-    header_row = 0
     header = []
     first = []
     written = 0
     number = 0
+    source_offsets = []
     # Merge intervals are processed once on entry/exit, never scanned per cell.
     pending = iter(sorted(merged))
     upcoming = next(pending, None)
@@ -80,37 +91,29 @@ def _spool_sheet(target_dir, index, name, rows, merged, quality, budget):
                 active.append((r1, c1, r2, c2, anchor, c1 - 1 in invalid))
                 upcoming = next(pending, None)
             active = [m for m in active if m[2] >= number]
+            # Merge metadata describes presentation. Only the source anchor
+            # contains a value; neither readers nor calculations fill it here.
             for r1, c1, r2, c2, anchor, anchor_invalid in active:
-                if len(values) < c2:
-                    values.extend([None] * (c2 - len(values)))
-                for col in range(c1 - 1, c2):
-                    values[col] = anchor
-                    if anchor_invalid:
-                        invalid.add(col)
+                if anchor_invalid:
+                    invalid.update(range(c1 - 1, c2))
             width = max(width, len(values))
-            if not header_row:
-                present = [v for v in values if v not in (None, "")]
-                if len(present) >= 2 and len(set(map(str, present))) >= 2:
-                    header_row, header = number, values
-            # Numeric merged values are shown expanded, but counted only once.
-            aggregate = list(values)
-            for r1, c1, r2, c2, anchor, anchor_invalid in active:
-                if isinstance(anchor, (int, float)) and not isinstance(anchor, bool):
-                    for col in range(c1 - 1, c2):
-                        if number != r1 or col != c1 - 1:
-                            aggregate[col] = None
-            record = {"v": values}
+            if number == header_row:
+                header = values
+            record = {"v": values, "source_row": number}
+            if getattr(raw, "cell_facts", None):
+                record["cells"] = raw.cell_facts
             if invalid:
                 record["e"] = sorted(invalid)
-            if aggregate != values:
-                record["a"] = aggregate
             line = (json.dumps(record, ensure_ascii=False) + "\n").encode()
+            if (number - 1) % BLOCK_ROWS == 0:
+                source_offsets.append(written)
             written += len(line)
             if written > budget:
                 raise SpreadsheetExtractError("DOCUMENT_RESULT_TOO_LARGE", "Structured expansion quota exceeded")
             handle.write(line)
-    if not header_row:
-        header_row, header = 1, first
+    source_rows = number
+    if header_row > source_rows and source_rows:
+        raise SpreadsheetExtractError("DOCUMENT_ARGUMENT_INVALID", "Header row exceeds source rows")
     originals, names = _column_names(header, width)
     counts = [{"nulls": 0, "seen": 0, "bool": True, "int": True, "float": True, "date": True} for _ in names]
     filename = f"sheet_{index:02d}.rows.jsonl"
@@ -151,7 +154,11 @@ def _spool_sheet(target_dir, index, name, rows, merged, quality, budget):
                 block_start, block_count, block_size = count, 0, 0
             block_count += 1
             block_size += row_size
-    spool.unlink()
+    source_file = f"sheet_{index:02d}.source.jsonl"
+    source_bytes = spool.stat().st_size
+    if written + source_bytes > budget:
+        raise SpreadsheetExtractError("DOCUMENT_RESULT_TOO_LARGE", "Source facts and analysis view exceed quota")
+    spool.rename(target_dir / source_file)
     if block_count:
         blocks.append([block_start, count])
     profiles = []
@@ -160,11 +167,16 @@ def _spool_sheet(target_dir, index, name, rows, merged, quality, budget):
         profiles.append({"name": column, "dtype": dtype, "nulls": state["nulls"],
                          "source_index": i, "original_name": originals[i]})
     return {"name": name, "index": index, "rows": count, "cols": width,
-            "header_row": header_row, "formula_count": quality["formula_count"],
+            "header_row": header_row, "source_rows": source_rows, "source_file": source_file,
+            "source_block_offsets": source_offsets or [0], "header_status": "explicit" if header_row != 1 else "first_row_default",
+            "hidden": quality.get("hidden", False), "formula_count": quality["formula_count"],
+            "formula_expression_status": quality.get("formula_expression_status", "available"),
+            "formula_detection_status": quality.get("formula_detection_status", "available"),
+            "hidden_rows": quality.get("hidden_rows", []), "hidden_columns": quality.get("hidden_columns", []),
             "formula_cache_status": "partial" if quality.get("invalid_formulas") else "available" if quality["formula_count"] else "not_applicable",
             "invalid_formula_count": quality.get("invalid_formulas", 0),
             "merged_ranges": merged, "columns": profiles, "file": filename,
-            "block_rows": BLOCK_ROWS, "block_offsets": offsets or [0], "legacy_blocks": blocks}, written
+            "block_rows": BLOCK_ROWS, "block_offsets": offsets or [0], "legacy_blocks": blocks}, written + source_bytes
 
 
 def _column_names(header, width):
@@ -212,26 +224,76 @@ def _text_encoding(path):
 
 def _stream_xlsx(path, temporary_root, allow_partial):
     from .workbook_reader import open_workbooks
-    merged = _merged_ranges_from_xml(path)
+    metadata = _sheet_metadata_from_xml(path)
     with open_workbooks(path, temporary_root) as (workbook, formulas):
         for index, sheet in enumerate(workbook.worksheets):
             formula_sheet = formulas.worksheets[index]
             sheet.reset_dimensions()
             formula_sheet.reset_dimensions()
-            quality = {"formula_count": 0, "invalid_formulas": 0}
+            presentation = metadata.get(str(sheet.title), {})
+            quality = {"formula_count": 0, "invalid_formulas": 0, "hidden": sheet.sheet_state != "visible",
+                       "hidden_rows": presentation.get("hidden_rows", []), "hidden_columns": presentation.get("hidden_columns", [])}
             def rows(sheet=sheet, formula_sheet=formula_sheet, quality=quality):
                 for row, formula_row in zip(sheet.iter_rows(), formula_sheet.iter_rows(), strict=True):
                     invalid = []
+                    facts = {}
                     for column, (value, formula) in enumerate(zip(row, formula_row, strict=True)):
+                        if formula.value is not None:
+                            facts[str(column)] = {"type": formula.data_type, "number_format": formula.number_format}
                         if formula.data_type == "f":
+                            facts[str(column)]["formula"] = str(formula.value)
+                            facts[str(column)]["cache_status"] = (
+                                "missing" if value.value is None else "error" if value.data_type == "e" else "available")
+                            facts[str(column)]["cached_type"] = value.data_type if value.value is not None else "missing"
                             quality["formula_count"] += 1
                             if value.value is None or value.data_type == "e":
                                 if not allow_partial:
                                     raise SpreadsheetExtractError("DOCUMENT_FORMULA_CACHE_MISSING", "Recalculate and save the workbook in Excel before uploading again")
                                 invalid.append(column)
                                 quality["invalid_formulas"] += 1
-                    yield SourceRow([_cell(value.value) for value in row], invalid)
-            yield str(sheet.title), rows(), merged.get(str(sheet.title), []), quality
+                    yield SourceRow([_cell(value.value) for value in row], invalid, facts)
+            yield str(sheet.title), rows(), presentation.get("merged", []), quality
+
+
+def _stream_xls(path):
+    """Read original BIFF values, without conversion, evaluation or display coercion.
+
+    xlrd exposes cached formula results but not expressions or complete formula
+    detection. This limitation is explicit; a zero count is not proof of absence.
+    One sheet is loaded at a time and released under the job's memory limit.
+    """
+    import xlrd
+    workbook = xlrd.open_workbook(path, on_demand=True, formatting_info=True)
+    try:
+        for index in range(workbook.nsheets):
+            sheet = workbook.sheet_by_index(index)
+            quality = {"formula_count": 0, "invalid_formulas": 0,
+                       "hidden": bool(sheet.visibility), "formula_expression_status": "unavailable",
+                       "formula_detection_status": "unavailable",
+                       "hidden_rows": [row + 1 for row, info in sheet.rowinfo_map.items() if info.hidden],
+                       "hidden_columns": [col + 1 for col, info in sheet.colinfo_map.items() if info.hidden]}
+            def rows(sheet=sheet, quality=quality):
+                for row in range(sheet.nrows):
+                    values, invalid = [], []
+                    for column in range(sheet.ncols):
+                        cell = sheet.cell(row, column)
+                        value = cell.value
+                        if cell.ctype in (xlrd.XL_CELL_EMPTY, xlrd.XL_CELL_BLANK):
+                            value = None
+                        elif cell.ctype == xlrd.XL_CELL_BOOLEAN:
+                            value = bool(value)
+                        elif cell.ctype == xlrd.XL_CELL_DATE:
+                            value = xlrd.xldate_as_datetime(value, workbook.datemode).isoformat()
+                        elif cell.ctype == xlrd.XL_CELL_ERROR:
+                            value = xlrd.error_text_from_code.get(value, "#ERROR")
+                            invalid.append(column)
+                        values.append(value)
+                    yield SourceRow(values, invalid)
+            merged = [[r1 + 1, c1 + 1, r2, c2] for r1, r2, c1, c2 in sheet.merged_cells]
+            yield sheet.name, rows(), merged, quality
+            workbook.unload_sheet(index)
+    finally:
+        workbook.release_resources()
 
 
 def _write_rows(target: Path, rows: Iterable[tuple[int, list[Any]]]) -> list[int]:
@@ -267,6 +329,10 @@ def _is_dateish(value: Any) -> bool:
 
 
 def _merged_ranges_from_xml(path: Path) -> dict[str, list[list[int]]]:
+    return {name: meta["merged"] for name, meta in _sheet_metadata_from_xml(path).items()}
+
+
+def _sheet_metadata_from_xml(path: Path):
     """Read mergeCell metadata straight from OOXML (read-only mode lacks it)."""
     import re
     import zipfile
@@ -294,6 +360,7 @@ def _merged_ranges_from_xml(path: Path) -> dict[str, list[list[int]]]:
                 if target.startswith("/"):
                     member = target.lstrip("/")
                 ranges = []
+                hidden_rows, hidden_columns = [], []
                 with archive.open(member) as xml:
                     stack = []
                     for event, element in ElementTree.iterparse(xml, events=("start", "end")):
@@ -306,11 +373,18 @@ def _merged_ranges_from_xml(path: Path) -> dict[str, list[list[int]]]:
                             if match:
                                 ranges.append([int(match.group(2)), _col_index(match.group(1)),
                                                int(match.group(4)), _col_index(match.group(3))])
+                        if element.tag.endswith("}row") and element.get("hidden") in {"1", "true"}:
+                            hidden_rows.append(int(element.get("r", "0")))
+                        if element.tag.endswith("}col") and element.get("hidden") in {"1", "true"}:
+                            lower, upper = int(element.get("min", "0")), int(element.get("max", "0"))
+                            if not 1 <= lower <= upper <= 16384:
+                                raise SpreadsheetExtractError("DOCUMENT_PARSE_FAILED", "Invalid column metadata")
+                            hidden_columns.extend(range(lower, upper + 1))
                         element.clear()
                         stack.pop()
                         if stack:
                             stack[-1].remove(element)
-                result[name] = ranges
+                result[name] = {"merged": ranges, "hidden_rows": hidden_rows, "hidden_columns": sorted(set(hidden_columns))}
     except (OSError, zipfile.BadZipFile, ElementTree.ParseError):
         return {}
     return result

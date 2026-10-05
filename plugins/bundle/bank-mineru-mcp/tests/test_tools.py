@@ -27,6 +27,109 @@ def authorized_service_task():
 
 
 @pytest.mark.asyncio
+async def test_remote_failure_does_not_prevent_local_table_parse(tmp_path):
+    from bank_mineru_mcp.mineru_client import MinerUClientError
+    from bank_mineru_mcp.structured_store import StructuredStore
+    source = _resolved(tmp_path)
+    csv = source.path.with_suffix(".csv")
+    csv.write_text("id,amount\n1,10\n", encoding="utf-8")
+    table = replace(source, file_id="table", path=csv, extension=".csv", media_type="text/csv")
+
+    class Resolver:
+        def resolve(self, ref):
+            return table if ref == "table" else source
+
+    class Client:
+        async def parse(self, files, **options):
+            raise MinerUClientError("MINERU_UNAVAILABLE", "unavailable")
+
+    service = MinerUToolService(file_resolver=Resolver(), mineru_client=Client(),
+        document_store=DocumentStore(root=tmp_path), structured_store=StructuredStore(root=tmp_path))
+    result = await service.parse_documents([{"file_id": source.file_id, "file_ref": "pdf"},
+                                          {"file_id": "table", "file_ref": "table"}])
+    assert result["status"] == "partial"
+    assert result["items"][0]["error_code"] == "MINERU_UNAVAILABLE"
+    assert result["items"][1]["status"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_inline_document_has_authorized_reference_and_read_evidence(tmp_path):
+    source = _resolved(tmp_path)
+
+    class Client:
+        async def parse(self, files, **options):
+            return {"results": {"sample": {"md_content": "完整正文"}}}, {source.file_id: "sample"}
+
+    service = MinerUToolService(file_resolver=_Resolver(source), mineru_client=Client(),
+                               document_store=DocumentStore(root=tmp_path))
+    result = await service.parse_documents([{"file_id": source.file_id, "file_ref": "test-ref"}])
+    item = result["items"][0]
+    assert item["content_mode"] == "inline"
+    assert isinstance(item["document_ref"], str) and item["document_ref"].startswith("dr1_")
+    page = service.read_document_chunks(item["document_ref"])
+    assert "".join(c["text"] for c in page["chunks"]) == "完整正文"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('query', [False, True])
+@pytest.mark.parametrize('arguments,reason', [
+    ({'cursor': '3'}, 'CHUNK_CURSOR'), ({'cursor': 3}, 'CHUNK_CURSOR'),
+    *[({'cursor': value}, 'CHUNK_CURSOR') for value in ('null', 'None', 'start', '1/3', '3e0')],
+    ({'cursor': False}, 'CHUNK_CURSOR'), ({'limit': 0}, 'CHUNK_LIMIT'),
+    ({'limit': 11}, 'CHUNK_LIMIT'), ({'limit': 1.5}, 'CHUNK_LIMIT'),
+])
+async def test_chunk_argument_errors_before_execution_keep_valid_document(tmp_path, monkeypatch, query, arguments, reason):
+    from bank_mineru_mcp import parse_jobs
+    from unittest.mock import AsyncMock
+    source = _resolved(tmp_path)
+    class Client:
+        async def parse(self, files, **options):
+            return {'results': {'sample': {'md_content': '完整正文'}}}, {source.file_id: 'sample'}
+    service = MinerUToolService(file_resolver=_Resolver(source), mineru_client=Client(),
+                               document_store=DocumentStore(root=tmp_path))
+    parsed = await service.parse_documents([{'file_id': source.file_id, 'file_ref': 'test-ref'}])
+    ref = parsed['items'][0]['document_ref']
+    spy = AsyncMock(side_effect=AssertionError('Invalid pagination must not launch a job'))
+    monkeypatch.setattr(parse_jobs, 'query_job', spy)
+    with pytest.raises(ToolContractError) as invalid:
+        if query:
+            await service.execute_structured_query('read_document_chunks', {'document_ref': ref, **arguments})
+        else:
+            service.read_document_chunks(ref, **arguments)
+    assert invalid.value.code == 'DOCUMENT_ARGUMENT_INVALID'
+    assert invalid.value.argument_error['reason'] == reason
+    spy.assert_not_awaited()
+    assert service.read_document_chunks(ref)['chunks'][0]['text'] == '完整正文'
+    with pytest.raises(ToolContractError) as tampered:
+        service.read_document_chunks(ref, cursor='cur1_1_forged_badmac')
+    assert tampered.value.code == 'FILE_REF_INVALID'
+
+
+@pytest.mark.asyncio
+async def test_duplicate_parse_file_is_argument_error_not_capability_failure(tmp_path):
+    source = _resolved(tmp_path)
+    service = MinerUToolService(file_resolver=_Resolver(source), mineru_client=None,
+                               document_store=DocumentStore(root=tmp_path))
+    with pytest.raises(ToolContractError) as failed:
+        await service.parse_documents([{'file_id':source.file_id,'file_ref':'test-ref'}] * 2)
+    assert failed.value.code == 'DOCUMENT_ARGUMENT_INVALID'
+    assert failed.value.argument_error['reason'] == 'PARSE_DOCUMENTS'
+
+
+@pytest.mark.asyncio
+async def test_uncoded_io_failure_is_not_a_signature_denial(tmp_path):
+    class Resolver:
+        def resolve(self, ref):
+            raise OSError('private filesystem path')
+    service = MinerUToolService(file_resolver=Resolver(), mineru_client=None,
+                               document_store=DocumentStore(root=tmp_path))
+    with pytest.raises(ToolContractError) as failed:
+        await service.parse_documents([{'file_id':'file_test','file_ref':'authorized'}])
+    assert failed.value.code == 'DOCUMENT_ENGINE_UNAVAILABLE'
+    assert 'private' not in str(failed.value)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("large_first", [True, False])
 async def test_batch_retains_readable_result_when_other_document_exceeds_storage_limit(tmp_path, large_first):
     source = _resolved(tmp_path)
@@ -68,7 +171,7 @@ async def test_batch_retains_readable_result_when_other_document_exceeds_storage
     ("pptx", "application/vnd.openxmlformats-officedocument.presentationml.presentation", None),
 ])
 @pytest.mark.parametrize("large", [False, True])
-async def test_supported_format_inline_and_chunked_reading(tmp_path, extension, mime, signature, large):
+async def test_supported_format_inline_and_chunked_reading(tmp_path, extension, mime, signature, large, monkeypatch):
     # Signature-valid fixtures and simulated OCR/Office parser output test the
     # common transport/normalization path, not the accuracy of the parser itself.
     source = _resolved(tmp_path)
@@ -87,9 +190,15 @@ async def test_supported_format_inline_and_chunked_reading(tmp_path, extension, 
             return {"results": {"sample": {"md_content": markdown}}}, {"file_001": "sample"}
 
     service = MinerUToolService(file_resolver=_Resolver(source), mineru_client=Client(), document_store=DocumentStore(root=tmp_path))
+    if extension in {"docx", "pptx"}:
+        async def native(source):
+            return {"engine": "docvortex-0.5.4", "markdown": markdown, "page_count": 1,
+                    "coverage": {"native_text": "parsed", "image_text": "not_present"}, "source_inventory": {"images": 0}}
+        monkeypatch.setattr(service, "_parse_native", native)
     response = await service.parse_documents([{"file_id": "file_001", "file_ref": "test-ref"}])
     item = response["items"][0]
     assert response["status"] == "completed"
+    assert item["engine"] == ("docvortex-0.5.4" if extension in {"docx", "pptx"} else "mineru")
     if not large:
         assert item["content_mode"] == "inline"
         assert item["markdown"] == markdown

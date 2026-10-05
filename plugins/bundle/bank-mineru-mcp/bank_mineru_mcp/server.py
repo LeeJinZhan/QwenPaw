@@ -34,7 +34,7 @@ class RuntimeDocumentRef(BaseModel):
     file_id: str = Field(min_length=1, description="Runtime uploaded file ID")
     file_ref: str | None = Field(
         default=None, min_length=1,
-        description="Optional opaque reference. Prefer file_id only: the bank Gateway binds the current prepared attachment before authorization. Never invent a token.",
+        description="Optional opaque reference. Prefer a known stable file_id: the bank Gateway prepares that exact current or historical file through registered search/select and current-task authorization. Never invent a token or reuse a past reference.",
     )
 
 
@@ -83,10 +83,20 @@ class MinerUMcpService:
             raise ToolContractError(exc.code, str(exc)) from exc
 
     def _register_tools(self) -> None:
+        @self.mcp.tool(name="analyze", structured_output=True,
+            description="Run a bounded Python program inside the Runtime task container using the SAME table facts and calculation rules as aggregate/read_range. Requires a structured document_ref and a separately registered permission. Use tables.aggregate(ops), tables.read_range(...), tables.inventory(); assign JSON-serializable result. Numeric totals should call tables.aggregate to preserve Decimal/count semantics. No network, server paths or Runtime credentials. Returned user_program output is distinct from trusted evidence. Code is limited to 32000 UTF-8 bytes.")
+        async def analyze(document_ref: str, code: str) -> dict[str, Any]:
+            try:
+                if not document_ref.startswith("ds1_"):
+                    raise ToolContractError("DOCUMENT_ARGUMENT_INVALID", "Structured document reference is required")
+                return await self._authorized_call("analyze", {"document_ref": document_ref, "code": code})
+            except ToolContractError as exc:
+                return {"status": "failed", "error_code": exc.code, "recovery_hint": recovery_hint(exc.code)}
+
         @self.mcp.tool(
             name="parse_documents",
             description=(
-                "Parse 1-5 Runtime-authorized documents. XLSX/CSV/TSV use local structured extraction; other formats use MinerU. For structured results use read_range/aggregate/search. "
+                "Parse 1-5 Runtime-authorized documents. XLSX/XLS/CSV/TSV use the shared table-facts engine; DOC/DOCX/PPT/PPTX use independent pinned DocVortex; PDF/images use MinerU. options.header_row (default 1, 0=no header) is an integer or a sheet-name map (*=default), selecting the analysis header explicitly. Source rows remain available through format=source. Excel images are excluded. Native Office image text requires options.image_text=true and is OCRed through authorized MinerU; inspect coverage before claiming completeness. For structured results use read_range/aggregate/search. "
                 "Each document must contain file_id; the bank Gateway supplies an omitted "
                 "file_ref from the current attachment; never pass paths or URLs."
             ),
@@ -96,7 +106,7 @@ class MinerUMcpService:
             documents: list[RuntimeDocumentRef],
             parse_method: str = "auto",
             language: str = "auto",
-            options: dict[str, bool] | None = None,
+            options: dict[str, Any] | None = None,
         ) -> dict[str, Any]:
             try:
                 return await self._authorized_call("parse_documents", {
@@ -111,7 +121,10 @@ class MinerUMcpService:
             description=(
                 "Read bounded chunks from an opaque task-local document_ref. "
                 "Start with cursor=null, then copy next_cursor exactly until "
-                "has_more=false. limit is 1-10 (default 5). An omitted cursor "
+                "has_more=false; cursor is an opaque signed token, never a numeric page index. "
+                "next_inventory_cursor belongs to read_range(format=inventory, row_cursor=...), "
+                "NOT to this tool. After a cursor argument error keep the valid document_ref. "
+                "limit is 1-10 (default 5). An omitted cursor "
                 "restarts at the beginning. Retrying the same cursor and limit "
                 "returns the same page while the document remains valid; "
                 "deduplicate chunks by index. Do not infer full-table totals "
@@ -128,16 +141,20 @@ class MinerUMcpService:
             try:
                 return await self._authorized_call("read_document_chunks", {"document_ref": document_ref, "cursor": cursor, "limit": limit})
             except ToolContractError as exc:
-                return {"status": "failed", "error_code": exc.code, "recovery_hint": recovery_hint(exc.code)}
+                result = {"status": "failed", "error_code": exc.code,
+                          "recovery_hint": exc.argument_error.get('hint') or recovery_hint(exc.code)}
+                if exc.argument_error:
+                    result['argument_error'] = exc.argument_error
+                return result
 
         @self.mcp.tool(
             name="read_range",
             description=(
                 "Read a bounded row range from one sheet of a structured "
-                "document_ref (xlsx/csv/tsv). A file_id already parsed in this task is also accepted by the bank Gateway. Pass sheet name, rows=[start,end] "
+                "document_ref (xlsx/xls/csv/tsv). A file_id already parsed in this task is also accepted by the bank Gateway. Pass sheet name, rows=[start,end] "
                 "or continue with next_row_cursor; optional columns projection; "
-                "format cell reads one columns entry and rows=[r,r], with row_cursor=next_cell_cursor for long text. format markdown (header repeated), records, or inventory. Inventory without sheet pages sheet summaries; with sheet pages columns/merges. Continue with next_inventory_cursor as row_cursor. Pages are capped "
-                "at 32000 UTF-8 bytes including metadata; echo fields report the served range and sheet "
+                "format cell reads one columns entry and rows=[r,r], with row_cursor=next_cell_cursor for long text. format markdown (header repeated), records, source (original physical rows including titles/headers), or inventory. Merge blanks remain blank. Source reads do not prove a full analysis scan. Inventory without sheet pages sheet summaries; with sheet pages columns/merges. Continue with next_inventory_cursor as row_cursor. Pages are capped "
+                "at 32000 UTF-8 bytes including metadata. Never pass next_inventory_cursor to read_document_chunks.cursor; its first page uses null and subsequent pages copy next_cursor. Echo fields report the served range and sheet "
                 "totals. Never infer values outside the echoed range."
             ),
             structured_output=True,
@@ -154,18 +171,24 @@ class MinerUMcpService:
             try:
                 return await self._authorized_call("read_range", {"document_ref": document_ref, "sheet": sheet, "rows": rows, "row_cursor": row_cursor, "columns": columns, "format": format, "include_header": include_header})
             except ToolContractError as exc:
-                return {"status": "failed", "error_code": exc.code, "recovery_hint": recovery_hint(exc.code)}
+                result = {'status':'failed','error_code':exc.code,'recovery_hint':recovery_hint(exc.code)}
+                if exc.argument_error:
+                    result.update(argument_error=exc.argument_error, recovery_hint=exc.argument_error['hint'])
+                return result
 
         @self.mcp.tool(
             name="aggregate",
             description=(
                 "Compute bounded server-side statistics over structured sheets: "
                 "ops with sheet, optional group_by, metrics (sum/avg/count/"
-                "count_distinct/min/max/median), optional filter and row_range, "
-                "or cross_sheet_union by a shared key column. Results include "
+                "count_rows/count_nonempty/count_numeric/count_distinct/min/max/median), optional filter and row_range, "
+                "or cross_sheet_union with mode append (default) or deduplicate_rows (identical complete aligned rows). It never joins by key. Results include "
                 "rows_scanned/rows_matched/full_range so scope can be stated. Use group_cursor=0 in each op for high-cardinality group pages, then next_group_cursor. "
                 'Use metrics=[{"column":"exact inventory column","fn":"count"}]; metric uses fn, NOT op. '
-                "filter uses column/op/value. Use this instead of reading every row for totals."
+                "filter uses column/op/value. Every query must include the current document_ref returned by parse_documents. "
+                "Verify analysis header_row first: default 1 is explicit, not automatic header detection. "
+                "If inventory columns are titles or colN, inspect source rows and explicitly reparse with a per-sheet header_row map; use the new reference and restart pagination. "
+                "null numeric totals are unavailable, never zero: check header/range and numeric quality. Use this instead of reading every row for totals."
             ),
             structured_output=True,
         )
@@ -296,6 +319,8 @@ def build_mineru_mcp_service(
         inline_max_chars=settings.inline_max_chars,
         parse_timeout_seconds=settings.parse_timeout_seconds,
         extract_memory_bytes=settings.extract_memory_bytes,
+        ocr_batch_size=settings.ocr_batch_size,
+        execution_mode="runtime",
     )
     return MinerUMcpService(
         settings=settings,

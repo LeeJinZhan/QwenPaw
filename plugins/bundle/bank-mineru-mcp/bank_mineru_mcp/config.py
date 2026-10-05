@@ -21,8 +21,8 @@ class MinerUSettings:
     provider: str = "self_hosted"
     proxy_url: str = ""
     connect_timeout_seconds: float = 5
-    upload_timeout_seconds: float = 120
-    parse_timeout_seconds: float = 1800
+    upload_timeout_seconds: float = 300
+    parse_timeout_seconds: float = 3600
     poll_interval_seconds: float = 1
     mcp_host: str = "127.0.0.1"
     mcp_port: int = 18081
@@ -32,6 +32,7 @@ class MinerUSettings:
     structured_document_max_bytes: int = 2 * 1024**3
     structured_task_max_bytes: int = 8 * 1024**3
     extract_memory_bytes: int = 4 * 1024**3
+    ocr_batch_size: int = 5
     temp_ttl_seconds: int = 604_800
     backend: str = ""
     server_url: str = ""
@@ -76,8 +77,8 @@ class MinerUSettings:
             raise MinerUConfigError("MinerU MCP host must be loopback")
         port = _integer("BANK_MINERU_MCP_PORT", 18081, 1, 65535, "port")
         connect = _number("BANK_MINERU_CONNECT_TIMEOUT_SECONDS", 5, 0.1, 60, "timeout")
-        upload = _number("BANK_MINERU_UPLOAD_TIMEOUT_SECONDS", 120, 1, 600, "timeout")
-        parse = _number("BANK_MINERU_PARSE_TIMEOUT_SECONDS", 1800, 1, 3600, "timeout")
+        upload = _number("BANK_MINERU_UPLOAD_TIMEOUT_SECONDS", 300, 1, 1800, "timeout")
+        parse = _number("BANK_MINERU_PARSE_TIMEOUT_SECONDS", 3600, 1, 7200, "timeout")
         poll = _number("BANK_MINERU_POLL_INTERVAL_SECONDS", 1, 0.1, 10, "poll interval")
         inline = _integer(
             "BANK_MINERU_INLINE_MAX_CHARS", 20_000, 1_000, 100_000, "inline limit"
@@ -129,6 +130,7 @@ class MinerUSettings:
             structured_document_max_bytes=_integer("BANK_READING_DOCUMENT_MAX_BYTES", 2 * 1024**3, 1024, 16 * 1024**3, "structured document quota"),
             structured_task_max_bytes=_integer("BANK_READING_TASK_MAX_BYTES", 8 * 1024**3, 1024, 32 * 1024**3, "structured task quota"),
             extract_memory_bytes=_integer("BANK_READING_PROCESS_MEMORY_BYTES", 4 * 1024**3, 256 * 1024**2, 16 * 1024**3, "extraction memory"),
+            ocr_batch_size=_integer("BANK_READING_OCR_BATCH_SIZE", 5, 1, 5, "OCR batch size"),
             temp_ttl_seconds=ttl,
         )
 

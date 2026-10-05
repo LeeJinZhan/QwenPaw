@@ -8,7 +8,7 @@ from .spreadsheet import extract_workbook, SpreadsheetExtractError
 
 
 def main():
-    source, target, quota, memory, state = sys.argv[1:]
+    source, target, quota, memory, state, header_row = sys.argv[1:]
     target = Path(target)
     target.mkdir(mode=0o700, parents=True, exist_ok=True)
     # macOS RLIMIT_AS is not reliable. Capacity release tests run in Linux images.
@@ -17,7 +17,7 @@ def main():
     os.umask(0o077)
     result = {}
     try:
-        result = {'status': 'ready', 'inventory': extract_workbook(Path(source), target, stem='document', max_bytes=int(quota), allow_partial=True)}
+        result = {'status': 'ready', 'inventory': extract_workbook(Path(source), target, stem='document', max_bytes=int(quota), allow_partial=True, header_row=json.loads(header_row))}
     except SpreadsheetExtractError as exc:
         result = {'status': 'failed', 'error_code': exc.code}
     except MemoryError:
