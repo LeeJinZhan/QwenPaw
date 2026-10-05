@@ -276,6 +276,7 @@ class TaskTracker:
 
             async def _producer() -> None:
                 start_time = datetime.now(timezone.utc)
+                producer_stream = None
 
                 try:
                     tracker = tracker_ref()
@@ -285,7 +286,8 @@ class TaskTracker:
                             # pylint: disable=protected-access
                             tracker._global_last_run_at = start_time
 
-                    async for sse in stream_fn(payload):
+                    producer_stream = stream_fn(payload)
+                    async for sse in producer_stream:
                         tracker = tracker_ref()
                         if tracker is None:
                             return
@@ -308,6 +310,21 @@ class TaskTracker:
                             for q in run.queues:
                                 q.put_nowait(err_sse)
                 finally:
+                    if producer_stream is not None:
+                        close = getattr(producer_stream, "aclose", None)
+                        if callable(close):
+                            try:
+                                await close()
+                            except asyncio.CancelledError:
+                                logger.debug(
+                                    "run stream cleanup cancelled run_key=%s",
+                                    run_key,
+                                )
+                            except Exception:
+                                logger.exception(
+                                    "run stream cleanup failed run_key=%s",
+                                    run_key,
+                                )
                     finish_time = datetime.now(timezone.utc)
                     tracker = tracker_ref()
                     if tracker is not None:

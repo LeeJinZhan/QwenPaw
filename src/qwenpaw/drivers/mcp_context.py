@@ -43,7 +43,7 @@ def mcp_call_timeout(seconds):
     import math
     if seconds is not None and (not math.isfinite(seconds) or seconds <= 0):
         raise TimeoutError('MCP task budget exhausted')
-    token = _timeout.set(timedelta(seconds=min(seconds, 1800)) if seconds is not None else None)
+    token = _timeout.set(timedelta(seconds=min(seconds, 3600)) if seconds is not None else None)
     try:
         yield
     finally:
