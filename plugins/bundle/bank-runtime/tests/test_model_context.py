@@ -233,5 +233,7 @@ async def test_followup_contract_reaches_current_model_request_after_history(mod
     assert [m['role'] for m in normalized] == ['system', 'user', 'assistant', 'user']
     assert '<bank_followups>' in str(normalized[0]['content'])
     assert '用户点击后原样作为下一轮消息发送' in str(normalized[0]['content'])
-    assert '业务问题本身可以是是非问句' in str(normalized[0]['content'])
+    assert '短动作式选项' in str(normalized[0]['content'])
+    assert '每条直接说明要执行的动作和对象' in str(normalized[0]['content'])
+    assert '业务问题本身可以是是非问句' not in str(normalized[0]['content'])
     assert normalized[-1]['content'] == wire[-2]['content']

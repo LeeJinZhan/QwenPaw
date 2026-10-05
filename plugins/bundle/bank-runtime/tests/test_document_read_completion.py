@@ -29,6 +29,22 @@ class Client:
 
 
 @pytest.mark.asyncio
+async def test_argument_failure_allows_explicit_correction_without_case_specific_prompt():
+    from test_document_reads_v2 import observe_parse, blocks, REF
+    middleware = BankRuntimeGatewayMiddleware(Client())
+    observe_parse(middleware.document_reads)
+    payload = {'document_ref':REF,'ops':[{'sheet':'支行01','metrics':[{'column':'金额','fn':'sum'}]}]}
+    middleware.document_reads.start('MinerU__aggregate', payload)
+    middleware.document_reads.observe('MinerU__aggregate', payload, blocks({'status':'failed','error_code':'DOCUMENT_ARGUMENT_INVALID'}), False)
+    async def model(**kwargs):
+        messages = str(kwargs['messages'])
+        assert 'colN' not in messages and 'header_row' not in messages
+        return ChatResponse(id='correct', content=[ToolCallBlock(id='parse', name='MinerU__parse_documents',
+            input='{"documents":[{"file_id":"f1"}],"options":{"header_row":{"支行01":3}}}')], is_last=True)
+    await middleware.on_model_call(None, {}, model)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("tool_name", ["MinerU__read_range", "MinerU__aggregate"])
 async def test_unobserved_reference_denial_is_not_reported_as_incomplete_read(tool_name):
     from bank_runtime.gateway.client import GatewayError
@@ -50,6 +66,67 @@ async def test_unobserved_reference_denial_is_not_reported_as_incomplete_read(to
     await read(middleware, 0, 2, total=2)
     assert middleware.document_reads.pending
     assert middleware.document_reads.error_code == "ARTIFACT_OUTPUT_MISSING"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("limit,expected_pending", [(2, False), (1, True)])
+async def test_placeholder_is_correctable_input_and_requires_matching_verified_read(limit, expected_pending):
+    from bank_runtime.gateway.client import GatewayError
+    middleware = BankRuntimeGatewayMiddleware(Client())
+    payload = {"document_ref": "[runtime-reference-redacted]", "cursor": None, "limit": 2}
+    middleware.prepare("MinerU__read_document_chunks", payload, {"tool_call_id": "bad-input"})
+    async def handler():
+        pytest.fail("An invalid placeholder must not reach MCP")
+        yield
+    with pytest.raises(GatewayError):
+        _ = [item async for item in middleware.on_acting(None, {"tool_call": ToolCallBlock(
+            id="bad-input", name="MinerU__read_document_chunks", input=json.dumps(payload))}, handler)]
+    assert middleware.client.reports[-1][-1] == "DOCUMENT_ARGUMENT_INVALID"
+    assert middleware.document_reads.pending
+    await parse(middleware, ref="fresh", count=limit)
+    assert middleware.document_reads.pending, "Parse success is not evidence that the requested content was read"
+    await read(middleware, 0, limit, total=limit, ref="fresh")
+    assert middleware.document_reads.pending is expected_pending
+
+
+@pytest.mark.asyncio
+async def test_placeholder_and_real_denial_are_independent_failures():
+    from bank_runtime.gateway.client import GatewayError
+    middleware = BankRuntimeGatewayMiddleware(Client())
+    for ref in ("[runtime-reference-redacted]", "another-task-handle"):
+        payload = {"document_ref": ref, "cursor": None, "limit": 2}
+        middleware.prepare("MinerU__read_document_chunks", payload, {"tool_call_id": "bad-input"})
+        async def handler():
+            pytest.fail("Unknown references must not execute")
+            yield
+        with pytest.raises(GatewayError):
+            _ = [item async for item in middleware.on_acting(None, {"tool_call": ToolCallBlock(
+                id="bad-input", name="MinerU__read_document_chunks", input=json.dumps(payload))}, handler)]
+    await parse(middleware, ref="fresh", count=2)
+    await read(middleware, 0, 2, total=2, ref="fresh")
+    assert middleware.document_reads.pending
+    assert "FILE_ACCESS_DENIED" in middleware.document_reads.failures.values()
+
+
+@pytest.mark.parametrize("name,result,clears", [
+    ("MinerU__search", {"document_ref": "fresh", "hits": [], "truncated": False}, True),
+    ("MinerU__search", {"document_ref": "other", "hits": []}, False),
+    ("MinerU__search", {"document_ref": "fresh", "hits": "bad"}, False),
+    ("MinerU__analyze", {"document_ref": "fresh", "engine": "table-facts-3", "evidence": []}, True),
+    ("MinerU__analyze", {"document_ref": "fresh", "engine": "other", "evidence": []}, False),
+])
+def test_query_placeholder_recovers_only_after_matching_verified_result(name, result, clears):
+    from bank_runtime.gateway.document_reads import DocumentReadLedger
+    ledger = DocumentReadLedger()
+    payload = {"document_ref": "历史任务引用已移除", **({"query": "target"} if name.endswith("search") else {"program": "result = 1"})}
+    ledger.reject_reference_argument(name, payload)
+    ledger.observe("MinerU__parse_documents", {"documents": [{"file_id": "f1"}]},
+        [TextBlock(text=json.dumps({"items": [{"file_id": "f1", "status": "completed", "content_mode": "chunked", "document_ref": "fresh", "chunk_count": 1}]}))], True)
+    valid = {**payload, "document_ref": "fresh"}
+    content = [TextBlock(text=json.dumps(result))]
+    ledger.observe(name, valid, content, True)
+    ledger.recover_reference_argument(name, valid, content)
+    assert bool(ledger.reference_argument_failures) is not clears
 
 
 async def invoke(middleware, name, payload, result, state=ToolResultState.SUCCESS):
@@ -190,11 +267,11 @@ async def test_truncated_text_allows_proposal_but_rejects_unsupported_completion
     from bank_runtime.sandbox.processor import AttachmentProcessor
     from bank_runtime.sandbox.tools import set_sandbox_tool_state, reset_sandbox_tool_state
     from bank_runtime.sandbox.cache import PreparedSandboxFile
-    path = tmp_path / "table.csv"
+    path = tmp_path / "table.txt"
     path.write_text("用户,token\n甲,10\n乙,20\n")
     processor = AttachmentProcessor(per_file_chars=5)
-    processor.process([PreparedSandboxFile(file_id="f", local_path=path, content_type="text/csv",
-        size_bytes=path.stat().st_size, original_name="table.csv", expires_at="")])
+    processor.process([PreparedSandboxFile(file_id="f", local_path=path, content_type="text/plain",
+        size_bytes=path.stat().st_size, original_name="table.txt", expires_at="")])
     token = set_sandbox_tool_state(SimpleNamespace(processor=processor))
     try:
         middleware = BankRuntimeGatewayMiddleware(Client())

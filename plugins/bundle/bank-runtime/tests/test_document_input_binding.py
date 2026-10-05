@@ -18,6 +18,8 @@ from bank_runtime.sandbox.cache import PreparedSandboxFile
 from qwenpaw.drivers.mcp_context import current_mcp_metadata
 
 
+
+
 @pytest.mark.parametrize("cursor", [0, "0", ""])
 @pytest.mark.asyncio
 async def test_chunk_first_page_alias_and_oversized_limit_before_approval(cursor):
@@ -39,10 +41,10 @@ def test_chunk_continuation_cursors_are_never_guessed(cursor):
 
 class Client:
     config = SimpleNamespace(task_id='task_a')
-    def __init__(self): self.inputs = []; self.results = []
+    def __init__(self): self.inputs = []; self.results = []; self.guards=[]
     async def preflight(self, name, value, **kw):
         self.inputs.append(deepcopy(value)); return {'tool_call_id':'call'}
-    async def report_guard(self, *args): pass
+    async def report_guard(self, *args, **kwargs): self.guards.append((*args,kwargs))
     async def report_result(self, *args): self.results.append(args)
 
 
@@ -51,8 +53,8 @@ class Guard:
         return PermissionDecision(behavior=PermissionBehavior.ALLOW, message='allowed')
 
 
-def parsed(middleware, ref='ds1_current'):
-    payload = {'documents':[{'file_id':'file_a','file_ref':'fr1_current'}]}
+def parsed(middleware, ref='ds1_current', file_ref='fr1_current'):
+    payload = {'documents':[{'file_id':'file_a','file_ref':file_ref}]}
     result = {'status':'completed','items':[{'file_id':'file_a','status':'completed',
         'content_mode':'structured','document_ref':ref,'inventory':{'sheets':[
             {'name':'本期','rows':2,'columns':[{'name':'金额'}]},
@@ -78,18 +80,88 @@ async def execute(middleware, name, args, expected):
 
 
 @pytest.mark.asyncio
-async def test_metric_alias_is_normalized_before_preflight_and_execution():
+async def test_metric_alias_is_preserved_for_service_schema_validation():
     m = BankRuntimeGatewayMiddleware(Client()); parsed(m)
     args = {'document_ref':'ds1_current','ops':[{'sheet':'本期','metrics':[{'column':'金额','op':'sum'}],
         'filter':{'column':'金额','op':'gt','value':0}}]}
-    expected = deepcopy(args); expected['ops'][0]['metrics'][0] = {'column':'金额','fn':'sum'}
+    expected = deepcopy(args)
     await execute(m, 'MinerU__aggregate', args, expected)
+
+
+
+
+@pytest.mark.parametrize('mode,operations',[
+    ('thousands',[{'numeric_text':'strict','metrics':[]}]),
+    ('unknown',[{'metrics':[]}]),
+    ('thousands',[None]),
+])
+def test_conflicting_or_invalid_numeric_text_is_never_silently_rewritten(mode,operations):
+    from bank_runtime.gateway.document_inputs import normalize_document_input
+    m=BankRuntimeGatewayMiddleware(Client()); parsed(m)
+    args={'document_ref':'ds1_current','numeric_text':mode,'ops':operations,'other':'unchanged'}
+    assert normalize_document_input('MinerU__aggregate',args,task_id='task_a',ledger=m.document_reads)==args
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('extra',[
+    {'numeric_text':'unknown'}, {'numeric_text':'thousands'}, {'unexpected_option':True}])
+async def test_extra_aggregate_call_fields_are_audited_as_arguments_without_poisoning_authorization(extra):
+    m=BankRuntimeGatewayMiddleware(Client()); parsed(m)
+    args={'document_ref':'ds1_current','ops':[{'sheet':'本期','numeric_text':'strict',
+        'metrics':[{'column':'金额','fn':'sum'}]}],**extra}
+    original=deepcopy(args)
+    engine=GatewayPermissionEngine(Guard(),m)
+    result=await engine.check_permission(SimpleNamespace(name='MinerU__aggregate'),args)
+    assert result.behavior==PermissionBehavior.DENY
+    assert m.client.inputs[-1]==original and args==original
+    assert m.client.guards[-1][1]=='block'
+    assert m.client.guards[-1][2]['validation_error_code']=='DOCUMENT_ARGUMENT_INVALID'
+    assert not m.client.results
+    assert m.document_reads.error_code=='DOCUMENT_ARGUMENT_INVALID'
+    assert not any(k.startswith('policy:') for k in m.document_reads.failures)
+    corrected=deepcopy(args);corrected.pop(next(iter(extra)))
+    assert (await engine.check_permission(SimpleNamespace(name='MinerU__aggregate'),corrected)).behavior==PermissionBehavior.ALLOW
+    # The schema rejection ran no calculation. A subsequently verified result
+    # may repair it, while every independent real policy refusal remains.
+    m.document_reads.failures['policy:other']='FILE_ACCESS_DENIED'
+    metrics=corrected['ops'][0]['metrics']
+    body={'document_ref':'ds1_current','truncated':False,'results':[{
+        'sheet':'本期','sources':[{'sheet':'本期','range':[1,2],'rows_scanned':2}],
+        'metrics':metrics,'filter':None,'groups':[{'金额:sum':3}],
+        'rows_scanned':2,'rows_matched':2,'range':[1,2],'full_range':True,
+        'semantics':{'numeric_text':'strict'}}]}
+    m.document_reads.observe('MinerU__aggregate',corrected,[TextBlock(text=json.dumps(body))],True)
+    m.document_reads.recover_reference_argument('MinerU__aggregate',corrected,[])
+    assert not m.document_reads.call_argument_failures
+    assert m.document_reads.failures['policy:other']=='FILE_ACCESS_DENIED'
+
+
+@pytest.mark.asyncio
+async def test_repeated_schema_errors_stop_at_two_but_valid_correction_remains_admissible():
+    m=BankRuntimeGatewayMiddleware(Client());parsed(m)
+    engine=GatewayPermissionEngine(Guard(),m)
+    args={'document_ref':'ds1_current','ops':[{'sheet':'本期','metrics':[{'column':'金额','fn':'sum'}]}],
+          'unexpected_option':True}
+    for _ in range(4):
+        assert (await engine.check_permission(SimpleNamespace(name='MinerU__aggregate'),args)).behavior==PermissionBehavior.DENY
+    assert len(m.client.inputs)==2 and len(m.client.guards)==2
+    corrected=deepcopy(args);corrected.pop('unexpected_option')
+    assert (await engine.check_permission(SimpleNamespace(name='MinerU__aggregate'),corrected)).behavior==PermissionBehavior.ALLOW
+    assert len(m.client.inputs)==3
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('alias',['file_a','fr1_current'])
-async def test_same_turn_known_file_alias_and_numeric_rows_are_bound_before_approval(alias):
-    m = BankRuntimeGatewayMiddleware(Client()); parsed(m)
+async def test_same_turn_known_file_alias_and_numeric_rows_are_bound_before_approval(alias, tmp_path, monkeypatch):
+    from bank_runtime.sandbox import file_refs
+    registry = FileRefRegistry(root=tmp_path)
+    monkeypatch.setattr(file_refs, '_REGISTRY', registry)
+    root = tmp_path/'task_a'; root.mkdir(); path=root/'source.xlsx'; path.write_bytes(b'source')
+    ref = registry.issue(PreparedSandboxFile('file_a', path, 'application/octet-stream', 6,
+        'source.xlsx', '', task_id='task_a'), expires_at=datetime.now(timezone.utc)+timedelta(minutes=5))
+    if alias == 'fr1_current':
+        alias = ref
+    m = BankRuntimeGatewayMiddleware(Client()); parsed(m, file_ref=ref)
     args = {'document_ref':alias,'sheet':'本期','rows':['1','2'],'include_header':'true'}
     expected = {'document_ref':'ds1_current','sheet':'本期','rows':[1,2],'include_header':True}
     await execute(m, 'MinerU__read_range', args, expected)

@@ -9,7 +9,13 @@ import re
 from .document_access import DOCUMENT_TOOLS
 from ..sandbox.file_refs import FileRefError, get_file_ref_registry
 
-_FUNCTIONS = frozenset({'sum', 'avg', 'count', 'count_distinct', 'min', 'max', 'median'})
+
+
+def document_call_argument_hint(name, arguments):
+    if name == 'MinerU__aggregate' and set(arguments) - {'document_ref', 'ops'}:
+        return ('统计调用顶层只使用document_ref和ops；numeric_text须位于各ops对象内，'
+                '值为strict或thousands，不得与已有操作规则冲突。移除其它未声明顶层字段后重试。')
+    return ''
 
 
 def _integer(value):
@@ -38,8 +44,16 @@ def normalize_document_input(name, arguments, *, task_id, ledger):
         return value
     ref = value.get('document_ref')
     if isinstance(ref, str) and ref not in ledger.documents:
+        file_id = ref
+        if ref.startswith('fr1_'):
+            try:
+                file_id = get_file_ref_registry().resolve(ref, expected_task_id=task_id).file_id
+            except FileRefError:
+                # Keep the explicit invalid capability for the authorization
+                # failure path; matching an old ledger alias cannot revive it.
+                file_id = None
         candidates = [token for token, doc in ledger.documents.items()
-                      if ref and (doc.file_id == ref or ledger.source_refs.get(token) == ref)]
+                      if file_id and (doc.file_id == file_id or ledger.source_refs.get(token) == ref)]
         if len(candidates) == 1:
             value['document_ref'] = candidates[0]
     if raw in {'read_range', 'read_document_chunks', 'search'}:
@@ -60,12 +74,4 @@ def normalize_document_input(name, arguments, *, task_id, ledger):
         # execution and coverage accounting, without changing the target.
         if type(value.get('limit')) is int and value['limit'] > 10:
             value['limit'] = 10
-    if raw == 'aggregate' and isinstance(value.get('ops'), list):
-        for op in value['ops']:
-            if not isinstance(op, dict) or not isinstance(op.get('metrics'), list):
-                continue
-            for metric in op['metrics']:
-                if (isinstance(metric, dict) and set(metric) == {'column', 'op'}
-                        and isinstance(metric['op'], str) and metric['op'] in _FUNCTIONS):
-                    metric['fn'] = metric.pop('op')
     return value

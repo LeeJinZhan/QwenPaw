@@ -62,8 +62,12 @@ class OperationRecoveryBudget:
 
     @property
     def pending_input_failures(self) -> int:
+        return self.pending_input_failures_excluding(set())
+
+    def pending_input_failures_excluding(self, excluded: set[tuple[str, str]]) -> int:
         # Unknown execution and exhausted rendering are not argument errors.
-        return sum(item.input_failures for item in self._operations.values() if not item.terminal_reason)
+        return sum(item.input_failures for key, item in self._operations.items()
+                   if key not in excluded and not item.terminal_reason)
 
     def fail(self, name, payload, error_code, *, diagnostic="",
              execution_state="not_started", terminal_reason="") -> None:

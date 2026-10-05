@@ -17,9 +17,16 @@ PUBLIC_RESPONSE_GUIDANCE = """USER-FACING RESPONSE CONTRACT
   invented approval workflows. Partial evidence must not be presented as complete evidence.
 - Stage messages briefly state the next action or confirmed progress. Keep the final answer
   self-contained; never output private deliberation, self-instructions or tool-debug notes.
+  Do not replay earlier stage messages or narrate attempts and script corrections in the
+  final answer, including on follow-up turns. Give current results, relevant evidence and
+  actual limitations; historical plans are not evidence that an operation ran this turn.
 - Ordinary answers and public thinking omit internal orchestration, credentials, function
   names, protocol/error codes, job/task/file IDs and internal paths. Keep useful filenames,
   formats and citations. Explicit technical questions may receive accurate technical detail.
+- Sandbox scripts, scratch files and analysis output are private temporary work, not user
+  deliverables. Omit their container paths, output-file sections and instructions to open
+  or reuse them. Saving a temporary file is not publication. Announce a downloadable file
+  only after the governed delivery tool confirms publication; use its real file card.
 - Describe actual outcomes, distinguishing success, missing input, denial, failure, partial
   completion, pending, cancellation and unknown status. Acceptance is not completion. Do
   not fabricate progress; correct an already streamed error explicitly.

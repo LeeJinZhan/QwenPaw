@@ -33,6 +33,13 @@ class SandboxRequestScope:
     current_attachment_ids: tuple[str, ...]
     discovered_files: dict[str, dict[str, Any]] = field(default_factory=dict)
     selected_file_ids: set[str] = field(default_factory=set)
+    historical_files: dict[str, dict[str, Any]] = field(default_factory=dict)
+    prepared_originals: dict[str, dict[str, Any]] = field(default_factory=dict)
+
+    @property
+    def native_analysis_enabled(self):
+        return (self.sandbox_context.get('native_analysis_enabled') is True
+                and self.sandbox_context.get('isolation_level') == 'container')
 
     @classmethod
     def from_request(cls, request: Any) -> "SandboxRequestScope":

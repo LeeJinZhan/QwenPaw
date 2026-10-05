@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import copy
 import json
 import sys
@@ -34,7 +35,8 @@ from qwenpaw.runtime.runtime import Runtime
 @pytest.mark.asyncio
 @pytest.mark.parametrize("prefix,offset", [("fr1", None), ("dr1", None), ("ds1", None),
                                            ("cur1", 5), ("cs1", 10)])
-async def test_managed_history_redacts_document_handles_on_commit_and_legacy_load(tmp_path, prefix, offset):
+@pytest.mark.parametrize("key", ["document_ref", "doc_ref", "next_cursor", "group_cursor", "next_group_cursor"])
+async def test_managed_history_redacts_document_handles_on_commit_and_legacy_load(tmp_path, prefix, offset, key):
     # Match the formats actually emitted by FileRefRegistry/DocumentStore/StructuredStore.
     token = (f"{prefix}_" + "a" * 64 + "_" + "b" * 64 if offset is None
              else f"{prefix}_{offset}_" + "a" * 32 + "_" + "b" * 64)
@@ -42,9 +44,9 @@ async def test_managed_history_redacts_document_handles_on_commit_and_legacy_loa
         {"role": "user", "content": [{"type": "text", "text": "识别中文台账.xlsx"}],
          "metadata": {"runtime_attachment_metadata": [{"file_id": "file_a", "display_name": "中文台账.xlsx"}]}},
         {"role": "assistant", "content": [{"type": "tool_use", "id": "call-original",
-         "name": "MinerU__read_range", "input": json.dumps({"document_ref": token})}]},
+         "name": "MinerU__read_range", "input": json.dumps({key: token})}]},
         {"role": "tool", "content": [{"type": "tool_result", "id": "call-original",
-         "output": [{"type": "text", "text": json.dumps({"document_ref": token, "rows": 12})}]}]},
+         "output": [{"type": "text", "text": json.dumps({key: token, "rows": 12})}]}]},
         {"role": "assistant", "content": [{"type": "text", "text": "台账共12条记录。"}]},
     ]}}
     original = copy.deepcopy(state)
@@ -65,10 +67,13 @@ async def test_managed_history_redacts_document_handles_on_commit_and_legacy_loa
         for actual in (saved["agent"], resumed.session_state):
             serialized = json.dumps(actual, ensure_ascii=False)
             assert token not in serialized
+            assert "runtime-reference-redacted" not in serialized
+            assert key not in serialized
             assert "中文台账.xlsx" in serialized
             assert "file_a" in serialized
             assert serialized.count("call-original") == 2
             assert "台账共12条记录。" in serialized
+            assert 'requires_current_verification' not in serialized
         assert ctx.agent.state == original
         assert legacy["agent"] == original
     finally:
@@ -720,6 +725,36 @@ async def test_cancel_while_waiting_does_not_release_another_request_lock(
     assert first_scope is not None
     assert first_scope.lock.locked()
     await ManagedSessionCleanupHook().run(first)
+
+
+@pytest.mark.asyncio
+async def test_cancel_cleanup_in_another_context_releases_owned_session_lock(
+    tmp_path,
+):
+    first = _ctx(SafeJSONSession(str(tmp_path)))
+    await ManagedSessionPrepareHook().run(first)
+    first_scope = current_managed_session_scope()
+    assert first_scope is not None and first_scope.lock.locked()
+
+    # Streaming generators can be finalized by a different asyncio task.
+    await asyncio.create_task(
+        ManagedSessionCleanupHook().run(first),
+        context=contextvars.Context(),
+    )
+    assert not first_scope.lock.locked()
+
+    second = _ctx(
+        first.workspace.session,
+        request=_request(task_id="task-002"),
+    )
+    async def followup():
+        await ManagedSessionPrepareHook().run(second)
+        await ManagedSessionCleanupHook().run(second)
+
+    await asyncio.wait_for(
+        asyncio.create_task(followup(), context=contextvars.Context()),
+        timeout=1,
+    )
 
 
 @pytest.mark.asyncio

@@ -8,6 +8,11 @@ from qwenpaw.exceptions import ModelExecutionException
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from bank_runtime.model_reliability import BankModelReliability
 
+@pytest.mark.parametrize("value", [10**400, True, False])
+def test_untrusted_task_budget_overflow_and_boolean_use_safe_default(value):
+    from bank_runtime.model_reliability import positive_seconds
+    assert positive_seconds(value, 3600, maximum=3600) == 3600
+
 @pytest.mark.parametrize('status, expected', [
     (429, 'http_status_429'),
     (502, 'http_status_502'),
@@ -414,3 +419,9 @@ async def test_published_zero_budget_disables_only_selected_recovery(kind):
         await collect(policy, model)
     assert error.value.error_code == ('MODEL_TIMEOUT' if kind=='no_output' else 'MODEL_OUTPUT_TRUNCATED')
     assert len(calls) == 1
+def test_task_budget_supports_one_hour_and_rejects_two_hour_extension():
+    import time
+    from bank_runtime.model_reliability import BankModelReliability
+    before = time.monotonic()
+    reliability = BankModelReliability(7200)
+    assert 3599 <= reliability.deadline - before <= 3601

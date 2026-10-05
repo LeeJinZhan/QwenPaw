@@ -53,6 +53,9 @@ class _Broker:
             authorized.append({"file_id": "file_extra"})
         return {"authorized": authorized, "denied": []}
 
+    async def validate_cached_files(self, scope, files):
+        pass
+
     def stream_locator(self, locator, write_chunk):
         path = (self.object_root / locator["object_key"]).resolve()
         assert path.parent == self.object_root.resolve()
@@ -76,6 +79,57 @@ def _scope() -> SandboxRequestScope:
         },
     )()
     return SandboxRequestScope.from_request(request)
+
+
+@pytest.mark.asyncio
+async def test_partial_cache_only_authorizes_missing_files_and_preserves_success(tmp_path):
+    root = tmp_path / "objects"
+    root.mkdir()
+    cache = TaskAttachmentCache(tmp_path / "cache")
+    broker = _Broker(root)
+    first = (await cache.prepare_files(_scope(), ["file_current"], broker))[0]
+    original_stream = broker.stream_locator
+
+    def fail_second(locator, write):
+        if locator["file_id"] == "file_second":
+            raise SandboxCacheError("stream interrupted")
+        original_stream(locator, write)
+
+    broker.stream_locator = fail_second
+    with pytest.raises(SandboxCacheError):
+        await cache.prepare_files(_scope(), ["file_current", "file_second"], broker)
+    assert broker.calls[-1][0] == ["file_second"]
+    assert first.local_path.read_text() == "content:file_current"
+    assert (await cache.prepare_files(_scope(), ["file_current"], broker))[0] == first
+    await cache.cleanup("task_001")
+
+
+@pytest.mark.asyncio
+async def test_changed_cached_bytes_are_denied_without_consuming_another_grant(tmp_path):
+    objects = tmp_path / "objects"
+    objects.mkdir()
+    cache = TaskAttachmentCache(tmp_path / "cache")
+    broker = _Broker(objects)
+    item = (await cache.prepare_files(_scope(), ["file_current"], broker))[0]
+    item.local_path.write_bytes(b"x" * item.size_bytes)
+    with pytest.raises(SandboxCacheError, match="integrity"):
+        await cache.prepare_files(_scope(), ["file_current"], broker)
+    assert len(broker.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_cached_file_rechecks_current_authority(tmp_path):
+    objects = tmp_path / "objects"
+    objects.mkdir()
+    cache = TaskAttachmentCache(tmp_path / "cache")
+    broker = _Broker(objects)
+    await cache.prepare_files(_scope(), ["file_current"], broker)
+    async def revoked(scope, files):
+        raise SandboxCacheError("authority revoked")
+    broker.validate_cached_files = revoked
+    with pytest.raises(SandboxCacheError, match="revoked"):
+        await cache.prepare_files(_scope(), ["file_current"], broker)
+    assert len(broker.calls) == 1
 
 
 @pytest.mark.asyncio

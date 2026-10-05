@@ -119,6 +119,8 @@ class FileRefRegistry:
                 "FILE_TYPE_UNSUPPORTED", "Task file extension is unsupported"
             )
         digest = _sha256_file(path)
+        if prepared.sha256 and not hmac.compare_digest(digest, prepared.sha256):
+            raise FileRefError("FILE_REF_INVALID", "Task file integrity check failed")
         nonce = secrets.token_bytes(32)
         nonce_text = _encode(nonce)
         mac = hmac.new(self._key, b"fr1\0" + nonce, hashlib.sha256).digest()

@@ -90,10 +90,12 @@ def failure_code(error):
 
 def positive_seconds(value, default, maximum=1800):
     try:
+        if isinstance(value, bool):
+            raise ValueError("invalid timeout")
         number = float(value)
         if math.isfinite(number) and number > 0:
             return min(number, maximum)
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, OverflowError):
         pass
     return default
 
@@ -103,7 +105,7 @@ class BankModelReliability:
 
     def __init__(self, budget_seconds=1800, *, idle_seconds=None,
                  no_output_retry_attempts=1, truncation_recovery_attempts=1):
-        self.deadline = time.monotonic() + positive_seconds(budget_seconds, 1800)
+        self.deadline = time.monotonic() + positive_seconds(budget_seconds, 3600, maximum=3600)
         self.idle_seconds = positive_seconds(
             idle_seconds if idle_seconds is not None else os.getenv('BANK_MODEL_IDLE_TIMEOUT_SECONDS'), 180)
         self.no_output_retry = type(no_output_retry_attempts) is int and no_output_retry_attempts == 1

@@ -76,6 +76,25 @@ def test_reasoning_and_unclassified_text_do_not_become_live_answers():
     assert [event["event"] for event in failed] == ["answer.failed"]
 
 
+@pytest.mark.asyncio
+async def test_real_envelope_empty_text_header_before_tool_does_not_retire_final_body():
+    from agentscope.event import TextBlockStartEvent, TextBlockDeltaEvent, TextBlockEndEvent, ToolCallStartEvent
+    from qwenpaw.runtime.envelope import Envelope
+    envelope=Envelope('empty-preamble');projector=CompactEventProjector('task');output=[]
+    events=[TextBlockStartEvent(reply_id='reply',block_id='empty'),
+            ToolCallStartEvent(reply_id='reply',tool_call_id='read',tool_call_name='read_range'),
+            TextBlockStartEvent(reply_id='reply',block_id='final'),
+            TextBlockDeltaEvent(reply_id='reply',block_id='final',delta='各表统计已返回，合计7条。'),
+            TextBlockEndEvent(reply_id='reply',block_id='final')]
+    for event in events:
+        async for native in envelope.translate_event(event):
+            output.extend(projector.project(native.model_dump(mode='json')))
+    async for native in envelope.finalize():
+        output.extend(projector.project(native.model_dump(mode='json')))
+    assert ''.join(e['text'] for e in output if e['event']=='answer.chunk')=='各表统计已返回，合计7条。'
+    assert output[-1]['event']=='answer.completed'
+
+
 def test_cancel_does_not_replay_streamed_text_or_claim_success():
     projector = CompactEventProjector("task")
     projector.project(start())
@@ -84,6 +103,14 @@ def test_cancel_does_not_replay_streamed_text_or_claim_success():
     assert [event["event"] for event in failed] == ["answer.failed"]
     assert failed[0]["error_code"] == "QWENPAW_TASK_CANCELLED"
     assert projector.project({"object": "response", "status": "completed"}) == []
+
+
+@pytest.mark.parametrize('code',['DOCUMENT_PLAN_INVALID','DOCUMENT_INVENTORY_INCOMPLETE','DOCUMENT_STATISTICS_INCOMPLETE'])
+def test_document_workflow_failure_stage_survives_native_event_projection(code):
+    projector=CompactEventProjector('task')
+    result=projector.project({'event':'error','error':{'code':code,'message':'private diagnostic'}})
+    assert result[0]['event']=='answer.failed' and result[0]['error_code']==code
+    assert 'private diagnostic' not in str(result)
 
 
 @pytest.mark.asyncio

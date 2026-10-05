@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import json
 import re
 import threading
 from contextvars import ContextVar, Token
@@ -21,6 +22,7 @@ from qwenpaw.runtime.phases import Phase
 
 _SCOPE_KEY = "bank_runtime_scope"
 _CTX_TOKEN_KEY = "bank_runtime_session_context_token"
+_CTX_SCOPE_KEY = "bank_runtime_session_scope"
 _DROP = object()
 # Tool arguments/results are often JSON strings, not nested dictionaries.
 # Redact both document handles and the actual offset-bearing cursor format on
@@ -158,7 +160,7 @@ class ManagedSessionStore:
             restored = _bootstrap_agent_state(scope.session_id, bootstrap)
             if restored is None:
                 raise ManagedSessionError("RUNTIME_SESSION_REQUEST_INVALID")
-            scope.loaded_agent_state = restored
+            scope.loaded_agent_state = _sanitize_agent_state(restored)
             return
         if stored:
             marker = stored.get(_SCOPE_KEY)
@@ -337,12 +339,20 @@ class ManagedSessionPrepareHook(LifecycleHook):
         )
         token = _current_scope.set(scope)
         ctx.extras[_CTX_TOKEN_KEY] = token
+        ctx.extras[_CTX_SCOPE_KEY] = scope
         await scope.lock.acquire()
         scope.lock_acquired = True
         await store.prepare(
             scope,
             getattr(request, "session_bootstrap", None),
         )
+        context = getattr(request, 'sandbox_context', None)
+        if (isinstance(context, dict) and context.get('native_analysis_enabled') is True
+                and context.get('isolation_level') == 'container'):
+            # Trusted managed-history policy: raw Scroll archive recall would
+            # bypass this session's task-safe projection. Request data alone
+            # is insufficient; this marker follows verified session preparation.
+            ctx.extras['managed_history_projection'] = True
         return HookResult()
 
 
@@ -433,16 +443,23 @@ class ManagedSessionCleanupHook(LifecycleHook):
     priority = 1000
 
     async def run(self, ctx: HookContext) -> HookResult:
-        scope = _current_scope.get()
-        if scope is not None and scope.lock_acquired and scope.lock.locked():
+        scope = ctx.extras.pop(_CTX_SCOPE_KEY, None)
+        if isinstance(scope, ManagedSessionScope) and scope.lock_acquired:
             scope.lock.release()
             scope.lock_acquired = False
         token = ctx.extras.pop(_CTX_TOKEN_KEY, None)
         if isinstance(token, Token):
-            _current_scope.reset(token)
+            try:
+                _current_scope.reset(token)
+            except ValueError:
+                # Async generator finalization may run in another Context.
+                if _current_scope.get() is scope:
+                    _current_scope.set(None)
         for key in list(ctx.extras):
             if str(key).startswith("bank_runtime_session"):
                 ctx.extras.pop(key, None)
+        if isinstance(scope, ManagedSessionScope):
+            ctx.extras.pop('managed_history_projection', None)
         return HookResult()
 
 
@@ -474,16 +491,17 @@ def _bootstrap_agent_state(
                 if text:
                     blocks.append({"type": "text", "text": text})
         if blocks:
-            restored.append(Msg(name=role, role=role, content=blocks).to_dict())
+            message=Msg(name=role, role=role, content=blocks).to_dict()
+            restored.append(message)
     if not restored:
         return None
-    return {
+    return _sanitize_agent_state({
         "state": {
             "session_id": session_id,
             "summary": "",
             "context": restored,
         }
-    }
+    })
 
 
 def _rollback_last_turn(state: dict[str, Any]) -> dict[str, Any]:
@@ -503,25 +521,132 @@ def _rollback_last_turn(state: dict[str, Any]) -> dict[str, Any]:
 
 
 def _sanitize_agent_state(value: Any) -> Any:
-    sanitized = _sanitize_value(copy.deepcopy(value))
+    # Only the saved/loaded snapshot is projected. The active task retains its
+    # own tool feedback, while audit remains at the Gateway boundary.
+    sanitized = _sanitize_value(_project_execution_history(copy.deepcopy(value)))
     return sanitized if isinstance(sanitized, dict) else {}
 
 
-def _sanitize_value(value: Any) -> Any:
+def _project_execution_history(value: Any) -> Any:
+    from .sandbox.native_tools import NATIVE_TOOL_NAMES
+    transient_names = NATIVE_TOOL_NAMES | {'recall_history', 'recall_history_python'}
+    protocol_types = {'tool_call', 'tool_use', 'tool_result'}
+    native_ids = set()
+
+    def collect(item):
+        if isinstance(item, list):
+            for child in item:
+                collect(child)
+        elif isinstance(item, dict):
+            if item.get('role') in {'assistant', 'tool'}:
+                for block in item.get('content', []):
+                    if (isinstance(block, dict) and block.get('type') in protocol_types
+                            and block.get('name') in transient_names and block.get('id')):
+                        native_ids.add(block['id'])
+            for key, child in item.items():
+                if key != 'content':
+                    collect(child)
+
+    collect(value)
+
+    def without_native_preambles(messages):
+        # Match the live phase contract using SDK ordering, before the tool
+        # pairs disappear. Text before the last tool boundary in a native turn
+        # is stage text; all trailing answer blocks remain verbatim. Never
+        # guess from wording, block count, filenames or stored plain prose.
+        result = list(messages)
+        starts = [i for i, message in enumerate(messages)
+                  if isinstance(message, dict) and message.get('role') == 'user']
+        for start, end in zip([0, *starts], [*starts, len(messages)]):
+            boundary = None
+            native_turn = False
+            for i in range(start, end):
+                message = messages[i]
+                if not isinstance(message, dict) or message.get('role') not in {'assistant', 'tool'}:
+                    continue
+                for j, block in enumerate(message.get('content', [])):
+                    if isinstance(block, dict) and block.get('type') in protocol_types:
+                        boundary = (i, j)
+                        native_turn |= block.get('name') in transient_names or block.get('id') in native_ids
+            if not native_turn or boundary is None:
+                continue
+            for i in range(start, boundary[0] + 1):
+                message = messages[i]
+                if not isinstance(message, dict) or message.get('role') != 'assistant':
+                    continue
+                content = message.get('content')
+                if not isinstance(content, list):
+                    continue
+                kept = [block for j, block in enumerate(content) if not (
+                    isinstance(block, dict) and block.get('type') == 'text'
+                    and (i, j) < boundary)]
+                if len(kept) != len(content):
+                    result[i] = {**message, 'content': kept}
+        return result
+
+    def project(item):
+        if isinstance(item, list):
+            return [clean for child in without_native_preambles(item)
+                    if (clean := project(child)) is not _DROP]
+        if not isinstance(item, dict):
+            return item
+        if item.get('role') in {'assistant', 'tool'} and isinstance(item.get('content'), list):
+            original = item['content']
+            kept = [block for block in original if not (
+                isinstance(block, dict) and (block.get('type') in {'thinking', 'reasoning'}
+                or (block.get('type') in protocol_types
+                    and (block.get('name') in transient_names or block.get('id') in native_ids))))]
+            if len(kept) != len(original):
+                if not kept:
+                    return _DROP  # No empty SDK assistant/tool message after pair removal.
+                item = {**item, 'content': kept}
+        return {key: project(child) if key != 'content' else child for key, child in item.items()}
+
+    return project(value)
+
+
+def _sanitize_value(value: Any, *, tool_payload: bool = False, user_prose: bool = False,
+                    ordinary_prose: bool = False) -> Any:
     if isinstance(value, list):
         result = []
         for item in value:
-            clean = _sanitize_value(item)
+            clean = _sanitize_value(item, tool_payload=tool_payload, user_prose=user_prose, ordinary_prose=ordinary_prose)
             if clean is not _DROP:
                 result.append(clean)
         return result
     if isinstance(value, str):
-        return _RUNTIME_REFERENCE.sub("[runtime-reference-redacted]", value)
+        if tool_payload:
+            try:
+                decoded = json.loads(value)
+            except (ValueError, TypeError):
+                decoded = None
+            if isinstance(decoded, (dict, list)):
+                return json.dumps(_sanitize_value(decoded, tool_payload=True), ensure_ascii=False)
+        if user_prose and not tool_payload:
+            return value
+        if tool_payload or not ordinary_prose:
+            value = re.sub(r'''/workspace/(?:input|scratch|output)/[^\s'"<>]+''', '历史任务路径已移除', value)
+        return _RUNTIME_REFERENCE.sub("历史任务引用已移除", value).replace(
+            "[runtime-reference-redacted]", "历史任务引用已移除")
     if not isinstance(value, dict):
         return value
+    metadata = value.get('metadata')
+    injected_ids = metadata.get('runtime_attachment_block_ids') if isinstance(metadata, dict) else None
+    if isinstance(injected_ids, list) and isinstance(value.get('content'), list):
+        known_ids = {item for item in injected_ids if isinstance(item, str)}
+        value = {**value, 'content': [block for block in value['content']
+            if not isinstance(block, dict) or block.get('id') not in known_ids]}
+    if value.get('type') == 'tool_result' and value.get('name') == 'runtime_sandbox_files_select':
+        from .sandbox.history import selected_file_metadata
+        selected = selected_file_metadata(value)
+        if selected:
+            value = dict(value)
+            metadata = value.get('metadata') if isinstance(value.get('metadata'), dict) else {}
+            value['metadata'] = {**metadata, 'runtime_selected_file_metadata': selected}
     if value.get("_runtime_sandbox_attachment") is True:
         return _DROP
-    if _is_unsafe_file_block(value):
+    tool_payload = tool_payload or value.get("type") in {"tool_use", "tool_call", "tool_result"}
+    if _is_unsafe_file_block(value, tool_payload=tool_payload):
         return _DROP
     forbidden = {
         "_runtime_attachment_file_id",
@@ -532,28 +657,47 @@ def _sanitize_value(value: Any) -> Any:
         "object_key",
         "file_ref",
         "document_ref",
+        "doc_ref",
         "cursor",
+        "next_cursor",
+        "group_cursor",
+        "next_group_cursor",
         "read_url",
         "runtime_tool_gateway",
         "sandbox_context",
         "token",
+        "container_path",
+        "runtime_attachment_block_ids",
     }
     result: dict[str, Any] = {}
     for key, item in value.items():
-        if str(key).lower() in forbidden:
+        if str(key).lower() in forbidden and (tool_payload or not (user_prose or ordinary_prose)):
             continue
-        clean = _sanitize_value(item)
+        clean = _sanitize_value(item, tool_payload=tool_payload,
+            user_prose=user_prose or (key == 'content' and value.get('role') == 'user'),
+            ordinary_prose=ordinary_prose or (key == 'content' and value.get('role') == 'assistant'))
         if clean is not _DROP:
             result[key] = clean
     return result
 
 
-def _is_unsafe_file_block(value: dict[str, Any]) -> bool:
+def _is_unsafe_file_block(value: dict[str, Any], *, tool_payload: bool = False) -> bool:
     block_type = str(value.get("type") or "").lower()
     if block_type == "text":
         text = str(value.get("text") or "")
-        if "<runtime_attachment " in text:
+        if tool_payload and "<runtime_attachment " in text:
             return True
+        # Legacy saved sessions did not carry injected block IDs. Only a
+        # standalone protocol wrapper with an actual task reference is a known
+        # capability block; ordinary explanations of XML remain prose.
+        wrapper = re.fullmatch(
+            r'\s*<runtime_attachment\s+([^>]*)>'
+            r'(?:(?!</?runtime_attachment(?:\s|>)).)*</runtime_attachment>\s*',
+            text, flags=re.DOTALL)
+        if wrapper:
+            reference = re.search(r'''\bfile_ref\s*=\s*(["'])(.*?)\1''', wrapper.group(1))
+            if reference and _RUNTIME_REFERENCE.fullmatch(reference.group(2)):
+                return True
     if block_type not in {
         "audio",
         "data",

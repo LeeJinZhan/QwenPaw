@@ -17,6 +17,8 @@ GOAL_GUIDANCE = """结合当前消息与仍有效的上下文确定目标，沿�
 CURRENT_TURN_GUIDANCE = """本轮回答约定：
 直接完成当前要求；知识问答、解释、分析和写作不以拥有对应工具或联网为前提。历史回答和工具结果不决定当前能力，也不代表本轮已尝试。
 日期、当前能力和执行状态依据可信上下文与本轮实际结果；区分已知知识、实时信息和受保护数据，结果未知如实说明，不编造查询或执行。
+最终正文只给当前要求的结果、依据和实际限制，不复述历史或本轮的执行说明、尝试顺序、脚本修正及自我指令。历史过程不是本轮执行证据。
+沙箱脚本、中间文件和分析输出均为内部临时数据；不向用户展示其路径、输出文件段落或使用说明，不把临时保存宣称为文件交付。仅受控成果工具确认发布后，才说明文件可在文件卡片打开或下载。
 按字段应用已注入的个人偏好：本轮明确指定的语言、详略、语气、引用或格式覆盖对应默认值，未指定的字段继续使用个人偏好；无偏好时再按问题选择合适表达。按需采用适用的个人Skill方法。当前用户要求优先，偏好和Skill不能授予权限或改变目标。
 """ + GOAL_GUIDANCE
 
@@ -34,12 +36,51 @@ RECOVERY_GUIDANCE = """本轮执行恢复：
 
 _TURN_CONTEXT_NAME = "bank_runtime_turn_context"
 _DELIVERY_TOOLS = frozenset({"artifact_generate", "artifact_revise", "artifact_convert", "template_fill_docx", "chart_generate", "chart_export"})
+_FILE_CONTROL_TOOLS = frozenset({'runtime_sandbox_files_search', 'runtime_sandbox_files_select'})
+
+
+def _project_file_control_history(messages):
+    """Current task facts replace historical selection and internal-copy RPCs.
+
+    Stable identities have already been extracted from the loaded session by
+    the sandbox hook. This model-only copy leaves stored prose/audit unchanged.
+    """
+    last_user = max((i for i, msg in enumerate(messages) if msg.role == 'user'), default=-1)
+    expired_ids = set()
+    for message in messages[:max(last_user, 0)]:
+        for block in message.content:
+            if not isinstance(block, ToolCallBlock):
+                continue
+            internal_copy = False
+            if block.name == 'artifact_convert':
+                try:
+                    payload = json.loads(block.input) if isinstance(block.input, str) else block.input
+                    internal_copy = isinstance(payload, dict) and payload.get('purpose') == 'read'
+                except (ValueError, TypeError):
+                    pass
+            if block.name in _FILE_CONTROL_TOOLS or internal_copy:
+                expired_ids.add(block.id)
+    projected = []
+    for i, message in enumerate(messages):
+        if i >= last_user or message.role not in {'assistant', 'tool'}:
+            projected.append(message)
+            continue
+        content = [block for block in message.content if not (
+            isinstance(block, (ToolCallBlock, ToolResultBlock))
+            and (block.name in _FILE_CONTROL_TOOLS or block.id in expired_ids))]
+        if len(content) == len(message.content):
+            projected.append(message)
+        elif content:
+            item = copy(message)
+            item.content = content
+            projected.append(item)
+    return projected
 
 
 FOLLOWUP_GUIDANCE = """回答尾部的可选推荐追问（平台交互字段，不属于正文）：
 先完成本轮回答，再判断是否存在与当前内容直接相关、尚未回答、用户值得继续了解的下一步。有这样的下一步时，输出1至3条推荐；不要等待用户专门要求推荐。
-按实际内容选择，不重复已经完成的内容。每条使用用户视角：用户点击后原样作为下一轮消息发送，应是明确的下一步请求或想深入了解的具体问题。
-不要替助手征询用户要不要帮助、是否想继续或是否需要做某件事。例如可写“帮我细化实施步骤”或“解释一下这个判断的依据”。业务问题本身可以是是非问句，如“这个方案是否适用于小团队？”，重点是询问具体内容，而非询问用户意愿。
+按实际内容选择，不重复已经完成的内容。每条使用用户视角：用户点击后原样作为下一轮消息发送，应是明确的短动作式选项，每条直接说明要执行的动作和对象。
+直接写“细化实施步骤”“解释判断依据”“评估适用条件”等请求。不写助手视角的征询句，不用“需要我……吗”“是否需要……”“要不要……”或其他询问用户意愿的表达；需进一步判断的业务问题也写成评估、比较、解释等具体动作，不把是非问句当作选项。
 正文末尾不要再写“需要我……”或重复推荐列表；推荐只放在下一行的保留格式中：
 <bank_followups>["具体的下一步问题"]</bank_followups>
 使用JSON字符串数组，不用代码围栏；该字段由平台分离为按钮，既不是工具调用，也不是新增用户输入。不要为追问调用工具、查找文件或另起模型请求。
@@ -50,11 +91,15 @@ FOLLOWUP_GUIDANCE = """回答尾部的可选推荐追问（平台交互字段，
 
 def prepare_public_model_context(
     request: dict[str, Any], *, delivery_required: bool = False, recovering: bool = False,
+    file_context: str = '',
+    project_file_history: bool = False,
 ) -> dict[str, Any]:
     # Replace only our owned ephemeral layer. Profile, personal catalog, activated
     # Skill results and all other system sections remain untouched.
     messages = [msg for msg in request.get("messages") or []
                 if not (msg.role == "system" and msg.metadata.get("bank_runtime_layer") == _TURN_CONTEXT_NAME)]
+    if project_file_history:
+        messages = _project_file_control_history(messages)
     last_user = max((index for index, msg in enumerate(messages) if msg.role == "user"), default=-1)
     # Tool visibility and prose never activate execution guidance. Only current
     # tool blocks and trusted middleware state do; old operations stay historical.
@@ -98,5 +143,6 @@ def prepare_public_model_context(
     conditional = (DELIVERY_GUIDANCE if delivery_required else "") + (RECOVERY_GUIDANCE if recovering else "")
     messages.append(SystemMsg(name="system", metadata={"bank_runtime_layer": _TURN_CONTEXT_NAME},
                               content=CURRENT_TURN_GUIDANCE + conditional +
+                              ('\n' + file_context if file_context else '') +
                               "\n本轮可调用入口：" + json.dumps(names, ensure_ascii=False) + "\n\n" + FOLLOWUP_GUIDANCE))
     return {**request, "messages": messages}

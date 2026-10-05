@@ -32,6 +32,7 @@ class PreparedSandboxFile:
     original_name: str
     expires_at: str
     task_id: str = ""
+    sha256: str = ""
 
 
 class TaskAttachmentCache:
@@ -83,10 +84,14 @@ class TaskAttachmentCache:
                 if key[0] != scope.task_id:
                     continue
                 if item.local_path.is_file():
+                    await _run_thread(_verify_cached, item)
                     task_prepared[key[1]] = item
                 else:
                     self._prepared.pop(key, None)
             new_ids = [file_id for file_id in ordered if file_id not in task_prepared]
+            reused = [task_prepared[file_id] for file_id in ordered if file_id in task_prepared]
+            if reused:
+                await broker.validate_cached_files(scope, reused)
             if len(task_prepared) + len(new_ids) > self.max_files:
                 raise SandboxCacheError("Attachment file quota exceeded")
             cached = {
@@ -100,10 +105,11 @@ class TaskAttachmentCache:
                 return [cached[file_id] for file_id in ordered]  # type: ignore[misc]
             authorization = await broker.authorize_files(
                 scope,
-                ordered,
-                selection_records=selection_records,
+                new_ids,
+                selection_records=[record for record in (selection_records or [])
+                                   if record.get("file_id") in new_ids] or None,
             )
-            locators = self._validated_locators(authorization, ordered)
+            locators = self._validated_locators(authorization, new_ids)
             total = sum(item.size_bytes for item in task_prepared.values()) + sum(
                 _locator_size(locators[file_id]) for file_id in new_ids
             )
@@ -132,13 +138,14 @@ class TaskAttachmentCache:
                         self._prepared[(scope.task_id, file_id)] = item
                     prepared.append(item)
             except BaseException:
-                try:
-                    if scope.task_id in self._leases:
+                # Each committed file already passed its own size/hash check.
+                # A later stream failure must not erase earlier materialization
+                # or force its consumed grant to be issued again.
+                if not any(key[0] == scope.task_id for key in self._prepared):
+                    try:
                         await _run_thread(_safe_remove_tree, self.root, task_root)
-                finally:
-                    self._release_lease(scope.task_id)
-                for key in [key for key in self._prepared if key[0] == scope.task_id]:
-                    self._prepared.pop(key, None)
+                    finally:
+                        self._release_lease(scope.task_id)
                 raise
             return prepared
 
@@ -252,7 +259,19 @@ class TaskAttachmentCache:
             original_name=name,
             expires_at=str(locator.get("expires_at") or "")[:64],
             task_id=task_id,
+            sha256=actual_hash,
         )
+
+
+def _verify_cached(item: PreparedSandboxFile) -> None:
+    if item.local_path.is_symlink() or item.local_path.stat().st_size != item.size_bytes:
+        raise SandboxCacheError("Attachment cache integrity check failed")
+    digest = hashlib.sha256()
+    with item.local_path.open("rb") as stream:
+        while chunk := stream.read(1024 * 1024):
+            digest.update(chunk)
+    if not item.sha256 or digest.hexdigest() != item.sha256:
+        raise SandboxCacheError("Attachment cache integrity check failed")
 
 
 def _locator_size(locator: dict[str, Any]) -> int:

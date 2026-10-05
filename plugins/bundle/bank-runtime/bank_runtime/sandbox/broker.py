@@ -99,6 +99,38 @@ class RuntimeFileBroker:
             raise SandboxBrokerError("Runtime file broker response is invalid")
         return data
 
+    async def validate_cached_files(self, scope, files):
+        data = await self._post("/runtime/internal/sandbox/attachments/validate-materialized",
+            {"sandbox_context": dict(scope.sandbox_context), "file_ids": [item.file_id for item in files]})
+        verified = {item.get("file_id"): item for item in data.get("files", []) if isinstance(item, dict)}
+        if len(verified) != len(files) or any(item.file_id not in verified
+                or verified[item.file_id].get("content_hash") != item.sha256
+                or verified[item.file_id].get("size_bytes") != item.size_bytes for item in files):
+            raise SandboxBrokerError("Cached source authority or integrity changed")
+
+    async def prepare_originals(self, scope, files):
+        data = await self._post('/runtime/internal/sandbox/attachments/prepare-originals',
+            {'sandbox_context': dict(scope.sandbox_context), 'file_ids': [item.file_id for item in files]})
+        raw = data.get('files')
+        if not isinstance(raw, list) or len(raw) != len(files):
+            raise SandboxBrokerError('Original preparation response is invalid')
+        expected = {item.file_id: item for item in files}
+        safe, seen = [], set()
+        import re
+        for item in raw:
+            if not isinstance(item, dict) or item.get('file_id') not in expected or item['file_id'] in seen:
+                raise SandboxBrokerError('Original preparation response is invalid')
+            original = expected[item['file_id']]
+            path = item.get('container_path')
+            if (item.get('content_hash') != original.sha256 or item.get('size_bytes') != original.size_bytes
+                    or not isinstance(path, str) or not re.fullmatch(
+                        '/workspace/input/' + re.escape(original.file_id) + '/' + re.escape(original.sha256) + r'(?:\.[a-z0-9]{1,15})?', path)):
+                raise SandboxBrokerError('Original preparation integrity changed')
+            seen.add(item['file_id'])
+            safe.append({key: item.get(key) for key in ('file_id', 'display_name', 'content_type', 'size_bytes',
+                                                      'content_hash', 'container_path')})
+        return safe
+
     def stream_locator(self, locator: dict[str, Any], write_chunk: Any) -> None:
         provider = str(locator.get("storage_provider") or "").lower()
         object_key = _safe_object_key(locator.get("object_key"))

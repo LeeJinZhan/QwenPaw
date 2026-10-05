@@ -118,8 +118,11 @@ class DocumentReadIncompleteError(FileOperationsIncompleteError):
     def __init__(self, code="DOCUMENT_READ_INCOMPLETE") -> None:
         AgentRuntimeErrorException.__init__(
             self, error_code=code,
-            message=("文件分析参数校验未通过，暂时无法完成分析。" if code == "DOCUMENT_ARGUMENT_INVALID"
-                     else "文件内容尚未完整读取，不能提供全量统计或生成完整分析报告。"), details={},
+            message={"DOCUMENT_ARGUMENT_INVALID":"文件分析参数校验未通过，暂时无法完成分析。",
+                "DOCUMENT_PLAN_INVALID":"文件需求尚未确认，暂时无法完成本次处理。",
+                "DOCUMENT_INVENTORY_INCOMPLETE":"文件目录尚未完整取得，暂时无法完成本次处理。",
+                "DOCUMENT_STATISTICS_INCOMPLETE":"本次所需统计尚未完成，暂时无法提供完整结果。"}.get(
+                    code,"文件内容尚未完整读取，不能提供全量统计或生成完整分析报告。"), details={},
         )
 
 
@@ -351,9 +354,10 @@ async def artifact_convert(
 
     For uploaded .doc/.xls, set source_type=session_file, source_id to its file_id,
     target_format=docx/xlsx, and omit source_generated_file_id. For personal files
-    use workspace_file. Modern Office may use the same target format with
-    purpose=read to prepare a safe structural copy; PDF can provide a visual
-    reading copy for charts/Visio. Read the returned attachment before analysis.
+    use workspace_file. When native Python analysis is available, read supported
+    original tables directly; do not request a same-format copy for reading or
+    as recovery from a script error. PDF can provide a necessary visual reading
+    copy for charts/Visio. Read the returned attachment before analysis.
     A converted file alone is not a completed analysis or a revised deliverable.
     Use purpose=read for internal recognition, including a supported PDF visual
     derivative. Read the requested analysis scope and its pagination before

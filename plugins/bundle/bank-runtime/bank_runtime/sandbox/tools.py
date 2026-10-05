@@ -47,6 +47,10 @@ def reset_sandbox_tool_state(token) -> None:
     _STATE.reset(token)
 
 
+def current_sandbox_tool_state() -> SandboxToolState | None:
+    return _STATE.get()
+
+
 def attachment_read_error() -> str:
     state = _STATE.get()
     if state is None:
@@ -69,7 +73,7 @@ async def runtime_sandbox_files_search(
     """
     state = _STATE.get()
     if state is None:
-        return _text("Runtime file search is unavailable.")
+        return _text("Runtime file search is unavailable.", success=False)
     try:
         safe_query = str(query or "").strip()
         if len(safe_query) > 200 or any(ord(char) < 32 for char in safe_query):
@@ -95,18 +99,21 @@ async def runtime_sandbox_files_search(
         ]
         return _text(json.dumps({"files": public}, ensure_ascii=False, sort_keys=True))
     except (RuntimeError, TypeError, ValueError):
-        return _text("Runtime file search failed.")
+        return _text("Runtime file search failed.", success=False)
 
 
 async def runtime_sandbox_files_select(file_ids: list[str]) -> ToolResponse:
-    """Authorize and prepare files returned by this task's metadata search.
+    """Authorize and prepare exact file IDs with fresh current-task access.
 
     Returns fresh file references for reading/conversion. Old conversation file
     references and paths must not be reused. Clarify ambiguous file choices first.
+    In native analysis an exact known historical file_id can be selected directly:
+    the Gateway first discovers that same ID through the governed metadata search.
+    Otherwise search to identify the file before selection.
     """
     state = _STATE.get()
     if state is None:
-        return _text("Runtime file selection is unavailable.")
+        return _text("Runtime file selection is unavailable.", success=False)
     try:
         records = state.scope.selection_records(file_ids)
         prepared = await state.cache.prepare_files(
@@ -115,7 +122,7 @@ async def runtime_sandbox_files_select(file_ids: list[str]) -> ToolResponse:
             state.broker,
             selection_records=records,
         )
-        blocks = _prepared_blocks(state, prepared)
+        blocks = await _prepared_blocks(state, prepared)
         state.scope.mark_selected(list(file_ids))
         selected = [
             {
@@ -127,6 +134,8 @@ async def runtime_sandbox_files_select(file_ids: list[str]) -> ToolResponse:
             }
             for record in records
         ]
+        if state.scope.native_analysis_enabled:
+            selected = [{**item, **state.scope.prepared_originals[item['file_id']]} for item in selected]
         return ToolResponse(
             content=[
                 TextBlock(
@@ -139,15 +148,24 @@ async def runtime_sandbox_files_select(file_ids: list[str]) -> ToolResponse:
             ]
         )
     except (RuntimeError, TypeError, ValueError):
-        return _text("Runtime file selection failed.")
+        return _text("Runtime file selection failed.", success=False)
 
 
-def _prepared_blocks(state, prepared):
+async def _prepared_blocks(state, prepared, *, originals=True):
     if not prepared:
         return []
     expiry = datetime.fromisoformat(str(state.scope.sandbox_context["expires_at"]).replace("Z", "+00:00"))
     registry = get_file_ref_registry()
     refs = {item.file_id: registry.issue(item, expires_at=expiry) for item in prepared}
+    if state.scope.native_analysis_enabled and originals:
+        metadata = await state.broker.prepare_originals(state.scope, prepared)
+        state.scope.prepared_originals.update({item['file_id']: item for item in metadata})
+        # Media continues through native model data blocks. Ordinary documents
+        # carry authorized container metadata rather than forced inline text.
+        media = [item for item in prepared if state.processor._kind(item) in {'image', 'audio', 'video'}]
+        return [TextBlock(type='text', text='<runtime_attachment trusted="false" mode="native-original">'
+                          + json.dumps({'files': metadata}, ensure_ascii=False) + '</runtime_attachment>'),
+                *state.processor.process(media, file_refs=refs)]
     return state.processor.process(prepared, file_refs=refs)
 
 
@@ -164,7 +182,7 @@ async def converted_attachment_blocks(payload, result):
         return []
     try:
         prepared = await state.cache.prepare_files(state.scope, ids, state.broker)
-        return _prepared_blocks(state, prepared)
+        return await _prepared_blocks(state, prepared, originals=False)
     except (RuntimeError, ValueError) as exc:
         _logger.warning(
             "Converted attachment preparation failed: task_id=%s error_type=%s",
@@ -200,8 +218,10 @@ def _validated_extensions(value: Any) -> list[str]:
     return list(dict.fromkeys(result))
 
 
-def _text(value: str) -> ToolResponse:
-    return ToolResponse(content=[TextBlock(type="text", text=value)])
+def _text(value: str, *, success: bool = True) -> ToolResponse:
+    from agentscope.message import ToolResultState
+    return ToolResponse(content=[TextBlock(type="text", text=value)],
+                        state=ToolResultState.SUCCESS if success else ToolResultState.ERROR)
 
 
 __all__ = [

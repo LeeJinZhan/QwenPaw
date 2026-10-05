@@ -182,9 +182,12 @@ class GatewayClient:
         self,
         preflight: Mapping[str, Any],
         decision: str,
+        *, validation_error_code: str = '',
     ) -> dict[str, Any]:
         if decision not in {"allow", "block", "require_approval"}:
             raise GatewayError("Tool Guard decision is invalid")
+        if validation_error_code and (decision != 'block' or validation_error_code != 'DOCUMENT_ARGUMENT_INVALID'):
+            raise GatewayError('Tool validation diagnostic is invalid')
         permit = preflight.get("permit")
         permit_payload = permit.get("payload") if isinstance(permit, Mapping) else None
         if not isinstance(permit_payload, Mapping):
@@ -200,6 +203,8 @@ class GatewayClient:
             "permit_id": str(permit_payload.get("permit_id") or ""),
             "permit_nonce": str(permit_payload.get("permit_nonce") or ""),
         }
+        if validation_error_code:
+            payload['validation_error_code']=validation_error_code
         response = await self._post(payload)
         expected = {
             "allow": "executing",
@@ -328,7 +333,7 @@ class GatewayClient:
         }
         try:
             async with httpx.AsyncClient(
-                timeout=httpx.Timeout(300 if payload.get("phase") == "execute" else 10, connect=10),
+                timeout=httpx.Timeout(300 if payload.get("phase") == "execute" else 10, connect=5),
                 follow_redirects=False,
                 trust_env=False,
             ) as client:

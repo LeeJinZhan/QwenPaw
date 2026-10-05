@@ -46,6 +46,65 @@ def observe_parse(ledger):
     )
 
 
+def test_reparse_migrates_schema_failure_budget_and_current_success_recovers():
+    ledger=DocumentReadLedger();observe_parse(ledger)
+    name='MinerU__aggregate'
+    ledger.reject_call_arguments(name,{'document_ref':REF})
+    ledger.reject_call_arguments(name,{'document_ref':REF})
+    item=parse_item();item['document_ref']='new_ref'
+    ledger.observe('MinerU__parse_documents',{'documents':[{'file_id':'f1'}]},blocks({'items':[item]}),True)
+    assert (name,REF) not in ledger.call_argument_failures
+    assert ledger.call_argument_failures[(name,'new_ref')]==2
+    doc=ledger.documents['new_ref'];doc.aggregates.append({'sources':[]})
+    ledger.recover_reference_argument(name,{'document_ref':'new_ref','ops':[{}]},[])
+    assert not ledger.call_argument_failures
+
+
+def test_repeated_verified_source_range_stops_loop_without_becoming_missing_data():
+    ledger = DocumentReadLedger(); observe_parse(ledger)
+    args = {'document_ref': REF, 'sheet': '支行01', 'rows': [2,2], 'format': 'source'}
+    value = {'document_ref': REF, 'sheet': '支行01', 'coordinate_space': 'source',
+        'records': [{'row': 2, 'source_row': 2, 'values': ['00880000000000000001']}],
+        'rows_returned': [2,2], 'columns': ['账号'], 'has_more': False, 'all_columns': True, 'signature': 'sig'}
+    for _ in range(4):
+        ledger.start('MinerU__read_range', args)
+        ledger.observe('MinerU__read_range', args, blocks(value), True)
+    assert not ledger.pending
+    assert ledger.successful_read_repeats
+    assert not ledger.documents[REF].complete and not ledger.sources_complete(['f1'])
+
+
+def test_source_coverage_keeps_tail_gap_and_merges_verified_pages():
+    ledger=DocumentReadLedger()
+    item=parse_item()
+    item['inventory']['sheets'][0]['source_rows']=21
+    ledger.observe('MinerU__parse_documents',{'documents':[{'file_id':'f1'}]},blocks({'items':[item]}),True)
+    def page(start,end,total=21):
+        args={'document_ref':REF,'sheet':'支行01','rows':[start,end],'format':'source'}
+        value={'document_ref':REF,'sheet':'支行01','coordinate_space':'source','rows_returned':[start,end],
+            'sheet_total_rows':total,'all_columns':True,'signature':'sig','has_more':False,
+            'records':[{'source_row':i,'row':i,'values':[i]} for i in range(start,end+1)]}
+        ledger.observe('MinerU__read_range',args,blocks(value),True)
+    page(1,20)
+    sheet=ledger.evidence_snapshot()['documents'][0]['sheets'][0]
+    assert sheet['source_total_rows']==21 and sheet['source_complete'] is False
+    assert sheet['source_covered_ranges']==[[1,20]]
+    page(21,21,total=999)  # contradictory totals must never close the gap
+    assert ledger.evidence_snapshot()['documents'][0]['sheets'][0]['source_complete'] is False
+    page(21,21)
+    assert ledger.evidence_snapshot()['documents'][0]['sheets'][0]['source_complete'] is True
+    assert ledger.documents[REF].sheet_full('支行01') is False
+
+
+def test_search_policy_denial_cannot_be_erased_by_successful_read_of_same_document():
+    ledger = DocumentReadLedger(); observe_parse(ledger)
+    args = {'document_ref': REF, 'query': 'target'}
+    ledger.observe('MinerU__search', args, blocks({'status':'failed','error_code':'FILE_ACCESS_DENIED'}), False)
+    assert ledger.pending and ledger.error_code == 'ARTIFACT_OUTPUT_MISSING'
+    ledger.observe('MinerU__read_range', {'document_ref': REF, 'sheet':'支行01'}, blocks(range_result('支行01',1,20)), True)
+    assert ledger.pending and not ledger.permits_scoped_answer('仅已核验范围。')
+
+
 def range_result(sheet, start, end, total=20):
     return {
         "document_ref": REF,
@@ -345,6 +404,100 @@ def test_corrected_aggregate_clears_argument_failure_without_claiming_raw_covera
     assert not ledger.documents[REF].sheet_full('支行01')
 
 
+def test_argument_budget_and_recovery_are_independent_between_sheets():
+    ledger = DocumentReadLedger(); observe_parse(ledger)
+    for sheet in ('支行01', '支行02'):
+        payload = {'document_ref':REF,'ops':[{'sheet':sheet,'metrics':[{'column':'错误列','fn':'sum'}]}]}
+        ledger.start('MinerU__aggregate', payload)
+        ledger.observe('MinerU__aggregate', payload, blocks({'status':'failed','error_code':'DOCUMENT_ARGUMENT_INVALID'}), False)
+    assert not ledger.argument_retry_exhausted, 'Two sheets are not two retries of one operation'
+    aggregate_evidence(ledger)
+    assert ledger.pending, 'Success in sheet 1 cannot erase the sheet 2 failure'
+    assert ledger.error_code == 'DOCUMENT_ARGUMENT_INVALID'
+
+
+def test_corrected_argument_cannot_clear_different_filter_failure():
+    ledger = DocumentReadLedger(); observe_parse(ledger)
+    payload = {'document_ref':REF,'ops':[{'sheet':'支行01','filter':{'column':'姓名','op':'eq','value':'甲'},
+        'metrics':[{'column':'错误列','fn':'sum'}]}]}
+    ledger.start('MinerU__aggregate', payload)
+    ledger.observe('MinerU__aggregate', payload, blocks({'status':'failed','error_code':'DOCUMENT_ARGUMENT_INVALID'}), False)
+    aggregate_evidence(ledger)
+    assert ledger.pending
+
+
+def test_different_metric_column_does_not_clear_failed_statistic():
+    ledger = DocumentReadLedger(); observe_parse(ledger)
+    payload = {'document_ref':REF,'ops':[{'sheet':'支行01','metrics':[{'column':'其它金额','fn':'sum'}]}]}
+    ledger.start('MinerU__aggregate', payload)
+    ledger.observe('MinerU__aggregate', payload, blocks({'status':'failed','error_code':'DOCUMENT_ARGUMENT_INVALID'}), False)
+    aggregate_evidence(ledger)
+    assert ledger.pending and ledger.error_code == 'DOCUMENT_ARGUMENT_INVALID'
+
+
+def test_corrected_missing_metrics_can_recover_same_sheet():
+    ledger=DocumentReadLedger(); observe_parse(ledger)
+    payload={'document_ref':REF,'ops':[{'sheet':'支行01'}]}
+    ledger.start('MinerU__aggregate',payload)
+    ledger.observe('MinerU__aggregate',payload,blocks({'status':'failed','error_code':'DOCUMENT_ARGUMENT_INVALID'}),False)
+    aggregate_evidence(ledger)
+    assert not ledger.pending
+
+
+def test_corrected_unknown_field_can_recover_same_statistic():
+    ledger=DocumentReadLedger(); observe_parse(ledger)
+    payload={'document_ref':REF,'ops':[{'sheet':'支行01','limit':10,'metrics':[{'column':'金额','fn':'sum'}]}]}
+    ledger.start('MinerU__aggregate',payload)
+    ledger.observe('MinerU__aggregate',payload,blocks({'status':'failed','error_code':'DOCUMENT_ARGUMENT_INVALID'}),False)
+    aggregate_evidence(ledger)
+    assert not ledger.pending
+
+
+def test_corrected_function_case_can_recover_same_statistic():
+    ledger=DocumentReadLedger(); observe_parse(ledger)
+    payload={'document_ref':REF,'ops':[{'sheet':'支行01','metrics':[{'column':'金额','fn':'SUM'}]}]}
+    ledger.start('MinerU__aggregate',payload)
+    ledger.observe('MinerU__aggregate',payload,blocks({'status':'failed','error_code':'DOCUMENT_ARGUMENT_INVALID'}),False)
+    aggregate_evidence(ledger)
+    assert not ledger.pending
+
+
+def test_corrected_unknown_function_recovers_without_clearing_another_column():
+    ledger=DocumentReadLedger(); observe_parse(ledger)
+    payload={'document_ref':REF,'ops':[{'sheet':'支行01','metrics':[{'column':'金额','fn':'total'}]}]}
+    ledger.start('MinerU__aggregate',payload)
+    ledger.observe('MinerU__aggregate',payload,blocks({'status':'failed','error_code':'DOCUMENT_ARGUMENT_INVALID'}),False)
+    aggregate_evidence(ledger)
+    assert not ledger.pending
+
+
+def test_corrected_partial_metric_shape_recovers_only_matching_known_metrics():
+    for malformed in ([{'column':'金额','fn':'sum'}, {'column':'姓名','fn':'total'}], ['sum'],
+                      [{'column':'金额','fn':'count','op':'sum'}]):
+        ledger=DocumentReadLedger(); observe_parse(ledger)
+        payload={'document_ref':REF,'ops':[{'sheet':'支行01','metrics':malformed}]}
+        ledger.start('MinerU__aggregate',payload)
+        ledger.observe('MinerU__aggregate',payload,blocks({'status':'failed','error_code':'DOCUMENT_ARGUMENT_INVALID'}),False)
+        metrics=([{'column':'金额','fn':'sum'}, {'column':'姓名','fn':'avg'}]
+                 if len(malformed)==2 else [{'column':'金额','fn':'sum'}])
+        corrected={'document_ref':REF,'ops':[{'sheet':'支行01','metrics':metrics}]}
+        result={'sources':[{'sheet':'支行01','range':[1,20],'rows_scanned':20}],
+                'metrics':metrics,'group_by':[],'filter':None,'groups':[{'金额:sum':3}]}
+        ledger.start('MinerU__aggregate',corrected)
+        ledger.observe('MinerU__aggregate',corrected,blocks({'document_ref':REF,'results':[result],'truncated':False}),True)
+        assert not ledger.pending, malformed
+
+
+def test_partial_metric_repair_cannot_change_a_known_sibling_computation():
+    ledger=DocumentReadLedger(); observe_parse(ledger)
+    payload={'document_ref':REF,'ops':[{'sheet':'支行01','metrics':[
+        {'column':'金额','fn':'avg'}, {'column':'姓名','fn':'total'}]}]}
+    ledger.start('MinerU__aggregate',payload)
+    ledger.observe('MinerU__aggregate',payload,blocks({'status':'failed','error_code':'DOCUMENT_ARGUMENT_INVALID'}),False)
+    aggregate_evidence(ledger)
+    assert ledger.pending
+
+
 def test_evidence_snapshot_reports_scope_without_free_text_judgment():
     ledger = DocumentReadLedger()
     observe_parse(ledger)
@@ -576,3 +729,33 @@ def test_aggregate_success_cannot_clear_raw_read_failure():
     aggregate_evidence(ledger)
     assert ledger.pending
     assert ledger.error_code == 'DOCUMENT_REF_EXPIRED'
+
+
+def test_partial_office_ocr_unknown_task_blocks_same_source_resubmission():
+    for reason in ('MINERU_TIMEOUT', 'MINERU_SUBMIT_AMBIGUOUS'):
+        ledger = DocumentReadLedger()
+        name = 'MinerU__parse_documents'
+        payload = {'documents': [{'file_id': 'f1'}], 'options': {'image_text': True}}
+        item = {'file_id': 'f1', 'status': 'completed', 'content_mode': 'inline',
+                'markdown': '已读取正文及第一批图片', 'coverage': {'image_text': 'partial'},
+                'ocr_batches': {'stop_reason': reason}}
+        ledger.start(name, payload)
+        ledger.observe(name, payload, blocks({'items': [item]}), True)
+        assert ledger.failures['parse:f1'] == reason
+        assert ledger.repeated_request(name, payload) == reason
+        # Changing parse options must not resubmit an unresolved source job.
+        assert ledger.repeated_request(name, {'documents': [{'file_id': 'f1'}]}) == reason
+        assert ledger.repeated_request(name, {'documents': [{'file_id': 'f2'}]}) == ''
+
+
+def test_office_ocr_output_limit_remains_partial_without_remote_job_block():
+    ledger = DocumentReadLedger()
+    name = 'MinerU__parse_documents'
+    payload = {'documents': [{'file_id': 'f1'}], 'options': {'image_text': True}}
+    ledger.start(name, payload)
+    ledger.observe(name, payload, blocks({'items': [{
+        'file_id': 'f1', 'status': 'completed', 'content_mode': 'inline',
+        'coverage': {'image_text': 'partial'}, 'ocr_batches': {'stop_reason': 'output_byte_limit'},
+    }]}), True)
+    assert ledger.failures['parse:f1'] == 'DOCUMENT_READ_INCOMPLETE'
+    assert ledger.repeated_request(name, payload) == ''

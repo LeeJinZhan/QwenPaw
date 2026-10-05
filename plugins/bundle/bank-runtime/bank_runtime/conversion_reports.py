@@ -1,5 +1,6 @@
 """Bounded conversion evidence from Runtime; document/model prose is never evidence."""
 from collections.abc import Mapping
+import re
 
 WARNINGS = frozenset({"object_static", "object_unreadable", "attachment_extracted",
                       "external_resource_removed", "active_content_removed"})
@@ -15,7 +16,7 @@ PARTIAL_NOTICE = "以下仅总结已读取的部分内容；部分嵌入对象�
 
 def validate_conversion_report(value):
     if (not isinstance(value, Mapping)
-            or set(value) != {"schema_version", "coverage", "editable", "warnings", "objects"}
+            or set(value) - {"provenance"} != {"schema_version", "coverage", "editable", "warnings", "objects"}
             or value.get("schema_version") != "1.0"
             or value.get("coverage") not in ("complete", "partial")
             or type(value.get("editable")) is not bool):
@@ -43,8 +44,16 @@ def validate_conversion_report(value):
     if value["editable"] and (any(item["status"] in ("static", "unreadable") for item in objects)
             or set(warnings) & {"object_static", "object_unreadable", "external_resource_removed", "active_content_removed"}):
         return None
+    if "provenance" in value:
+        evidence = value["provenance"]
+        if (not isinstance(evidence, Mapping) or set(evidence) != {"engine", "source_sha256", "result_sha256", "recalculation", "fidelity"}
+                or evidence.get("engine") not in {"package_sanitizer", "libreoffice"}
+                or evidence.get("recalculation") not in {"not_performed", "unverified"} or evidence.get("fidelity") != "unverified"
+                or any(not isinstance(evidence.get(key), str) or not re.fullmatch('[a-f0-9]{64}', evidence[key]) for key in ('source_sha256', 'result_sha256'))):
+            return None
     return {"schema_version": "1.0", "coverage": value["coverage"], "editable": value["editable"],
-            "warnings": list(warnings), "objects": [dict(item) for item in objects]}
+            "warnings": list(warnings), "objects": [dict(item) for item in objects],
+            **({"provenance": dict(value["provenance"])} if "provenance" in value else {})}
 
 
 def conversion_reason(envelope):
