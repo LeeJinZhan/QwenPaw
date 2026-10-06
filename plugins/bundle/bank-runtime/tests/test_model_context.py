@@ -235,5 +235,7 @@ async def test_followup_contract_reaches_current_model_request_after_history(mod
     assert '用户点击后原样作为下一轮消息发送' in str(normalized[0]['content'])
     assert '短动作式选项' in str(normalized[0]['content'])
     assert '每条直接说明要执行的动作和对象' in str(normalized[0]['content'])
+    assert '动作＋明确对象或范围' in str(normalized[0]['content'])
+    assert '点击后能直接发起下一步' in str(normalized[0]['content'])
     assert '业务问题本身可以是是非问句' not in str(normalized[0]['content'])
     assert normalized[-1]['content'] == wire[-2]['content']
