@@ -905,6 +905,8 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
                     getattr(exc, "code", ""), getattr(exc, "violation", "")
                 ),
                 code=getattr(exc, "code", ""),
+                violation=getattr(exc, "violation", ""),
+                http_status=getattr(exc, "http_status", None),
                 validation_hint=getattr(exc, "validation_hint", ""),
                 layout_failure=getattr(exc, "layout_failure", None),
                 conversion_failure=getattr(exc, "conversion_failure", ""),
@@ -994,7 +996,10 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
         try:
             await self.client.report_guard(prepared.preflight, "allow")
         except Exception as exc:
-            raise GatewayError("Runtime Tool Guard acknowledgement failed") from exc
+            if isinstance(exc, GatewayError) and exc.definitive_rejection:
+                raise
+            raise GatewayError("工具授权确认未完成，本次未执行。", code="TOOL_GUARD_REPORT_FAILED",
+                               failure_metadata={"execution_status": "not_started", "retryable": False}) from exc
         tool_call_id = str(prepared.preflight.get("tool_call_id") or "")
         started_at = time.monotonic()
         result_reported = False
@@ -1323,7 +1328,12 @@ class GatewayPermissionEngine:
                 REASONS.get(getattr(exc, "conversion_failure", "")) or getattr(exc, "validation_hint", "") or failure_message(getattr(exc, "code", ""), getattr(exc, "violation", ""))
             )
 
+        admitted_hash = canonical_payload_hash(tool_input)
+        guard_started_at = time.monotonic()
         decision = await self.delegate.check_permission(tool, tool_input)
+        if canonical_payload_hash(tool_input) != admitted_hash:
+            await self._report_guard_safely(preflight, "block")
+            return _deny("审批期间操作参数已变化，本次未执行。请重新发起。")
         blocked_boundary = tool_name in _BLOCKED_NESTED_TOOLS or bool(
             getattr(tool, "is_external_tool", False)
         )
@@ -1338,7 +1348,7 @@ class GatewayPermissionEngine:
         if decision.behavior != PermissionBehavior.ALLOW:
             self.middleware.reject_document_preflight(tool_name, tool_input, 'FILE_ACCESS_DENIED')
             await self._report_guard_safely(preflight, "require_approval")
-            return _deny("此操作需要审批，尚未执行。")
+            return _deny("此操作要求额外授权，但当前入口不支持审批后继续，本次已停止。")
         hint = document_call_argument_hint(tool_name, tool_input)
         if hint:
             # Schema rejection follows the original Runtime/Tool Guard checks,
@@ -1348,6 +1358,30 @@ class GatewayPermissionEngine:
                 validation_error_code='DOCUMENT_ARGUMENT_INVALID')
             self.middleware.document_reads.reject_call_arguments(tool_name, tool_input)
             return _deny(hint)
+        # Core Tool Guard waits for the approval Future inside check_permission.
+        # Its 300-second wait may outlive the 30-second Runtime permit. Refresh
+        # the same call after the trusted decision, checking current authority.
+        expires_at = str(preflight.get("permit", {}).get("payload", {}).get("expires_at") or "")
+        refresh_needed = time.monotonic() - guard_started_at >= 20
+        if expires_at:
+            from datetime import datetime, timezone
+            try:
+                expiry = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
+                if expiry.tzinfo is None:
+                    return _deny("执行凭证时间无效，本次未执行。")
+                refresh_needed = refresh_needed or (expiry - datetime.now(timezone.utc)).total_seconds() <= 5
+            except ValueError:
+                return _deny("执行凭证时间无效，本次未执行。")
+        if refresh_needed:
+            try:
+                preflight = await self.middleware.client.preflight(
+                    tool_name, tool_input, call_id=call_id, refresh=preflight,
+                )
+            except Exception as exc:
+                _logger.warning("Runtime authorization refresh failed: tool=%s error_type=%s", tool_name, type(exc).__name__)
+                if isinstance(exc, GatewayError) and exc.definitive_rejection:
+                    return _deny(failure_message(exc.code, exc.violation))
+                return _deny("审批或检查后权限校验未通过，本次未执行。请重新发起。")
         self.middleware.prepare(tool_name, tool_input, preflight)
         return decision
 
@@ -1358,8 +1392,12 @@ class GatewayPermissionEngine:
     ) -> None:
         try:
             await self.middleware.client.report_guard(preflight, decision)
-        except Exception:
-            return
+        except Exception as exc:
+            if isinstance(exc, GatewayError) and exc.definitive_rejection:
+                raise
+            _logger.error("Runtime Guard decision synchronization failed: tool_call_id=%s decision=%s error_type=%s",
+                          preflight.get("tool_call_id", ""), decision, type(exc).__name__)
+            raise GatewayError("工具决定同步失败，本次未执行，需核验调用记录。", code="TOOL_GUARD_REPORT_FAILED") from exc
 
 
 class BankRuntimeGatewayInstallHook(LifecycleHook):

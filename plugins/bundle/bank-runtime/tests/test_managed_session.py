@@ -772,3 +772,56 @@ async def test_error_hook_restores_stable_session_code_after_generic_mapping(
 
     assert ctx.extras["_error_code"] == "RUNTIME_SESSION_NOT_FOUND"
     assert ctx.extras["_error_text"] == "Managed session is unavailable"
+
+
+@pytest.mark.asyncio
+async def test_cleanup_in_fresh_context_releases_owned_scope_and_allows_next_turn(tmp_path):
+    from contextvars import Context
+    first = _ctx(SafeJSONSession(str(tmp_path)))
+    await ManagedSessionPrepareHook().run(first)
+    owned = current_managed_session_scope()
+    await asyncio.create_task(ManagedSessionCleanupHook().run(first), context=Context())
+    assert not owned.lock.locked()
+    assert current_managed_session_scope() is None
+    second = _ctx(first.workspace.session, request=_request(task_id='task-002'))
+    await asyncio.wait_for(ManagedSessionPrepareHook().run(second), timeout=1)
+    await ManagedSessionCleanupHook().run(second)
+
+
+@pytest.mark.asyncio
+async def test_shielded_cancel_cleanup_does_not_unlock_another_request(tmp_path):
+    from contextvars import Context
+    first = _ctx(SafeJSONSession(str(tmp_path)))
+    await ManagedSessionPrepareHook().run(first)
+    first_scope = current_managed_session_scope()
+    second = _ctx(first.workspace.session, request=_request(task_id='task-002'))
+    entered = asyncio.Event()
+    async def waiter():
+        try:
+            entered.set()
+            await ManagedSessionPrepareHook().run(second)
+        finally:
+            cleanup = asyncio.create_task(ManagedSessionCleanupHook().run(second), context=Context())
+            await asyncio.shield(cleanup)
+    waiting = asyncio.create_task(waiter())
+    await entered.wait()
+    await asyncio.sleep(0)
+    waiting.cancel()
+    with pytest.raises(asyncio.CancelledError): await waiting
+    assert first_scope.lock.locked()
+    await asyncio.create_task(ManagedSessionCleanupHook().run(first), context=Context())
+    assert not first_scope.lock.locked()
+
+
+@pytest.mark.asyncio
+async def test_normal_nested_cleanup_restores_outer_scope(tmp_path):
+    first = _ctx(SafeJSONSession(str(tmp_path)))
+    await ManagedSessionPrepareHook().run(first)
+    parent_scope = current_managed_session_scope()
+    nested = _ctx(first.workspace.session, request=_request(user_id='other',task_id='other-task'))
+    await ManagedSessionPrepareHook().run(nested)
+    await ManagedSessionCleanupHook().run(nested)
+    assert current_managed_session_scope() is parent_scope
+    assert parent_scope.lock.locked()
+    await ManagedSessionCleanupHook().run(first)
+    assert current_managed_session_scope() is None

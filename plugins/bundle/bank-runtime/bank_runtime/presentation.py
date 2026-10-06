@@ -34,15 +34,23 @@ PUBLIC_RESPONSE_GUIDANCE = """USER-FACING RESPONSE CONTRACT
 
 
 def failure_message(code: str = "", violation: str = "") -> str:
+    if violation == "user_authority_unverified":
+        return "当前用户身份未通过服务端认证，无法确认工具权限，本次未执行。请通过已配置的认证入口重新进入，不要改用其他工具重试。"
     if violation in {"worker_tool_mapping_missing", "assistant_tool_not_allowed"}:
         return "当前助手尚未开通此能力，本次未执行。"
-    if violation == "tool_requires_approval":
-        return "此操作需要审批，尚未执行。"
+    if violation == "tool_requires_approval" or code == "TOOL_APPROVAL_UNSUPPORTED":
+        return "此操作要求额外授权，但当前入口不支持审批后继续，本次已停止。请联系管理员确认工具策略后重新发起。"
     if code in {"POLICY_BLOCKED", "POLICY_DENIED"}:
         return "当前不允许执行此操作，本次未执行。"
-    if code in {"FORBIDDEN", "FILE_ACCESS_DENIED"}:
+    if code == "FORBIDDEN":
+        return "当前用户的操作授权未通过校验，本次未执行。请联系管理员确认授权后重新发起，不要改用其他工具重试。"
+    if code == "FILE_ACCESS_DENIED":
         return "当前内容不可访问或已失效。"
-    if code in {"UNAUTHORIZED", "EMBED_SESSION_EXPIRED"}:
+    if code == "UNAUTHORIZED":
+        return "当前用户授权无法确认，本次未执行。请重新登录后再发起，不要改用其他工具重试。"
+    if code == "TOOL_GUARD_REPORT_FAILED":
+        return "工具授权确认未完成，本次未执行。请先核验授权与调用状态，不要改用其他工具绕过。"
+    if code == "EMBED_SESSION_EXPIRED":
         return "当前连接已失效，请重新进入助手。"
     if code in {"INVALID_REQUEST", "BAD_REQUEST"}:
         return "操作所需信息不完整或格式不正确，本次未执行。"
@@ -68,7 +76,7 @@ def failure_metadata(envelope: Mapping[str, Any]) -> dict[str, Any]:
         if isinstance(envelope.get(key), Mapping):
             facts.update(envelope[key])
     state = facts.get("execution_status")
-    if state not in {"not_started", "failed", "completed", "execution_unknown", "executing", "pending", "cancelled"}:
+    if state not in {"not_started", "failed", "completed", "execution_unknown", "executing", "pending", "cancelled", "not_started_cancelled"}:
         state = "execution_unknown"
     code = str(envelope.get("error_code") or "")
     denied = code in {"POLICY_BLOCKED", "POLICY_DENIED", "FORBIDDEN", "FILE_ACCESS_DENIED",

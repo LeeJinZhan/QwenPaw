@@ -63,3 +63,12 @@ def test_presentation_keeps_actual_page_count_for_precise_delivery_check():
     result = artifact_model_result({'status': 'success', 'result': {
         'artifact_status': 'succeeded', 'generated_file_ids': ['file'], 'page_count': 7}})
     assert result['result']['page_count'] == 7
+
+
+def test_unverified_authority_is_not_network_failure_or_permission_to_retry():
+    from bank_runtime.presentation import failure_message, failure_metadata
+    message = failure_message('FORBIDDEN', 'user_authority_unverified')
+    assert '服务端认证' in message and '未执行' in message
+    assert '已配置' in message and '不要改用其他工具' in message
+    facts = failure_metadata({'error_code': 'FORBIDDEN', 'execution_status': 'not_started_cancelled', 'retryable': True})
+    assert facts == {'execution_status': 'not_started_cancelled', 'retryable': False, 'recovery_action': 'stop'}

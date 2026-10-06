@@ -157,3 +157,44 @@ def _safe_id(value: str) -> str:
 
 
 __all__ = ["GatewayResultOutbox", "OUTBOX_STATUSES"]
+
+
+class GatewayGuardOutbox(GatewayResultOutbox):
+    """Persist only fixed Guard acknowledgement metadata; never execute tools."""
+    FIELDS = frozenset({'phase', 'task_id', 'session_id', 'policy_snapshot_id', 'tool_session_id',
+                        'worker_agent_id', 'tool_call_id', 'guard_decision', 'protocol_version',
+                        'task_scope_id', 'capability_snapshot_hash', 'permit_id', 'permit_nonce'})
+
+    def enqueue_guard(self, payload: dict[str, Any]) -> None:
+        if payload.get('guard_decision') not in {'allow', 'block', 'require_approval'}:
+            raise ValueError('unsupported Guard decision')
+        task, call = _safe_id(str(payload['task_id'])), _safe_id(str(payload['tool_call_id']))
+        record = {'task_id': task, 'tool_call_id': call, 'attempts': 0,
+                  'expires_at_epoch': time.time() + 300,
+                  'payload': {key: str(payload[key]) for key in self.FIELDS if key in payload}}
+        self._atomic_write(self._path(task, call), record)
+
+    async def flush(self, task_id: str, sender) -> dict[str, int]:
+        delivered = pending = exhausted = 0
+        for record in self.pending(task_id):
+            path = self._path(record['task_id'], record['tool_call_id'])
+            if float(record.get('expires_at_epoch') or 0) <= time.time():
+                path.unlink(missing_ok=True)
+                continue
+            attempts = int(record.get('attempts') or 0)
+            if attempts >= self.max_attempts:
+                exhausted += 1
+                continue
+            try:
+                await sender(dict(record['payload']))
+            except Exception as exc:
+                if getattr(exc, 'definitive_rejection', False):
+                    path.unlink(missing_ok=True)
+                    raise
+                record['attempts'] = attempts + 1
+                self._atomic_write(path, record)
+                pending += 1
+            else:
+                path.unlink(missing_ok=True)
+                delivered += 1
+        return {'delivered': delivered, 'pending': pending, 'exhausted': exhausted}
