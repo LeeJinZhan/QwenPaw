@@ -21,6 +21,7 @@ from qwenpaw.runtime.phases import Phase
 
 _SCOPE_KEY = "bank_runtime_scope"
 _CTX_TOKEN_KEY = "bank_runtime_session_context_token"
+_CTX_SCOPE_KEY = "bank_runtime_session_owned_scope"
 _DROP = object()
 # Tool arguments/results are often JSON strings, not nested dictionaries.
 # Redact both document handles and the actual offset-bearing cursor format on
@@ -67,6 +68,7 @@ class ManagedSessionScope:
     duplicate_task: bool = False
     commit_allowed: bool = False
     committed: bool = False
+    closed: bool = False
 
     @property
     def lock_key(self) -> tuple[str, str, str, str]:
@@ -97,7 +99,8 @@ _current_scope: ContextVar[ManagedSessionScope | None] = ContextVar(
 
 
 def current_managed_session_scope() -> ManagedSessionScope | None:
-    return _current_scope.get()
+    scope = _current_scope.get()
+    return scope if scope is not None and not scope.closed else None
 
 
 def _install_managed_session_store(workspace: Any) -> "ManagedSessionStore":
@@ -241,7 +244,7 @@ class ManagedSessionStore:
                 **state_modules_mapping,
             )
             return
-        if not scope.commit_allowed or scope.committed or scope.duplicate_task:
+        if scope.closed or not scope.commit_allowed or scope.committed or scope.duplicate_task:
             return
         agent = state_modules_mapping.get("agent")
         if agent is None:
@@ -337,6 +340,7 @@ class ManagedSessionPrepareHook(LifecycleHook):
         )
         token = _current_scope.set(scope)
         ctx.extras[_CTX_TOKEN_KEY] = token
+        ctx.extras[_CTX_SCOPE_KEY] = scope
         await scope.lock.acquire()
         scope.lock_acquired = True
         await store.prepare(
@@ -353,7 +357,7 @@ class ManagedSessionCommitHook(LifecycleHook):
 
     async def run(self, ctx: HookContext) -> HookResult:
         scope = _current_scope.get()
-        if scope is not None and ctx.error is None and ctx.agent is not None:
+        if scope is not None and not scope.closed and ctx.error is None and ctx.agent is not None:
             scope.commit_allowed = True
         return HookResult()
 
@@ -433,13 +437,24 @@ class ManagedSessionCleanupHook(LifecycleHook):
     priority = 1000
 
     async def run(self, ctx: HookContext) -> HookResult:
-        scope = _current_scope.get()
-        if scope is not None and scope.lock_acquired and scope.lock.locked():
-            scope.lock.release()
-            scope.lock_acquired = False
+        # Generator cleanup may run in another task/context. The request owns
+        # this scope; a ContextVar lookup may be empty or point to another turn.
+        scope = ctx.extras.pop(_CTX_SCOPE_KEY, None)
+        if isinstance(scope, ManagedSessionScope):
+            scope.closed = True
+            scope.commit_allowed = False
+            if scope.lock_acquired:
+                scope.lock.release()
+                scope.lock_acquired = False
         token = ctx.extras.pop(_CTX_TOKEN_KEY, None)
         if isinstance(token, Token):
-            _current_scope.reset(token)
+            try:
+                _current_scope.reset(token)
+            except ValueError:
+                # A token can only restore its creating context. Do not clear a
+                # different request's active scope in the cleanup context.
+                if _current_scope.get() is scope:
+                    _current_scope.set(None)
         for key in list(ctx.extras):
             if str(key).startswith("bank_runtime_session"):
                 ctx.extras.pop(key, None)

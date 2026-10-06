@@ -203,3 +203,167 @@ async def test_execution_transport_waits_for_document_worker_but_control_calls_r
     await client._post({'phase': 'execute'})
     await client._post({'phase': 'result'})
     assert timeouts == [10, 300, 10]
+
+
+@pytest.mark.asyncio
+async def test_guard_failure_persists_only_ack_metadata_and_flush_never_executes(tmp_path, monkeypatch):
+    import json, stat
+    client = GatewayClient(_config(), outbox=GatewayResultOutbox(tmp_path))
+    preflight = {'tool_call_id':'runtime_call_001','permit':_permit({'query':'private input must not persist'})}
+    attempts = []
+    async def failed(payload):
+        attempts.append(payload)
+        raise GatewayError('transport unavailable')
+    monkeypatch.setattr(client, '_post', failed)
+    with pytest.raises(GatewayError, match='synchronization is pending'):
+        await client.report_guard(preflight, 'block')
+    assert len(attempts) == 3
+    pending = client.guard_outbox.pending('task_001')
+    assert len(pending) == 1
+    serialized = json.dumps(pending)
+    assert 'private input' not in serialized and 'worker-secret' not in serialized
+    paths = list((tmp_path / 'guard').glob('*.json'))
+    assert stat.S_IMODE(paths[0].stat().st_mode) == 0o600
+    async def ack(payload):
+        assert payload['phase'] == 'guard'
+        assert 'input' not in payload
+        return {'tool_call_id':payload['tool_call_id'],'guard_decision':'block','status':'cancelled'}
+    monkeypatch.setattr(client, '_post', ack)
+    delivery = await client.guard_outbox.flush('task_001', client._send_guard)
+    assert delivery['delivered'] == 1
+    assert not client.guard_outbox.pending('task_001')
+
+
+@pytest.mark.asyncio
+async def test_refresh_reuses_fixed_call_and_input_hash(tmp_path, monkeypatch):
+    client = GatewayClient(_config(), outbox=GatewayResultOutbox(tmp_path))
+    body={'query':'public policy'}
+    original={'tool_call_id':'runtime_call_001','permit':_permit(body),'call_id':'same-call'}
+    async def refresh(payload):
+        assert payload['phase']=='refresh'
+        assert payload['tool_call_id']=='runtime_call_001'
+        assert payload['permit_id']=='permit_001'
+        assert payload['permit_nonce']=='nonce-once'
+        assert payload['input_hash']==canonical_payload_hash(body)
+        assert payload['idempotency_key']=='qwenpaw:same-call'
+        fresh=_permit(body)
+        fresh['payload']['permit_id']='fresh_permit'
+        return {'phase':'allow','decision':'allow','status':'allowed','tool_call_id':'runtime_call_001','permit':fresh}
+    monkeypatch.setattr(client,'_post',refresh)
+    result=await client.preflight('policy_search',body,call_id='same-call',refresh=original)
+    assert result['tool_call_id']=='runtime_call_001'
+    assert result['permit']['payload']['permit_id']=='fresh_permit'
+
+@pytest.mark.asyncio
+async def test_guard_authorization_denial_is_preserved_without_retry_or_outbox(tmp_path, monkeypatch):
+    from bank_runtime.presentation import failure_message
+    client = GatewayClient(_config(), outbox=GatewayResultOutbox(tmp_path))
+    preflight = {'tool_call_id': 'runtime_call_001', 'permit': _permit({'query': 'public'})}
+    attempts = []
+    async def denied(payload):
+        attempts.append(payload)
+        raise GatewayError('private identity must not reach model', code='FORBIDDEN',
+                           failure_metadata={'execution_status': 'not_started_cancelled', 'retryable': False})
+    monkeypatch.setattr(client, '_post', denied)
+    with pytest.raises(GatewayError) as caught:
+        await client.report_guard(preflight, 'allow')
+    assert caught.value.code == 'FORBIDDEN'
+    assert len(attempts) == 1
+    assert not client.guard_outbox.pending('task_001')
+    assert caught.value.execution_status == 'not_started_cancelled'
+    assert caught.value.failure_metadata['recovery_action'] == 'stop'
+    message = failure_message(caught.value.code)
+    assert '授权' in message and '未执行' in message
+    assert 'private identity' not in message
+
+@pytest.mark.asyncio
+async def test_guard_http_permanent_rejection_does_not_become_transport_failure(tmp_path, monkeypatch):
+    import httpx
+    attempts = []
+    class Transport:
+        def __init__(self, **kwargs): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): pass
+        async def post(self, *args, **kwargs):
+            attempts.append(kwargs)
+            return httpx.Response(403, json={'detail': {'code': 'FORBIDDEN', 'message': 'sensitive user identity',
+                                  'details': {'execution_status': 'not_started_cancelled', 'retryable': False}}})
+    monkeypatch.setattr(httpx, 'AsyncClient', Transport)
+    client = GatewayClient(_config(), outbox=GatewayResultOutbox(tmp_path))
+    with pytest.raises(GatewayError) as caught:
+        await client.report_guard({'tool_call_id': 'runtime_call_001', 'permit': _permit({})}, 'allow')
+    assert caught.value.code == 'FORBIDDEN'
+    assert caught.value.http_status == 403
+    assert len(attempts) == 1
+    assert not client.guard_outbox.pending('task_001')
+    assert 'sensitive user identity' not in str(caught.value)
+
+@pytest.mark.asyncio
+async def test_queued_guard_fixed_rejection_is_removed_and_preserved(tmp_path, monkeypatch):
+    client = GatewayClient(_config(), outbox=GatewayResultOutbox(tmp_path))
+    client.guard_outbox.enqueue_guard({'phase': 'guard', **client._scope_payload(),
+                                     'tool_call_id': 'runtime_call_001', 'guard_decision': 'allow'})
+    calls = []
+    async def refused(payload):
+        calls.append(payload['phase'])
+        raise GatewayError('fixed refusal', code='FORBIDDEN', violation='user_authority_unverified')
+    monkeypatch.setattr(client, '_post', refused)
+    with pytest.raises(GatewayError) as caught:
+        await client.preflight('policy_search', {})
+    assert caught.value.code == 'FORBIDDEN'
+    assert caught.value.violation == 'user_authority_unverified'
+    assert calls == ['guard']
+    assert not client.guard_outbox.pending('task_001')
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('status,code,attempts,queued', [(401, 'UNAUTHORIZED', 1, False),
+    (422, 'INVALID_REQUEST', 1, False), (409, 'PERMIT_EXPIRED', 1, False),
+    (410, 'PERMIT_EXPIRED', 1, False), (429, 'RATE_LIMITED', 3, True)])
+async def test_guard_rejections_keep_native_code_and_transient_failures_retry(tmp_path, monkeypatch, status, code, attempts, queued):
+    client = GatewayClient(_config(), outbox=GatewayResultOutbox(tmp_path))
+    calls = []
+    async def refused(payload):
+        calls.append(payload)
+        raise GatewayError('safe test rejection', code=code, http_status=status,
+                           failure_metadata={'execution_status': 'not_started', 'retryable': False})
+    monkeypatch.setattr(client, '_post', refused)
+    with pytest.raises(GatewayError) as caught:
+        await client.report_guard({'tool_call_id': 'runtime_call_001', 'permit': _permit({})}, 'allow')
+    assert caught.value.code == ('TOOL_GUARD_REPORT_FAILED' if queued else code)
+    assert len(calls) == attempts
+    assert bool(client.guard_outbox.pending('task_001')) is queued
+
+@pytest.mark.asyncio
+async def test_non_json_forbidden_response_remains_fixed_denial(tmp_path, monkeypatch):
+    import httpx
+    class Transport:
+        def __init__(self, **kwargs): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): pass
+        async def post(self, *args, **kwargs): return httpx.Response(403, text='private HTML identity error')
+    monkeypatch.setattr(httpx, 'AsyncClient', Transport)
+    client = GatewayClient(_config(), outbox=GatewayResultOutbox(tmp_path))
+    with pytest.raises(GatewayError) as caught:
+        await client.report_guard({'tool_call_id': 'runtime_call_001', 'permit': _permit({})}, 'allow')
+    assert caught.value.code == 'FORBIDDEN'
+    assert caught.value.http_status == 403
+    assert not client.guard_outbox.pending('task_001')
+    assert 'private HTML' not in str(caught.value)
+
+@pytest.mark.asyncio
+async def test_result_callback_forbidden_does_not_claim_tool_was_not_started(tmp_path, monkeypatch):
+    import httpx
+    class Transport:
+        def __init__(self, **kwargs): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): pass
+        async def post(self, *args, **kwargs): return httpx.Response(403, json={'detail': {'code': 'FORBIDDEN'}})
+    monkeypatch.setattr(httpx, 'AsyncClient', Transport)
+    client = GatewayClient(_config(), outbox=GatewayResultOutbox(tmp_path))
+    with pytest.raises(GatewayError) as caught:
+        await client._post({'phase': 'result'})
+    assert caught.value.execution_status == 'execution_unknown'
+    assert 'not executed' not in str(caught.value)
+    with pytest.raises(GatewayError) as guard:
+        await client._post({'phase': 'guard'})
+    assert guard.value.execution_status == 'not_started'

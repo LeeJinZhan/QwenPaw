@@ -19,6 +19,7 @@ Three return semantics (``HookAction``):
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -300,8 +301,21 @@ class HookRegistry:
           can skip the two fixed agent steps.
         * Any hook raising propagates to the runtime's ``ON_ERROR`` chain
           via the normal exception path — the registry does **not** swallow
-          exceptions; tests rely on this contract.
+          exceptions; tests rely on this contract. FINALLY runs every resource
+          hook before propagating its first failure; it cannot short-circuit.
         """
+        if phase == Phase.FINALLY:
+            first_error = None
+            for hook in self.hooks_for(phase):
+                try:
+                    await hook.run(ctx)
+                except (Exception, asyncio.CancelledError) as exc:
+                    if first_error is None:
+                        first_error = exc
+                    logger.warning("FINALLY hook failed hook=%s error_type=%s", hook.name, type(exc).__name__)
+            if first_error is not None:
+                raise first_error
+            return HookResult()
         final_action = HookAction.CONTINUE
         for hook in self.hooks_for(phase):
             result = await hook.run(ctx)

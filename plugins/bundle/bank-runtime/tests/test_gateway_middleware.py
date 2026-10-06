@@ -30,8 +30,8 @@ class _Client:
     def __init__(self) -> None:
         self.events: list[tuple] = []
 
-    async def preflight(self, tool_name, tool_input, *, call_id):
-        self.events.append(("preflight", tool_name, dict(tool_input), call_id))
+    async def preflight(self, tool_name, tool_input, *, call_id, refresh=None):
+        self.events.append(("refresh" if refresh is not None else "preflight", tool_name, dict(tool_input), call_id))
         return {
             "tool_call_id": "runtime_call_001",
             "permit": {"payload": {"permit_id": "permit_001"}},
@@ -549,7 +549,7 @@ async def test_builtin_plugin_mcp_and_mode_tools_share_the_same_chain() -> None:
         assert [event[0] for event in client.events] == [
             "preflight",
             "tool_guard",
-            "guard",
+                "guard",
             "execute",
             "result",
         ]
@@ -810,3 +810,94 @@ def test_factory_captures_trusted_runtime_model_policy(monkeypatch):
     assert middleware.model_reliability.truncation_recovery is False
     policy['idle_seconds'] = 900
     assert middleware.model_reliability.idle_seconds == 300
+
+
+@pytest.mark.asyncio
+async def test_core_guard_wait_rechecks_the_same_call_and_denies_revocation():
+    class RefreshDenied(_Client):
+        async def preflight(self, tool_name, tool_input, *, call_id, refresh=None):
+            if refresh is not None:
+                assert refresh["tool_call_id"] == "runtime_call_001"
+                raise GatewayError("Permission revoked")
+            result = await super().preflight(tool_name, tool_input, call_id=call_id)
+            result["permit"]["payload"]["expires_at"] = "2000-01-01T00:00:00+00:00"
+            return result
+    client = RefreshDenied()
+    middleware = BankRuntimeGatewayMiddleware(client)
+    engine = GatewayPermissionEngine(_DelegateEngine(PermissionBehavior.ALLOW, client.events), middleware)
+    decision = await engine.check_permission(SimpleNamespace(name="policy_search", is_external_tool=False), {"query":"example"})
+    assert decision.behavior == PermissionBehavior.DENY
+    assert not middleware._prepared
+
+@pytest.mark.asyncio
+async def test_guard_report_failure_is_observable_and_cannot_prepare_execution():
+    class ReportFailed(_Client):
+        async def report_guard(self, preflight, decision):
+            raise GatewayError("transport failed")
+    client = ReportFailed()
+    middleware = BankRuntimeGatewayMiddleware(client)
+    engine = GatewayPermissionEngine(_DelegateEngine(PermissionBehavior.DENY, client.events), middleware)
+    with pytest.raises(GatewayError, match="同步失败"):
+        await engine.check_permission(SimpleNamespace(name="policy_search", is_external_tool=False), {"query":"example"})
+    assert not middleware._prepared
+
+@pytest.mark.asyncio
+async def test_guard_wrapper_keeps_server_authorization_refusal():
+    denial = GatewayError('safe authorization refusal', code='FORBIDDEN', violation='user_authority_unverified', http_status=403)
+    async def report_guard(*args): raise denial
+    engine = object.__new__(GatewayPermissionEngine)
+    engine.middleware = SimpleNamespace(client=SimpleNamespace(report_guard=report_guard))
+    with pytest.raises(GatewayError) as caught:
+        await engine._report_guard_safely({'tool_call_id': 'runtime_call_001'}, 'allow')
+    assert caught.value is denial
+    assert caught.value.violation == 'user_authority_unverified'
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('fixed_rejection', [True, False])
+async def test_actual_allow_ack_path_preserves_denial_without_executing_handler(fixed_rejection):
+    client = _Client()
+    middleware = BankRuntimeGatewayMiddleware(client)
+    engine = GatewayPermissionEngine(_DelegateEngine(PermissionBehavior.ALLOW, client.events), middleware)
+    decision = await engine.check_permission(SimpleNamespace(name='policy_search', is_external_tool=False), {'query': 'public'})
+    assert decision.behavior == PermissionBehavior.ALLOW
+    async def refused_guard(*args):
+        if fixed_rejection:
+            raise GatewayError('private identity', code='FORBIDDEN', violation='user_authority_unverified', http_status=403,
+                               failure_metadata={'execution_status': 'not_started_cancelled', 'retryable': False})
+        raise OSError('private transport path')
+    client.report_guard = refused_guard
+    executed = []
+    async def next_handler(**kwargs):
+        executed.append(kwargs)
+        yield ToolResponse(id='model_call_001', content=[], state=ToolResultState.SUCCESS)
+    call = ToolCallBlock(id='model_call_001', name='policy_search', input=json.dumps({'query': 'public'}))
+    with pytest.raises(GatewayError) as caught:
+        _ = [item async for item in middleware.on_acting(SimpleNamespace(), {'tool_call': call}, next_handler)]
+    assert executed == []
+    assert caught.value.code == ('FORBIDDEN' if fixed_rejection else 'TOOL_GUARD_REPORT_FAILED')
+    assert caught.value.execution_status == ('not_started_cancelled' if fixed_rejection else 'not_started')
+    assert caught.value.failure_metadata['retryable'] is False
+    if fixed_rejection:
+        assert caught.value.violation == 'user_authority_unverified'
+        assert caught.value.http_status == 403
+        assert '服务端认证' in str(caught.value)
+    assert 'private' not in str(caught.value)
+
+@pytest.mark.asyncio
+async def test_permit_refresh_denial_preserves_unverified_identity_public_message():
+    class UnverifiedAfterWait(_Client):
+        async def preflight(self, tool_name, tool_input, *, call_id, refresh=None):
+            if refresh is not None:
+                raise GatewayError('private identity', code='FORBIDDEN', violation='user_authority_unverified', http_status=403)
+            result = await super().preflight(tool_name, tool_input, call_id=call_id)
+            result['permit']['payload']['expires_at'] = '2000-01-01T00:00:00+00:00'
+            return result
+    client = UnverifiedAfterWait()
+    middleware = BankRuntimeGatewayMiddleware(client)
+    engine = GatewayPermissionEngine(_DelegateEngine(PermissionBehavior.ALLOW, client.events), middleware)
+    decision = await engine.check_permission(SimpleNamespace(name='policy_search', is_external_tool=False), {'query': 'public'})
+    assert decision.behavior == PermissionBehavior.DENY
+    assert '服务端认证' in decision.message
+    assert '已配置' in decision.message
+    assert 'private' not in decision.message
+    assert not middleware._prepared
