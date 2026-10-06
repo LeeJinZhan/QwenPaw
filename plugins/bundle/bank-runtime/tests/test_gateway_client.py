@@ -206,7 +206,8 @@ async def test_execution_transport_waits_for_document_worker_but_control_calls_r
 
 
 @pytest.mark.asyncio
-async def test_guard_failure_persists_only_ack_metadata_and_flush_never_executes(tmp_path, monkeypatch):
+@pytest.mark.parametrize('diagnostic', ['', 'DOCUMENT_ARGUMENT_INVALID'])
+async def test_guard_failure_persists_only_ack_metadata_and_flush_never_executes(tmp_path, monkeypatch, diagnostic):
     import json, stat
     client = GatewayClient(_config(), outbox=GatewayResultOutbox(tmp_path))
     preflight = {'tool_call_id':'runtime_call_001','permit':_permit({'query':'private input must not persist'})}
@@ -216,7 +217,7 @@ async def test_guard_failure_persists_only_ack_metadata_and_flush_never_executes
         raise GatewayError('transport unavailable')
     monkeypatch.setattr(client, '_post', failed)
     with pytest.raises(GatewayError, match='synchronization is pending'):
-        await client.report_guard(preflight, 'block')
+        await client.report_guard(preflight, 'block', validation_error_code=diagnostic)
     assert len(attempts) == 3
     pending = client.guard_outbox.pending('task_001')
     assert len(pending) == 1
@@ -227,6 +228,7 @@ async def test_guard_failure_persists_only_ack_metadata_and_flush_never_executes
     async def ack(payload):
         assert payload['phase'] == 'guard'
         assert 'input' not in payload
+        assert payload.get('validation_error_code', '') == diagnostic
         return {'tool_call_id':payload['tool_call_id'],'guard_decision':'block','status':'cancelled'}
     monkeypatch.setattr(client, '_post', ack)
     delivery = await client.guard_outbox.flush('task_001', client._send_guard)
@@ -367,3 +369,14 @@ async def test_result_callback_forbidden_does_not_claim_tool_was_not_started(tmp
     with pytest.raises(GatewayError) as guard:
         await client._post({'phase': 'guard'})
     assert guard.value.execution_status == 'not_started'
+
+
+@pytest.mark.parametrize('decision, diagnostic', [('allow', 'DOCUMENT_ARGUMENT_INVALID'),
+                                                 ('block', 'arbitrary_diagnostic')])
+def test_guard_outbox_rejects_untrusted_validation_diagnostics(tmp_path, decision, diagnostic):
+    client = GatewayClient(_config(), outbox=GatewayResultOutbox(tmp_path))
+    with pytest.raises(ValueError, match='validation diagnostic'):
+        client.guard_outbox.enqueue_guard({'phase': 'guard', **client._scope_payload(),
+            'tool_call_id': 'runtime_call_001', 'guard_decision': decision,
+            'validation_error_code': diagnostic})
+    assert not client.guard_outbox.pending('task_001')

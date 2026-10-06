@@ -163,11 +163,14 @@ class GatewayGuardOutbox(GatewayResultOutbox):
     """Persist only fixed Guard acknowledgement metadata; never execute tools."""
     FIELDS = frozenset({'phase', 'task_id', 'session_id', 'policy_snapshot_id', 'tool_session_id',
                         'worker_agent_id', 'tool_call_id', 'guard_decision', 'protocol_version',
-                        'task_scope_id', 'capability_snapshot_hash', 'permit_id', 'permit_nonce'})
+                        'task_scope_id', 'capability_snapshot_hash', 'permit_id', 'permit_nonce', 'validation_error_code'})
 
     def enqueue_guard(self, payload: dict[str, Any]) -> None:
         if payload.get('guard_decision') not in {'allow', 'block', 'require_approval'}:
             raise ValueError('unsupported Guard decision')
+        diagnostic = payload.get('validation_error_code')
+        if diagnostic and (payload.get('guard_decision') != 'block' or diagnostic != 'DOCUMENT_ARGUMENT_INVALID'):
+            raise ValueError('unsupported Guard validation diagnostic')
         task, call = _safe_id(str(payload['task_id'])), _safe_id(str(payload['tool_call_id']))
         record = {'task_id': task, 'tool_call_id': call, 'attempts': 0,
                   'expires_at_epoch': time.time() + 300,
