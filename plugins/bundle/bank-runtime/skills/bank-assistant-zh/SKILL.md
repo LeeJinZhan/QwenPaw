@@ -14,7 +14,7 @@ metadata:
 
 | 当前任务需要 | 按需读取 |
 | --- | --- |
-| 本行制度、业务流程和内部规定的依据；附件问答、完整性核对或表格统计 | bank-document-qa |
+| 本行制度、业务流程和内部规定的依据；附件问答、图片文字识别/OCR、扫描件读取、完整性核对或表格统计 | bank-document-qa |
 | 起草、整合、润色、长文、普通 Word 或公文 DOCX 交付 | bank-document-writing |
 | 文字检查、公文形式检查、制度对照、复核和修订建议 | bank-document-review |
 | 制作或修订 PPT/PPTX，含演示页内图表 | bank-presentation |
