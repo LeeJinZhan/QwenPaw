@@ -398,29 +398,6 @@ class RetryChatModel(ChatModelBase):
         name = self._inner.model
         return f"{provider_id}:{name}" if provider_id else name
 
-    def get_classification_runtime_model_identity(
-        self,
-    ) -> dict[str, str] | None:
-        """Forward
-        the dedicated read-only identity observation to its owner.
-        """
-        observe = getattr(
-            self._inner, "get_classification_runtime_model_identity", None
-        )
-        return observe() if callable(observe) else None
-
-    def bind_classification_request_guard(self, guard) -> None:
-        bind = getattr(self._inner, "bind_classification_request_guard", None)
-        if not callable(bind):
-            raise ValueError("CLASSIFICATION_REQUEST_GUARD_UNSUPPORTED")
-        bind(guard)
-
-    def get_classification_request_observation(self) -> dict[str, Any] | None:
-        observe = getattr(
-            self._inner, "get_classification_request_observation", None
-        )
-        return observe() if callable(observe) else None
-
     @staticmethod
     async def _handle_rate_limit_exc(
         exc: Exception,
@@ -519,11 +496,9 @@ class RetryChatModel(ChatModelBase):
         )
 
         from .retry_scope import external_retry_owner
-
         retries = (
             self._retry_config.max_retries
-            if self._retry_config.enabled and not external_retry_owner.get()
-            else 0
+            if self._retry_config.enabled and not external_retry_owner.get() else 0
         )
         attempts = retries + 1
         last_exc: Exception | None = None

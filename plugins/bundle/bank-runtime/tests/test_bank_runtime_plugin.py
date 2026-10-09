@@ -66,9 +66,7 @@ def test_manifest_is_strictly_scoped_to_qwenpaw_2_1() -> None:
     }
 
 
-def test_plugin_entry_bootstraps_its_sibling_package_in_isolated_process() -> (
-    None
-):
+def test_plugin_entry_bootstraps_its_sibling_package_in_isolated_process() -> None:
     """An installed plugin must not depend on a deployment PYTHONPATH."""
     qwenpaw_root = PLUGIN_ROOT.parents[2]
     source_root = qwenpaw_root / "src"
@@ -105,9 +103,7 @@ assert module.plugin.__class__.__name__ == "BankRuntimePlugin"
     assert completed.returncode == 0, completed.stderr
 
 
-def test_delivery_manifest_pins_source_and_blocks_unknown_image_digest() -> (
-    None
-):
+def test_delivery_manifest_pins_source_and_blocks_unknown_image_digest() -> None:
     delivery = json.loads(DELIVERY_PATH.read_text(encoding="utf-8"))
 
     assert delivery["schema_version"] == "bank-runtime-delivery/v1"
@@ -155,18 +151,10 @@ def test_plugin_registers_router_channel_hook_and_middleware(
 
     module.BankRuntimePlugin().register(_plugin_api(fresh_registry, manifest))
 
-    assert [
-        item.prefix for item in fresh_registry.get_http_router_registrations()
-    ] == [
+    assert [item.prefix for item in fresh_registry.get_http_router_registrations()] == [
         "/bank-runtime",
     ]
     assert set(fresh_registry.get_registered_channels()) == {"bank-runtime"}
-    assert [
-        hook.hook_name
-        for hook in fresh_registry.get_workspace_starting_hooks()
-    ] == [
-        "classification_isolation_before_services",
-    ]
     assert [item.hook_name for item in fresh_registry.get_startup_hooks()] == [
         "register_tool_bank-runtime_bank_assistant",
         "register_tool_bank-runtime_activate_personal_skill",
@@ -176,8 +164,6 @@ def test_plugin_registers_router_channel_hook_and_middleware(
         "register_tool_bank-runtime_artifact_revise",
         "register_tool_bank-runtime_artifact_convert",
         "register_tool_bank-runtime_template_fill_docx",
-        "rt_hook_bank-runtime_classification_build_guard",
-        "rt_hook_bank-runtime_classification_execution_guard",
         "rt_hook_bank-runtime_bank_runtime_session_prepare",
         "rt_hook_bank-runtime_bank_runtime_disable_long_term_memory",
         "rt_hook_bank-runtime_bank_runtime_personalization",
@@ -329,10 +315,7 @@ def test_capability_endpoint_fails_closed_when_service_token_is_not_configured(
 
     response = TestClient(app).get(
         "/api/bank-runtime/capabilities",
-        headers={
-            "Authorization": "Bearer any",
-            "X-Agent-Id": "bank-assistant",
-        },
+        headers={"Authorization": "Bearer any", "X-Agent-Id": "bank-assistant"},
     )
 
     assert response.status_code == 503
@@ -355,12 +338,12 @@ def test_duplicate_registration_fails_before_adding_partial_state(
 
     assert app.routes == expected_routes
     assert len(fresh_registry.get_http_router_registrations()) == 1
-    assert len(fresh_registry.get_startup_hooks()) == 27
+    assert len(fresh_registry.get_startup_hooks()) == 25
     assert len(fresh_registry.get_middleware_factories()) == 1
 
     with pytest.raises(ValueError, match="already registered"):
         module.BankRuntimePlugin().register(api)
 
     assert len(fresh_registry.get_http_router_registrations()) == 1
-    assert len(fresh_registry.get_startup_hooks()) == 27
+    assert len(fresh_registry.get_startup_hooks()) == 25
     assert len(fresh_registry.get_middleware_factories()) == 1

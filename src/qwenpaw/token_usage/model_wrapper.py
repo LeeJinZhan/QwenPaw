@@ -40,39 +40,6 @@ class TokenRecordingModelWrapper(ChatModelBase):
         # None when compaction is disabled/unknown.
         self._compact_threshold = compact_threshold
 
-    def get_classification_runtime_model_identity(self) -> dict[str, str]:
-        """Read
-        the model actually called, rather than wrapper configuration.
-        """
-        provider_id = getattr(
-            self._model, "qwenpaw_provider_id", self._provider_id
-        )
-        if provider_id != self._provider_id:
-            raise ValueError("CLASSIFICATION_MODEL_IDENTITY_DRIFT")
-        return {
-            "provider_id": self._provider_id,
-            "model_id": self._model.model,
-        }
-
-    def bind_classification_request_guard(self, guard) -> None:
-        bind = getattr(self._model, "bind_classification_request_guard", None)
-        if not callable(bind):
-            raise ValueError("CLASSIFICATION_REQUEST_GUARD_UNSUPPORTED")
-        bind(guard)
-
-    def get_classification_request_observation(self) -> dict[str, Any] | None:
-        observe = getattr(
-            self._model, "get_classification_request_observation", None
-        )
-        result = observe() if callable(observe) else None
-        if (
-            result is not None
-            and {key: result.get(key) for key in ("provider_id", "model_id")}
-            != self.get_classification_runtime_model_identity()
-        ):
-            raise ValueError("CLASSIFICATION_MODEL_IDENTITY_DRIFT")
-        return result
-
     def _record_usage(self, usage: ChatUsage | None) -> None:
         """Enqueue a usage event synchronously — never blocks the caller."""
         if usage is None:

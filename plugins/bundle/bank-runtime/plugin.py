@@ -18,46 +18,35 @@ _PLUGIN_DIR = str(Path(__file__).resolve().parent)
 if _PLUGIN_DIR not in sys.path:
     sys.path.insert(0, _PLUGIN_DIR)
 
-from bank_runtime.classification_isolation import (  # noqa: E402
-    ClassificationBuildGuard,
-    ClassificationExecutionGuard,
-    classification_workspace_starting,
-)
-from bank_runtime.capabilities import build_capability_router  # noqa: E402
-from bank_runtime.channel import BankRuntimeChannel  # noqa: E402
-from bank_runtime.hooks import bank_runtime_startup_guard  # noqa: E402
-from bank_runtime.middleware import (  # noqa: E402
-    bank_runtime_middleware_factory,
-)
-from bank_runtime.gateway.middleware import (  # noqa: E402
-    BankRuntimeGatewayInstallHook,
-)
-from bank_runtime.gateway.hooks import (  # noqa: E402
-    BankRuntimeToolVisibilityHook,
-)
-from bank_runtime.sandbox.cache_retention import CacheCleanupLoop  # noqa: E402
-from bank_runtime.sandbox.hooks import (  # noqa: E402
+from bank_runtime.capabilities import build_capability_router
+from bank_runtime.channel import BankRuntimeChannel
+from bank_runtime.hooks import bank_runtime_startup_guard
+from bank_runtime.middleware import bank_runtime_middleware_factory
+from bank_runtime.gateway.middleware import BankRuntimeGatewayInstallHook
+from bank_runtime.gateway.hooks import BankRuntimeToolVisibilityHook
+from bank_runtime.sandbox.cache_retention import CacheCleanupLoop
+from bank_runtime.sandbox.hooks import (
     BankRuntimeAttachmentPrepareHook,
     BankRuntimeSandboxCleanupHook,
     BankRuntimeSandboxInstallHook,
 )
-from bank_runtime.bank_assistant import bank_assistant  # noqa: E402
-from bank_runtime.chart_tools import chart_generate, chart_export  # noqa: E402
-from bank_runtime.artifact_tools import (  # noqa: E402
+from bank_runtime.bank_assistant import bank_assistant
+from bank_runtime.chart_tools import chart_generate, chart_export
+from bank_runtime.artifact_tools import (
     ArtifactDeliveryErrorHook,
     artifact_convert,
     artifact_generate,
     artifact_revise,
     template_fill_docx,
 )
-from bank_runtime.personal_skills import activate_personal_skill  # noqa: E402
-from bank_runtime.personalization import (  # noqa: E402
+from bank_runtime.personal_skills import activate_personal_skill
+from bank_runtime.personalization import (
     BankRuntimePersonalizationCleanupHook,
     BankRuntimePersonalizationHook,
     BankRuntimePersonalizationRedactionHook,
 )
-from bank_runtime.router import build_ingress_router  # noqa: E402
-from bank_runtime.session import (  # noqa: E402
+from bank_runtime.router import build_ingress_router
+from bank_runtime.session import (
     ManagedSessionCleanupHook,
     ManagedSessionCommitHook,
     ManagedSessionDisableLongTermMemoryHook,
@@ -78,12 +67,7 @@ class BankRuntimePlugin:
 
     def __init__(self) -> None:
         self._registered = False
-        self._cache_cleanup = CacheCleanupLoop(
-            Path(
-                os.environ.get("QWENPAW_TASK_FILE_ROOT")
-                or "/tmp/qwenpaw-runtime-task-files"
-            )
-        )
+        self._cache_cleanup = CacheCleanupLoop(Path(os.environ.get("QWENPAW_TASK_FILE_ROOT") or "/tmp/qwenpaw-runtime-task-files"))
 
     def register(self, api: PluginApi) -> None:
         if self._registered:
@@ -101,15 +85,6 @@ class BankRuntimePlugin:
             channel_class=BankRuntimeChannel,
             label="Bank Runtime",
             description="Runtime-managed requests only",
-        )
-        api.register_workspace_starting_hook(
-            hook_name="classification_isolation_before_services",
-            callback=classification_workspace_starting,
-            priority=65,
-        )
-        api.register_runtime_hook(ClassificationBuildGuard(), if_missing=True)
-        api.register_runtime_hook(
-            ClassificationExecutionGuard(), if_missing=True
         )
         api.register_runtime_hook(ManagedSessionPrepareHook())
         api.register_runtime_hook(ManagedSessionDisableLongTermMemoryHook())
@@ -132,16 +107,8 @@ class BankRuntimePlugin:
             # and 100. Audit the final registry rather than a partial view.
             priority=1000,
         )
-        api.register_startup_hook(
-            hook_name="bank_runtime_cache_cleanup",
-            callback=self._cache_cleanup.start,
-            priority=1100,
-        )
-        api.register_shutdown_hook(
-            hook_name="bank_runtime_cache_cleanup_stop",
-            callback=self._cache_cleanup.close,
-            priority=50,
-        )
+        api.register_startup_hook(hook_name="bank_runtime_cache_cleanup", callback=self._cache_cleanup.start, priority=1100)
+        api.register_shutdown_hook(hook_name="bank_runtime_cache_cleanup_stop", callback=self._cache_cleanup.close, priority=50)
         api.register_middleware(
             bank_runtime_middleware_factory,
             priority=10,
@@ -163,22 +130,10 @@ class BankRuntimePlugin:
             tool_type="network",
             target_param="skill_ref",
         )
-        api.register_tool(
-            tool_name="chart_generate",
-            tool_func=chart_generate,
-            description="生成可编辑图表",
-            icon="📊",
-            enabled=False,
-            tool_type="internal",
-        )
-        api.register_tool(
-            tool_name="chart_export",
-            tool_func=chart_export,
-            description="导出已保存图表",
-            icon="📊",
-            enabled=False,
-            tool_type="internal",
-        )
+        api.register_tool(tool_name="chart_generate", tool_func=chart_generate,
+                          description="生成可编辑图表", icon="📊", enabled=False, tool_type="internal")
+        api.register_tool(tool_name="chart_export", tool_func=chart_export,
+                          description="导出已保存图表", icon="📊", enabled=False, tool_type="internal")
         api.register_tool(
             tool_name="artifact_generate",
             tool_func=artifact_generate,

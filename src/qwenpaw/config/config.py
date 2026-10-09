@@ -1831,35 +1831,6 @@ class AgentProfileConfig(BaseModel):
     Each agent has its own configuration file with all settings.
     """
 
-    required_starting_hooks: list[str] = Field(
-        default_factory=list,
-        max_length=16,
-        description=(
-            "Plugin-qualified startup hooks that must complete "
-            "before services start"
-        ),
-    )
-
-    @field_validator("required_starting_hooks", mode="before")
-    @classmethod
-    def validate_required_starting_hooks(cls, value):
-        if (
-            type(value) is not list
-            or len(value) > 16
-            or any(type(key) is not str for key in value)
-            or len(set(value)) != len(value)
-            or any(
-                type(key) is not str
-                or re.fullmatch(
-                    r"[A-Za-z0-9_.-]{1,80}:[A-Za-z0-9_.-]{1,100}", key
-                )
-                is None
-                for key in value
-            )
-        ):
-            raise ValueError("Invalid required startup hook declaration")
-        return value
-
     id: str = Field(..., description="Unique agent ID")
     name: str = Field(..., description="Human-readable agent name")
     description: str = Field(default="", description="Agent description")

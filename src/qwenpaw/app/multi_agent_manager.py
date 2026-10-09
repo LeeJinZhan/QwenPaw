@@ -175,7 +175,6 @@ class MultiAgentManager:
                 agent_id=agent_id,
                 workspace_dir=agent_ref.workspace_dir,
             )
-            await self._fire_workspace_starting_hooks(instance)
             await instance.start()
             instance.set_manager(self)
 
@@ -217,34 +216,6 @@ class MultiAgentManager:
                         agent_id
                     ] = AgentStartupStatus.FAILED
             event.set()
-
-    @staticmethod
-    async def _fire_workspace_starting_hooks(workspace: Workspace) -> None:
-        """Install
-        safety prerequisites before services can schedule requests.
-        """
-        from ..plugins.registry import PluginRegistry
-
-        hooks = PluginRegistry().get_workspace_starting_hooks()
-        if not hooks:
-            return
-        info = {
-            "agent_id": workspace.agent_id,
-            "workspace_dir": str(workspace.workspace_dir),
-            "workspace": workspace,
-        }
-        for hook in hooks:
-            callback = hook.callback
-            if asyncio.iscoroutinefunction(callback):
-                await callback(info)
-            else:
-                result = await asyncio.to_thread(callback, info)
-                if asyncio.iscoroutine(result) or hasattr(result, "__await__"):
-                    await result
-            completed = getattr(workspace, "_completed_starting_hooks", None)
-            if completed is None:
-                completed = workspace._completed_starting_hooks = set()
-            completed.add(f"{hook.plugin_id}:{hook.hook_name}")
 
     @staticmethod
     async def _fire_workspace_created_hooks(workspace_info: dict) -> None:
@@ -553,7 +524,6 @@ class MultiAgentManager:
             # A replacement has fresh plugin registries. Register contributions
             # against that instance before it starts serving requests; looking
             # it up by agent_id here would still return the old workspace.
-            await self._fire_workspace_starting_hooks(new_instance)
             await self._fire_workspace_created_hooks(
                 {
                     "agent_id": agent_id,
