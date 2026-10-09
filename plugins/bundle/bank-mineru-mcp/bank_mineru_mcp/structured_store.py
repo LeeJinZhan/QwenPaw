@@ -440,7 +440,7 @@ class StructuredStore:
             "signature": self._sign("search", len(hits), len(hits)),
         }
 
-    def read_chunks(self, document_ref: str, *, cursor: str | None, limit: int) -> dict[str, Any]:
+    def read_chunks(self, document_ref: str, *, cursor: str | None = None, limit: int = 5) -> dict[str, Any]:
         entry, manifest = self._entry(document_ref)
         if not 1 <= int(limit) <= 10:
             raise StructuredStoreError("FILE_REF_INVALID", "Chunk limit is invalid")
