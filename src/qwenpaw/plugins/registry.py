@@ -154,6 +154,7 @@ class PluginRegistry:  # pylint:disable=too-many-public-methods
         self._shutdown_hooks: List[HookRegistration] = []
         self._uninstall_hooks: List[HookRegistration] = []
         self._workspace_created_hooks: List[HookRegistration] = []
+        self._workspace_starting_hooks: List[HookRegistration] = []
         self._control_commands: List[ControlCommandRegistration] = []
         self._channels: Dict[str, ChannelRegistration] = {}
         self._runtime_helpers = None
@@ -587,6 +588,27 @@ class PluginRegistry:  # pylint:disable=too-many-public-methods
         """
         return self._uninstall_hooks.copy()
 
+    def register_workspace_starting_hook(
+        self,
+        plugin_id: str,
+        hook_name: str,
+        callback: Callable,
+        priority: int = 100,
+    ) -> None:
+        """Register a blocking hook before any workspace services start."""
+        self._workspace_starting_hooks.append(
+            HookRegistration(
+                plugin_id=plugin_id,
+                hook_name=hook_name,
+                callback=callback,
+                priority=priority,
+            )
+        )
+        self._workspace_starting_hooks.sort(key=lambda hook: hook.priority)
+
+    def get_workspace_starting_hooks(self) -> List[HookRegistration]:
+        return self._workspace_starting_hooks.copy()
+
     def register_workspace_created_hook(
         self,
         plugin_id: str,
@@ -653,6 +675,9 @@ class PluginRegistry:  # pylint:disable=too-many-public-methods
         self._startup_hooks = _filter(self._startup_hooks)
         self._shutdown_hooks = _filter(self._shutdown_hooks)
         self._uninstall_hooks = _filter(self._uninstall_hooks)
+        self._workspace_starting_hooks = _filter(
+            self._workspace_starting_hooks
+        )
         self._workspace_created_hooks = _filter(
             self._workspace_created_hooks,
         )
@@ -976,6 +1001,11 @@ class PluginRegistry:  # pylint:disable=too-many-public-methods
         ]
         self._uninstall_hooks = [
             h for h in self._uninstall_hooks if h.plugin_id != plugin_id
+        ]
+        self._workspace_starting_hooks = [
+            h
+            for h in self._workspace_starting_hooks
+            if h.plugin_id != plugin_id
         ]
         self._workspace_created_hooks = [
             h

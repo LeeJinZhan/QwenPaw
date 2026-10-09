@@ -26,6 +26,12 @@ class CronExecutor:
 
     # pylint: disable=too-many-statements,too-many-branches
     async def execute(self, job: CronJobSpec) -> dict[str, Any]:
+        from .execution_context import _bind_cron_execution_identity
+
+        with _bind_cron_execution_identity(self._workspace, job.id):
+            return await self._execute(job)
+
+    async def _execute(self, job: CronJobSpec) -> dict[str, Any]:
         """Execute one job once.
 
         - task_type text: send fixed text to channel

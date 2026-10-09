@@ -77,6 +77,7 @@ class Workspace:
         # Non-service state
         self._config = None  # Loaded before start()
         self._started = False
+        self._completed_starting_hooks: set[str] = set()
         self._manager = None  # Reference to MultiAgentManager
         self._task_tracker = TaskTracker()
         self._app_services: Any = None
@@ -542,6 +543,13 @@ class Workspace:
             # 1. Load agent configuration
             self._config = load_agent_config(self.agent_id)
             logger.debug(f"Loaded config for agent: {self.agent_id}")
+            required = set(
+                getattr(self._config, "required_starting_hooks", [])
+            )
+            if not required.issubset(self._completed_starting_hooks):
+                raise RuntimeError(
+                    "Required workspace startup hook did not complete"
+                )
 
             # 2. Run legacy weixin -> wechat data migrations BEFORE services
             # start so ChatManager / Runner see the canonical layout.

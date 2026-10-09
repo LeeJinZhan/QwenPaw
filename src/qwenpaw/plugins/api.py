@@ -497,6 +497,28 @@ class PluginApi:  # pylint: disable=too-many-public-methods
                 f"'{hook_name}' (priority={priority})",
             )
 
+    def register_workspace_starting_hook(
+        self,
+        hook_name: str,
+        callback: Callable,
+        priority: int = 100,
+    ) -> None:
+        """Register a fail-closed hook before workspace services start.
+
+        Receives agent_id, workspace_dir and the actual unstarted workspace.
+        Unlike workspace_created, exceptions prevent that workspace starting.
+        """
+        if self._registry is None:
+            raise RuntimeError(
+                "Plugin registry is required for startup isolation"
+            )
+        self._registry.register_workspace_starting_hook(
+            plugin_id=self.plugin_id,
+            hook_name=hook_name,
+            callback=callback,
+            priority=priority,
+        )
+
     def register_workspace_created_hook(
         self,
         hook_name: str,
@@ -1000,6 +1022,8 @@ class PluginApi:  # pylint: disable=too-many-public-methods
     def register_runtime_hook(
         self,
         hook: Any,
+        *,
+        if_missing: bool = False,
     ) -> None:
         """Register a runtime-phase hook.
 
@@ -1010,15 +1034,18 @@ class PluginApi:  # pylint: disable=too-many-public-methods
         Args:
             hook: A ``HookBase`` subclass instance with ``phase``,
                 ``name``, and ``run()`` defined.
+            if_missing: Preserve an identical hook installed before services
+                start.
         """
 
         def _register_hook():
-            self._register_hook_to_all_workspaces(hook)
+            self._register_hook_to_all_workspaces(hook, if_missing=if_missing)
 
         def _on_workspace_created(workspace_info: dict):
             self._register_hook_to_workspace(
                 hook,
                 workspace_info,
+                if_missing=if_missing,
             )
 
         self.register_startup_hook(
@@ -1251,10 +1278,25 @@ class PluginApi:  # pylint: disable=too-many-public-methods
                 f"Mode already registered: {exc}",
             )
 
-    def _register_hook_to_all_workspaces(self, hook):
+    @staticmethod
+    def _existing_runtime_hook(workspace, hook) -> bool:
+        matches = [
+            existing
+            for existing in workspace.plugins.hook_registry.hooks_for(
+                hook.phase
+            )
+            if existing.name == hook.name
+        ]
+        if any(type(existing) is not type(hook) for existing in matches):
+            raise ValueError("Runtime hook identity collision")
+        return bool(matches)
+
+    def _register_hook_to_all_workspaces(self, hook, *, if_missing=False):
         """Register a runtime hook to all workspaces."""
         for ws in self._get_all_workspaces():
             try:
+                if if_missing and self._existing_runtime_hook(ws, hook):
+                    continue
                 ws.plugins.hook_registry.register(hook)
             except (TypeError, ValueError) as exc:
                 logger.debug(
@@ -1265,12 +1307,16 @@ class PluginApi:  # pylint: disable=too-many-public-methods
         self,
         hook,
         workspace_info: dict,
+        *,
+        if_missing=False,
     ):
         """Register a runtime hook to a specific workspace."""
         ws = self._get_workspace_from_info(workspace_info)
         if ws is None:
             return
         try:
+            if if_missing and self._existing_runtime_hook(ws, hook):
+                return
             ws.plugins.hook_registry.register(hook)
         except (TypeError, ValueError) as exc:
             logger.debug(
@@ -1333,7 +1379,8 @@ class PluginApi:  # pylint: disable=too-many-public-methods
                 skill sub-directories (each with a ``SKILL.md``).
             enabled_by_default: Whether the skills should be enabled
                 immediately after installation. Default: True.
-            preserve_workspace_edits: Preserve skills customized in the workspace
+            preserve_workspace_edits: Preserve skills customized in the
+                workspace
                 UI instead of replacing them on startup. Default: False.
             channels: List of channel names the skills apply to, or
                 ``["all"]`` for all channels. Default: ``["all"]``.
@@ -1435,7 +1482,8 @@ class PluginApi:  # pylint: disable=too-many-public-methods
         """Return sub-directory names that contain a SKILL.md file."""
         if not skills_dir.exists() or not skills_dir.is_dir():
             logger.warning(
-                f"Plugin '{self.plugin_id}' skills_dir does not exist: {skills_dir}",
+                f"Plugin '{self.plugin_id}' skills_dir does not exist: "
+                f"{skills_dir}",
             )
             return []
         return [
@@ -1575,7 +1623,8 @@ class PluginApi:  # pylint: disable=too-many-public-methods
             )
         except Exception as exc:
             logger.error(
-                f"Failed to install skills for plugin '{self.plugin_id}': {exc}",
+                f"Failed to install skills for plugin '{self.plugin_id}': "
+                f"{exc}",
                 exc_info=True,
             )
 
