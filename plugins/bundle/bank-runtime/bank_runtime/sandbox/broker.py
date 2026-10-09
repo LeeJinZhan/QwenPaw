@@ -7,12 +7,22 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+from qwenpaw.exceptions import AgentRuntimeErrorException
 
 from .scope import SandboxRequestScope
 
 
 class SandboxBrokerError(RuntimeError):
     """Runtime file broker transport or response failed."""
+
+
+class AttachmentStorageError(AgentRuntimeErrorException):
+    """Source bytes are unavailable; keep storage details in the cause only."""
+
+    def __init__(self) -> None:
+        super().__init__(error_code="FILE_ACCESS_DENIED",
+                         message="这份文件当前无法使用。请重新上传或选择可用文件，再发送问题。",
+                         details={})
 
 
 class RuntimeFileBroker:
@@ -135,7 +145,10 @@ class RuntimeFileBroker:
         provider = str(locator.get("storage_provider") or "").lower()
         object_key = _safe_object_key(locator.get("object_key"))
         if provider == "local":
-            _stream_local(object_key, write_chunk)
+            try:
+                _stream_local(object_key, write_chunk)
+            except (SandboxBrokerError, OSError) as exc:
+                raise AttachmentStorageError() from exc
             return
         if provider == "oss":
             _stream_oss(locator, object_key, write_chunk)
@@ -189,16 +202,19 @@ def _stream_oss(locator: dict[str, Any], object_key: str, write_chunk: Any) -> N
         import oss2
     except ImportError as exc:
         raise SandboxBrokerError("OSS reader dependency is unavailable") from exc
-    stream = oss2.Bucket(
-        oss2.Auth(access_key, secret), endpoint, bucket_name
-    ).get_object(object_key)
     try:
-        while chunk := stream.read(1024 * 1024):
-            write_chunk(chunk)
-    finally:
-        close = getattr(stream, "close", None)
-        if callable(close):
-            close()
+        stream = oss2.Bucket(
+            oss2.Auth(access_key, secret), endpoint, bucket_name
+        ).get_object(object_key)
+        try:
+            while chunk := stream.read(1024 * 1024):
+                write_chunk(chunk)
+        finally:
+            close = getattr(stream, "close", None)
+            if callable(close):
+                close()
+    except oss2.exceptions.OssError as exc:
+        raise AttachmentStorageError() from exc
 
 
 __all__ = ["RuntimeFileBroker", "SandboxBrokerError"]

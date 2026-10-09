@@ -72,6 +72,52 @@ def _parse_csv(tmp_path: Path):
     return store, handle
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize('execution', ['guest', 'subprocess'])
+@pytest.mark.parametrize('options', [{}, {'limit': 10}, {'cursor': None}])
+async def test_optional_chunk_arguments_page_all_100_sheets(tmp_path, execution, options):
+    from bank_mineru_mcp.processing_guest import query
+    from bank_mineru_mcp.parse_jobs import query_job
+
+    source = _source(tmp_path, 'many.xlsx', '.xlsx',
+                     'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+    workbook = openpyxl.Workbook()
+    workbook.remove(workbook.active)
+    for index in range(100):
+        sheet = workbook.create_sheet(f'sheet{index:03d}')
+        sheet.append(['id', 'value'])
+        for row in range(107):
+            sheet.append([f'{index}:{row}', row])
+    workbook.save(source.path)
+    work = tmp_path / 'work'
+    inventory = extract_workbook(source.path, work, stem='file_001')
+    store = _store(tmp_path)
+    handle = store.write(source, inventory, work)
+    arguments = {'document_ref': handle.document_ref, **options}
+    seen = {}
+    pages = 0
+    while True:
+        if execution == 'guest':
+            page = query(store, 'read_chunks', arguments)
+        else:
+            page = await query_job(store, 'read_document_chunks', arguments)
+        assert 1 <= len(page['chunks']) <= options.get('limit', 5)
+        for chunk in page['chunks']:
+            assert chunk['index'] not in seen
+            seen[chunk['index']] = chunk
+        pages += 1
+        if not page['has_more']:
+            assert page['next_cursor'] is None
+            break
+        assert page['next_cursor'] != arguments.get('cursor')
+        arguments = {**arguments, 'cursor': page['next_cursor']}
+        assert pages <= 1000
+    assert {chunk['heading'] for chunk in seen.values()} == {f'sheet{i:03d}' for i in range(100)}
+    assert sum(chunk['rows_returned'][1] - chunk['rows_returned'][0] + 1
+               for chunk in seen.values()) == 10700
+    assert page['coverage']['read'] == page['coverage']['total'] == len(seen)
+
+
 def test_csv_inventory_and_range_paging(tmp_path) -> None:
     store, handle = _parse_csv(tmp_path)
     inventory = store.inventory(handle.document_ref)

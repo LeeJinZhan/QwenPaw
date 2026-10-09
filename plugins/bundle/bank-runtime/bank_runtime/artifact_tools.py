@@ -145,7 +145,8 @@ class ArtifactDeliveryErrorHook(LifecycleHook):
     priority = 90
 
     async def run(self, ctx: HookContext) -> HookResult:
-        if isinstance(ctx.error, ArtifactToolNotInvokedError):
+        from .sandbox.broker import AttachmentStorageError
+        if isinstance(ctx.error, (ArtifactToolNotInvokedError, AttachmentStorageError)):
             ctx.extras["_error_code"] = ctx.error.error_code
             ctx.extras["_error_text"] = ctx.error.message
         else:
@@ -251,7 +252,7 @@ async def artifact_generate(
             For an official document draft, use ``{"kind": "official_document",
             "layout_version": "bank-official-docx-v1", "document": {"title":
             "标题", "recipients": [], "blocks": [{"type": "paragraph",
-            "text": "正文"}]}}``. Read bank-document-writing for heading/table
+            "text": "正文"}]}}``. Read bank-file-delivery for heading/table
             and optional fields. Keep document.title independent of filenames.
             A requested institution template still requires template_fill_docx
             and its published, authorized version. Never silently substitute
@@ -268,9 +269,14 @@ async def artifact_generate(
             ``{"formula": "=SUM(B2:B5)"}``; only internal workbook references
             and registered arithmetic/conditional functions are supported.
             Never supply cached values, external links or executable functions.
-            Read bank-assistant-zh for the function list. Plain strings remain
+            Read bank-file-delivery for the function list. Plain strings remain
             escaped text. Word/PDF wide tables and PPT dense content reflow
             automatically; preserve all data and verify actual page counts.
+            For CSV, use ``{"columns": ["项目", "数量"], "rows": [["合计", 1]]}``.
+            Do not pass CSV text or JSON-encoded text. title, output_name,
+            instructions, source_refs, delivery_plan and explicit_pdf_request
+            are top-level tool parameters outside content. Keep title at the
+            top level when correcting an invalid content object.
             For HTML, pass a static HTML string or ``{"text": "<h2>标题</h2><p>正文</p>"}``.
             Full html/head/body wrappers and static layout/CSS are supported.
             Do not include script, button, input, forms, event attributes,

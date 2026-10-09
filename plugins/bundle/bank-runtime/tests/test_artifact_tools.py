@@ -76,6 +76,21 @@ def test_artifact_tool_signatures_expose_no_execution_authority() -> None:
         assert not (forbidden & set(inspect.signature(tool).parameters))
 
 
+def test_artifact_generate_schema_explains_csv_content_and_parameter_levels() -> None:
+    import json
+    import re
+
+    description = FunctionTool(artifact_generate).input_schema["properties"]["content"]["description"]
+    example = re.search(r"For CSV, use ``(.*?)``", description, re.DOTALL)
+    assert example is not None
+    content = json.loads(example.group(1))
+    assert set(content) == {"columns", "rows"}
+    assert isinstance(content["rows"][0], list)
+    assert "Do not pass CSV text" in description
+    assert "top-level tool parameters" in description
+    assert "outside content" in description
+
+
 def test_artifact_generate_schema_explains_canonical_artifact_content() -> None:
     description = FunctionTool(artifact_generate).input_schema["properties"]["content"][
         "description"
@@ -344,7 +359,7 @@ async def test_ordinary_question_is_not_forced_to_call_artifact_tool() -> None:
 
 
 def test_skill_requires_structured_runtime_tools_and_no_shell_fallback() -> None:
-    skill = (PLUGIN_ROOT / "skills" / "bank-assistant-zh" / "SKILL.md").read_text(
+    skill = (PLUGIN_ROOT / "skills" / "bank-file-delivery" / "SKILL.md").read_text(
         encoding="utf-8"
     )
     for tool_name in (

@@ -34,9 +34,25 @@ RECOVERY_GUIDANCE = """本轮执行恢复：
 保留原目标，不换格式、内容或新增成果冒充恢复。缺口只影响依赖它的部分，独立可验证部分继续。区分可用结果、具体缺项和待确认状态；经核验恢复后不沿用旧失败文案。
 """
 
+OPERATION_GUIDANCE = """本轮工具操作：
+工具调用和结果只表示执行进展，不新增用户目标。后续步骤依据当前用户要求及仍有效的历史要求确定。
+已明确的交付继续完成；未约定的额外交付，不因已经尝试而变成必须完成的任务。
+已发生的操作、结果和未完成部分如实保留；结果未知先核对，不把尝试或未执行当作成功。
+"""
+
 _TURN_CONTEXT_NAME = "bank_runtime_turn_context"
 _DELIVERY_TOOLS = frozenset({"artifact_generate", "artifact_revise", "artifact_convert", "template_fill_docx", "chart_generate", "chart_export"})
 _FILE_CONTROL_TOOLS = frozenset({'runtime_sandbox_files_search', 'runtime_sandbox_files_select'})
+
+
+def _is_internal_read_conversion(block: ToolCallBlock) -> bool:
+    if block.name != 'artifact_convert':
+        return False
+    try:
+        payload = json.loads(block.input) if isinstance(block.input, str) else block.input
+    except (ValueError, TypeError):
+        return False
+    return isinstance(payload, dict) and payload.get('purpose') == 'read'
 
 
 def _project_file_control_history(messages):
@@ -51,14 +67,7 @@ def _project_file_control_history(messages):
         for block in message.content:
             if not isinstance(block, ToolCallBlock):
                 continue
-            internal_copy = False
-            if block.name == 'artifact_convert':
-                try:
-                    payload = json.loads(block.input) if isinstance(block.input, str) else block.input
-                    internal_copy = isinstance(payload, dict) and payload.get('purpose') == 'read'
-                except (ValueError, TypeError):
-                    pass
-            if block.name in _FILE_CONTROL_TOOLS or internal_copy:
+            if block.name in _FILE_CONTROL_TOOLS or _is_internal_read_conversion(block):
                 expired_ids.add(block.id)
     projected = []
     for i, message in enumerate(messages):
@@ -102,14 +111,19 @@ def prepare_public_model_context(
     if project_file_history:
         messages = _project_file_control_history(messages)
     last_user = max((index for index, msg in enumerate(messages) if msg.role == "user"), default=-1)
-    # Tool visibility and prose never activate execution guidance. Only current
-    # tool blocks and trusted middleware state do; old operations stay historical.
-    for message in messages[last_user + 1:]:
-        for block in message.content:
-            if isinstance(block, (ToolCallBlock, ToolResultBlock)) and block.name in _DELIVERY_TOOLS:
-                delivery_required = True
-            if isinstance(block, ToolResultBlock) and block.state in {ToolResultState.ERROR, ToolResultState.DENIED}:
-                recovering = True
+    # Observed tool operations never establish a delivery requirement. Match
+    # internal conversions by current call ID, not by prose or result content.
+    current_blocks = [block for message in messages[last_user + 1:] for block in message.content]
+    read_conversion_ids = {block.id for block in current_blocks
+                           if isinstance(block, ToolCallBlock) and _is_internal_read_conversion(block)}
+    artifact_operation_observed = False
+    for block in current_blocks:
+        if isinstance(block, ToolCallBlock) and block.name in _DELIVERY_TOOLS:
+            artifact_operation_observed |= not _is_internal_read_conversion(block)
+        elif isinstance(block, ToolResultBlock) and block.name in _DELIVERY_TOOLS:
+            artifact_operation_observed |= not (block.name == 'artifact_convert' and block.id in read_conversion_ids)
+        if isinstance(block, ToolResultBlock) and block.state in {ToolResultState.ERROR, ToolResultState.DENIED}:
+            recovering = True
     for index, message in enumerate(messages[:max(last_user, 0)]):
         if message.role != "assistant":
             continue
@@ -141,7 +155,8 @@ def prepare_public_model_context(
         messages.insert(0, SystemMsg(name="system", content=guidance))
     # Keep the per-call reminder next to this turn rather than before a long
     # restored history. The static contract stays in the initial system prompt.
-    conditional = (DELIVERY_GUIDANCE if delivery_required else "") + (RECOVERY_GUIDANCE if recovering else "")
+    conditional = DELIVERY_GUIDANCE if delivery_required else (OPERATION_GUIDANCE if artifact_operation_observed else "")
+    conditional += RECOVERY_GUIDANCE if recovering else ""
     messages.append(SystemMsg(name="system", metadata={"bank_runtime_layer": _TURN_CONTEXT_NAME},
                               content=CURRENT_TURN_GUIDANCE + conditional +
                               ('\n' + file_context if file_context else '') +

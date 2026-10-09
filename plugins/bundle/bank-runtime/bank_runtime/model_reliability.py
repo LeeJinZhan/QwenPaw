@@ -26,6 +26,7 @@ MODEL_FAILURE_MESSAGES = {
     'MODEL_REQUEST_REJECTED': '模型服务未接受本次请求。',
     'MODEL_CONTENT_FILTERED': '模型服务未返回可用结果。',
     'MODEL_EXECUTION_ERROR': '模型响应异常，本次处理未完成。',
+    'WORKER_EMPTY_RESPONSE': '本次未生成有效答复，暂时无法提供结果。',
     'WORKER_TIMEOUT': '本次任务已达到处理时限。',
 }
 
@@ -35,6 +36,7 @@ _SAFE_FAILURE_REASONS = frozenset({
     'reasoning_after_unclassified_content', 'nested_thinking_tag',
     'unexpected_thinking_end', 'unclosed_thinking_tag',
     'incomplete_thinking_tag', 'unclassified_content_limit',
+    'thinking_only', 'empty_response',
 })
 
 
@@ -55,7 +57,7 @@ def failure_diagnostic(error):
     """Only internal reason codes are loggable; provider bodies are private."""
     details = getattr(error, 'details', None)
     if isinstance(details, dict):
-        for field in ('stream_error', 'finish_reason'):
+        for field in ('stream_error', 'finish_reason', 'response_reason'):
             reason = details.get(field)
             if isinstance(reason, str) and reason in _SAFE_FAILURE_REASONS:
                 return reason
@@ -113,9 +115,12 @@ class BankModelReliability:
         self.recovery_used = False
         self.failure = None
 
-    def _error(self, code, *, phase='model', attempts=1):
+    def _error(self, code, *, phase='model', attempts=1, response_reason=None):
+        details = {'phase': phase, 'attempts': attempts}
+        if response_reason is not None:
+            details['response_reason'] = response_reason
         return AgentRuntimeErrorException(error_code=code, message=MODEL_FAILURE_MESSAGES[code],
-            details={'phase': phase, 'attempts': attempts})
+            details=details)
 
     async def _wait(self, awaitable, idle_deadline):
         remaining = min(self.deadline, idle_deadline) - time.monotonic()
@@ -145,7 +150,9 @@ class BankModelReliability:
             attempt += 1
             started = time.monotonic()
             progress = False
+            public_output = False
             text = ''
+            thinking_chars = 0
             tool_calls = {}
             stream = None
             final = None
@@ -179,6 +186,9 @@ class BankModelReliability:
                         idle_deadline = time.monotonic() + self.idle_seconds
                     fragment = ''.join(b.text for b in chunk.content if isinstance(b, TextBlock))
                     text = fragment if chunk.is_last else text + fragment
+                    thought = sum(len(b.thinking) for b in chunk.content if isinstance(b, ThinkingBlock))
+                    thinking_chars = thought if chunk.is_last else thinking_chars + thought
+                    public_output = public_output or bool(fragment.strip())
                     tool_calls.update({b.id: b.name for b in chunk.content if isinstance(b, ToolCallBlock) and b.name})
                     if len(text) > 262144:
                         raise self._error('MODEL_OUTPUT_TRUNCATED')
@@ -196,17 +206,27 @@ class BankModelReliability:
                     raise self._error('MODEL_EXECUTION_ERROR')
                 if recovering:
                     final = self._recovered_final(final, prefix, original_id, expected_tools)
-                LOG.info('bank_model_call_completed attempt=%d elapsed_ms=%d recovered=%s',
-                         attempt, int((time.monotonic()-started)*1000), recovering)
+                # A clean stream ending is not proof of a usable agent step.
+                # Keep ToolCallBlock validation in the existing Gateway path.
+                if not any((isinstance(b, TextBlock) and b.text.strip())
+                           or isinstance(b, ToolCallBlock) for b in final.content):
+                    reason = 'thinking_only' if thinking_chars else 'empty_response'
+                    raise self._error('WORKER_EMPTY_RESPONSE', response_reason=reason)
+                LOG.info('bank_model_call_completed attempt=%d elapsed_ms=%d recovered=%s '
+                         'finish_reason=%s text_chars=%d thinking_chars=%d tool_calls=%d',
+                         attempt, int((time.monotonic()-started)*1000), recovering,
+                         final.finished_reason, len(text), thinking_chars, len(tool_calls))
                 yield final
                 return
             except asyncio.CancelledError:
                 raise
             except Exception as error:
                 code = failure_code(error)
-                LOG.warning('bank_model_call_failed code=%s attempt=%d elapsed_ms=%d progress=%s error_type=%s reason=%s',
+                LOG.warning('bank_model_call_failed code=%s attempt=%d elapsed_ms=%d progress=%s '
+                            'error_type=%s reason=%s text_chars=%d thinking_chars=%d tool_calls=%d',
                             code, attempt, int((time.monotonic()-started)*1000), progress,
-                            type(error).__name__, failure_diagnostic(error))
+                            type(error).__name__, failure_diagnostic(error),
+                            len(text), thinking_chars, len(tool_calls))
                 # Existing governed DOCX/PPTX draft recovery owns this proposal.
                 # Charge the same allowance; its next call still uses this deadline.
                 if (allow_parameter_recovery and not self.recovery_used
@@ -216,15 +236,24 @@ class BankModelReliability:
                     raise
                 recoverable = (not self.recovery_used and time.monotonic() < self.deadline and (
                     (code == 'MODEL_OUTPUT_TRUNCATED' and self.truncation_recovery) or
+                    (code == 'WORKER_EMPTY_RESPONSE' and self.no_output_retry and not public_output) or
                     (self.no_output_retry and code in {'MODEL_TIMEOUT', 'MODEL_UPSTREAM_UNAVAILABLE'} and not progress)))
                 if not recoverable:
-                    self.failure = self._error(code, phase='stream' if progress else 'first_output', attempts=attempt)
+                    self.failure = self._error(code, phase='stream' if progress else 'first_output', attempts=attempt,
+                        response_reason=getattr(error, 'details', {}).get('response_reason'))
                     raise self.failure from None
                 self.recovery_used = True
                 if code == 'MODEL_OUTPUT_TRUNCATED':
                     prefix, original_id, expected_tools = text, response_id, list(tool_calls.values())
                     request = self._recovery_request(request, prefix, expected_tools)
                     recovering = True
+                elif code == 'WORKER_EMPTY_RESPONSE':
+                    # Re-enter only this model call with its completed tool
+                    # evidence intact; do not replay the enclosing agent turn.
+                    request = {**request, 'messages': [*(request.get('messages') or []),
+                        SystemMsg('system', '上一模型调用未形成可用正文或工具调用。继续完成用户本轮尚未完成的目标；'
+                                  '依据已有证据选择下一步必要工具，或直接给出有效答复。'
+                                  '保留原要求和已完成的工具结果，不重复已成功的操作，不把思考内容当作公开答复。')]}
                 # Transient first-output retry uses exactly the same model context.
             finally:
                 if stream is not None and hasattr(stream, 'aclose'):

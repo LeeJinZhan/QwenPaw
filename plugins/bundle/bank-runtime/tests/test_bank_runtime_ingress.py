@@ -764,6 +764,30 @@ def test_projector_preserves_only_recoverable_session_codes():
 
 
 @pytest.mark.asyncio
+async def test_thinking_only_recovery_failure_preserves_empty_response_code():
+    from agentscope.message import ThinkingBlock
+    from agentscope.model import ChatResponse
+    from bank_runtime.model_reliability import BankModelReliability
+
+    calls = []
+    async def model(**kwargs):
+        calls.append(kwargs)
+        return ChatResponse([ThinkingBlock(thinking='private provider reasoning')], True)
+
+    with pytest.raises(Exception) as failed:
+        async for _ in await BankModelReliability(10).call(model):
+            pass
+    assert len(calls) == 2
+    assert failed.value.error_code == 'WORKER_EMPTY_RESPONSE'
+    projector = CompactEventProjector('task-empty')
+    events = projector.project({'object': 'response', 'status': 'failed',
+        'error': {'code': failed.value.error_code, 'message': 'private provider detail'}})
+    assert events == [{'event': 'answer.failed', 'status': 'failed',
+        'message': '回答生成失败', 'error_code': 'WORKER_EMPTY_RESPONSE'}]
+    assert projector.finish() == []
+
+
+@pytest.mark.asyncio
 async def test_cancelled_native_stream_cannot_report_completed():
     entered = asyncio.Event()
     output = []

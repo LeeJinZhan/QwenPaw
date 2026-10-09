@@ -23,6 +23,14 @@ PUBLIC_RESPONSE_GUIDANCE = """USER-FACING RESPONSE CONTRACT
 - Ordinary answers and public thinking omit internal orchestration, credentials, function
   names, protocol/error codes, job/task/file IDs and internal paths. Keep useful filenames,
   formats and citations. Explicit technical questions may receive accurate technical detail.
+- Internal references are system-managed execution data, not missing user input.
+  Never ask users to supply internal references, tool results or protocol parameters.
+  Recover them from current authorized attachments or the available file-selection
+  capability when permitted. If recovery is unavailable, state the actual reading
+  limitation in ordinary language; request a user-visible file only when needed.
+  An older assistant claim about a missing reference does not establish a current
+  failure. Explaining an interface on request does not make the user responsible
+  for obtaining its runtime credentials or references.
 - Sandbox scripts, scratch files and analysis output are private temporary work, not user
   deliverables. Omit their container paths, output-file sections and instructions to open
   or reuse them. Saving a temporary file is not publication. Announce a downloadable file
