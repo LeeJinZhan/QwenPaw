@@ -359,7 +359,7 @@ async def test_ordinary_question_is_not_forced_to_call_artifact_tool() -> None:
 
 
 def test_skill_requires_structured_runtime_tools_and_no_shell_fallback() -> None:
-    skill = (PLUGIN_ROOT / "skills" / "bank-assistant-zh" / "SKILL.md").read_text(
+    skill = (PLUGIN_ROOT / "skills" / "bank-file-delivery" / "SKILL.md").read_text(
         encoding="utf-8"
     )
     for tool_name in (

@@ -252,7 +252,7 @@ async def artifact_generate(
             For an official document draft, use ``{"kind": "official_document",
             "layout_version": "bank-official-docx-v1", "document": {"title":
             "标题", "recipients": [], "blocks": [{"type": "paragraph",
-            "text": "正文"}]}}``. Read bank-document-writing for heading/table
+            "text": "正文"}]}}``. Read bank-file-delivery for heading/table
             and optional fields. Keep document.title independent of filenames.
             A requested institution template still requires template_fill_docx
             and its published, authorized version. Never silently substitute
@@ -269,7 +269,7 @@ async def artifact_generate(
             ``{"formula": "=SUM(B2:B5)"}``; only internal workbook references
             and registered arithmetic/conditional functions are supported.
             Never supply cached values, external links or executable functions.
-            Read bank-assistant-zh for the function list. Plain strings remain
+            Read bank-file-delivery for the function list. Plain strings remain
             escaped text. Word/PDF wide tables and PPT dense content reflow
             automatically; preserve all data and verify actual page counts.
             For CSV, use ``{"columns": ["项目", "数量"], "rows": [["合计", 1]]}``.
