@@ -145,7 +145,8 @@ class ArtifactDeliveryErrorHook(LifecycleHook):
     priority = 90
 
     async def run(self, ctx: HookContext) -> HookResult:
-        if isinstance(ctx.error, ArtifactToolNotInvokedError):
+        from .sandbox.broker import AttachmentStorageError
+        if isinstance(ctx.error, (ArtifactToolNotInvokedError, AttachmentStorageError)):
             ctx.extras["_error_code"] = ctx.error.error_code
             ctx.extras["_error_text"] = ctx.error.message
         else:

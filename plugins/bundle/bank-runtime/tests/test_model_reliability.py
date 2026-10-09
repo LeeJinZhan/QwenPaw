@@ -425,3 +425,138 @@ def test_task_budget_supports_one_hour_and_rejects_two_hour_extension():
     before = time.monotonic()
     reliability = BankModelReliability(7200)
     assert 3599 <= reliability.deadline - before <= 3601
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('empty_blocks', [[], [TextBlock(text='  ')], [ThinkingBlock(thinking='private planning')]])
+@pytest.mark.parametrize('next_block', [TextBlock(text='有效答复'), ToolCallBlock(id='next', name='read_range', input='{}')])
+async def test_empty_completed_response_continues_only_current_call(empty_blocks, next_block):
+    from agentscope.message import AssistantMsg, ToolResultBlock
+    history = [UserMsg('user', '完成分析'), AssistantMsg('assistant', [
+        ToolCallBlock(id='done', name='parse_documents', input='{}'),
+        ToolResultBlock(id='done', name='parse_documents', output=[TextBlock(text='解析已完成')]),
+    ])]
+    schemas = [{'type': 'function', 'function': {'name': 'read_range'}}]
+    calls = []
+    policy = BankModelReliability(10)
+    deadline = policy.deadline
+    async def model(**kwargs):
+        calls.append(kwargs)
+        return ChatResponse(empty_blocks if len(calls) == 1 else [next_block], True)
+    chunks = await collect(policy, model, messages=history, tools=schemas, tool_choice='auto')
+    assert len(calls) == 2
+    assert chunks[-1].content == [next_block]
+    assert calls[1]['messages'][:-1] == history
+    assert calls[1]['messages'][-1].role == 'system'
+    assert calls[1]['tools'] is schemas
+    assert calls[1]['tool_choice'] == 'auto'
+    assert len(history) == 2
+    assert policy.deadline == deadline
+    assert policy.recovery_used is True
+
+
+@pytest.mark.asyncio
+async def test_repeated_thinking_only_latches_typed_failure_and_safe_diagnostic(caplog):
+    calls = []
+    async def model(**kwargs):
+        calls.append(kwargs)
+        return ChatResponse([ThinkingBlock(thinking='private planning')], True)
+    policy = BankModelReliability(10)
+    with pytest.raises(Exception) as caught:
+        await collect(policy, model, messages=[], tools=[])
+    assert caught.value.error_code == 'WORKER_EMPTY_RESPONSE'
+    assert caught.value.details['attempts'] == 2
+    assert len(calls) == 2
+    assert 'reason=thinking_only' in caplog.text
+    assert 'text_chars=0' in caplog.text and 'tool_calls=0' in caplog.text
+    assert 'private planning' not in caplog.text
+    with pytest.raises(Exception):
+        await collect(policy, model)
+    assert len(calls) == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('mode', ['disabled', 'used', 'expired'])
+async def test_empty_response_respects_existing_recovery_allowance_and_deadline(mode):
+    policy = BankModelReliability(10, no_output_retry_attempts=0 if mode == 'disabled' else 1)
+    policy.recovery_used = mode == 'used'
+    calls = []
+    async def model(**kwargs):
+        calls.append(kwargs)
+        if mode == 'expired':
+            policy.deadline = 0
+        return ChatResponse([ThinkingBlock(thinking='private planning')], True)
+    with pytest.raises(Exception) as caught:
+        await collect(policy, model)
+    assert caught.value.error_code in {'WORKER_EMPTY_RESPONSE', 'WORKER_TIMEOUT'}
+    assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_empty_final_after_public_text_does_not_repeat_output():
+    calls = []
+    async def model(**kwargs):
+        calls.append(kwargs)
+        async def stream():
+            yield ChatResponse([TextBlock(text='已公开内容')], False)
+            yield ChatResponse([ThinkingBlock(thinking='private planning')], True)
+        return stream()
+    with pytest.raises(Exception) as caught:
+        await collect(BankModelReliability(10), model)
+    assert caught.value.error_code == 'WORKER_EMPTY_RESPONSE'
+    assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('block', [TextBlock(text='正常答复'), ToolCallBlock(id='valid', name='read_range', input='{}')])
+async def test_valid_response_does_not_consume_empty_recovery(block):
+    calls = []
+    async def model(**kwargs):
+        calls.append(kwargs)
+        return ChatResponse([block], True)
+    policy = BankModelReliability(10)
+    chunks = await collect(policy, model)
+    assert chunks[-1].content == [block]
+    assert len(calls) == 1 and policy.recovery_used is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('answer', [True, False])
+async def test_actual_sdk_thinking_only_stream_never_finishes_without_valid_output(monkeypatch, answer):
+    from types import SimpleNamespace
+    from agentscope.credential._openai import OpenAICredential
+    from agentscope.message import SystemMsg
+    from qwenpaw.providers.openai_chat_model_compat import OpenAIChatModelCompat
+    requests, closed = [], []
+    class WireStream:
+        def __init__(self, items): self.items = iter(items)
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): closed.append(True)
+        def __aiter__(self): return self
+        async def __anext__(self):
+            try: return next(self.items)
+            except StopIteration: raise StopAsyncIteration
+    def chunk(content=None, thinking=None, finish=None):
+        return SimpleNamespace(usage=None, choices=[SimpleNamespace(finish_reason=finish,
+            delta=SimpleNamespace(content=content, reasoning_content=thinking, tool_calls=None))])
+    async def api(**kwargs):
+        requests.append(kwargs)
+        assert kwargs['messages'][0]['role'] == 'system'
+        assert all(m['role'] != 'system' for m in kwargs['messages'][1:])
+        content = '有效答复' if len(requests) == 2 and answer else None
+        return WireStream([chunk(thinking='private planning'), chunk(content=content), chunk(finish='stop')])
+    monkeypatch.setattr('openai.AsyncClient', lambda **kwargs:
+        SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=api))))
+    model = OpenAIChatModelCompat(credential=OpenAICredential(id='probe', api_key='unused',
+        base_url='http://unused.invalid'), model='nvidia/nemotron-3-super-120b-a12b:free', stream=True, max_retries=0)
+    policy = BankModelReliability(10)
+    request = {'messages': [SystemMsg('system', 'base'), UserMsg('user', '完成本轮任务')]}
+    if answer:
+        chunks = await collect(policy, model, **request)
+        assert ''.join(b.text for b in chunks[-1].content if isinstance(b, TextBlock)) == '有效答复'
+    else:
+        with pytest.raises(Exception) as caught:
+            await collect(policy, model, **request)
+        assert caught.value.error_code == 'WORKER_EMPTY_RESPONSE'
+    assert len(requests) == len(closed) == 2
+    assert len(request['messages']) == 2
