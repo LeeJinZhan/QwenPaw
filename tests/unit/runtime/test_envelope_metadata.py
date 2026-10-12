@@ -79,6 +79,85 @@ async def test_event_metadata_decorator_applies_to_outputs_by_default():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('ended', [False, True])
+async def test_result_boundary_closes_preamble_without_inheriting_tool_metadata(ended):
+    envelope = Envelope()
+    [header] = await _translate(envelope, _event(EventType.TEXT_BLOCK_START, block_id='before'))
+    await _translate(envelope, _event(EventType.TEXT_BLOCK_DELTA, block_id='before', delta='Reading.'))
+    if ended:
+        await _translate(envelope, _event(EventType.TEXT_BLOCK_END, block_id='before'))
+    boundary = await _translate(envelope, _event(
+        EventType.TOOL_RESULT_START, tool_call_id='read', tool_call_name='read_document',
+        metadata={'private_tool_metadata': 'result-only'},
+    ))
+    preamble = boundary[0]
+    assert preamble['id'] == header['id']
+    assert preamble['status'] == RunStatus.Completed
+    assert [b['text'] for b in preamble['content']] == ['Reading.']
+    _assert_no_metadata(preamble)
+    assert all(item['metadata'] == {'private_tool_metadata': 'result-only'} for item in boundary[1:])
+    assert await _translate(envelope, _event(EventType.TEXT_BLOCK_END, block_id='before')) == []
+    [answer] = await _translate(envelope, _event(EventType.TEXT_BLOCK_START, block_id='after'))
+    assert answer['id'] != header['id']
+    await _translate(envelope, _event(EventType.TEXT_BLOCK_DELTA, block_id='after', delta='Result.'))
+    await _translate(envelope, _event(EventType.TEXT_BLOCK_END, block_id='after'))
+    final = await _dump(envelope.finalize())
+    assert [b['text'] for b in final[0]['content']] == ['Result.']
+
+
+@pytest.mark.asyncio
+async def test_retired_block_identity_is_scoped_to_reply_and_final_response_is_closed():
+    envelope = Envelope()
+    for event in [
+        _event(EventType.TEXT_BLOCK_DELTA, reply_id='old', block_id='shared', delta='Process.'),
+        _event(EventType.TOOL_RESULT_START, tool_call_id='read', tool_call_name='read'),
+    ]:
+        await _translate(envelope, event)
+    for kind, fields in [
+        (EventType.TEXT_BLOCK_START, {}),
+        (EventType.TEXT_BLOCK_DELTA, {'delta': 'Late.'}),
+        (EventType.TEXT_BLOCK_END, {}),
+    ]:
+        assert await _translate(envelope, _event(kind, reply_id='old', block_id='shared', **fields)) == []
+    await _translate(envelope, _event(EventType.TEXT_BLOCK_DELTA, reply_id='new', block_id='shared', delta='Answer.'))
+    final = await _dump(envelope.finalize())
+    assert [b['text'] for b in final[0]['content']] == ['Answer.']
+    assert await _translate(envelope, _event(EventType.TEXT_BLOCK_DELTA, reply_id='new', block_id='extra', delta='Late.')) == []
+    assert await _dump(envelope.finalize()) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('finalizer', ['normal', 'cancel', 'error'])
+async def test_final_snapshot_retains_all_partial_blocks_and_order(finalizer):
+    envelope = Envelope()
+    for event in [
+        _event(EventType.TEXT_BLOCK_DELTA, block_id='first', delta='First.'),
+        _event(EventType.TEXT_BLOCK_DELTA, block_id='second', delta='Second.'),
+        _event(EventType.TEXT_BLOCK_END, block_id='second'),
+    ]:
+        await _translate(envelope, event)
+    if finalizer == 'normal':
+        final = await _dump(envelope.finalize())
+    elif finalizer == 'cancel':
+        final = await _dump(envelope.cancel_envelope())
+    else:
+        final = await _dump(envelope.error_envelope('failed', 'WORKER_FAILED'))
+        assert final[-1]['status'] == RunStatus.Failed
+    assert [b['text'] for b in final[0]['content']] == ['First.', 'Second.']
+    assert [b['index'] for b in final[0]['content']] == [0, 1]
+
+
+@pytest.mark.asyncio
+async def test_command_response_still_produces_one_complete_text_message():
+    envelope = Envelope()
+    command = SimpleNamespace(get_text_content=lambda: 'Command result.', metadata={})
+    output = await _dump(envelope.from_msg(command))
+    assert output[-1]['status'] == RunStatus.Completed
+    assert [b['text'] for b in output[-2]['content']] == ['Command result.']
+    assert await _dump(envelope.finalize()) == []
+
+
+@pytest.mark.asyncio
 async def test_metadata_is_added_to_existing_stream_outputs():
     cases = [
         (

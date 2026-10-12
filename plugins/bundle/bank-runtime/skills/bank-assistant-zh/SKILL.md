@@ -1,8 +1,8 @@
 ---
 name: bank_assistant
-description: "用于通用问答与任务方法选择；需要制度依据、文档写作、审核、演示文稿或可编辑图表时按需读取对应专项技能。"
+description: "用于通用问答与任务方法选择；涉及附件、表格数据分析，或制度依据、文档写作、审核、演示文稿、可编辑图表时使用。"
 metadata:
-  builtin_skill_version: "3.1"
+  builtin_skill_version: "3.3"
   trust_level: "trusted-plugin-guidance"
 ---
 
@@ -14,7 +14,7 @@ metadata:
 
 | 当前任务需要 | 按需读取 |
 | --- | --- |
-| 本行制度、业务流程和内部规定的依据；附件问答、图片文字识别/OCR、扫描件读取、完整性核对或表格统计 | bank-document-qa |
+| 本行制度、业务流程和内部规定的依据；附件问答、图片文字识别/OCR、扫描件读取、完整性核对；表格数据分析 | bank-document-qa |
 | 起草、整合、润色、长文、普通 Word 或公文 DOCX 交付 | bank-document-writing |
 | 文字检查、公文形式检查、制度对照、复核和修订建议 | bank-document-review |
 | 制作或修订 PPT/PPTX，含演示页内图表 | bank-presentation |

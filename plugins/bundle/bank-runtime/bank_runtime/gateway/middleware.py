@@ -29,6 +29,8 @@ from .client import GatewayClient, GatewayConfig, GatewayError
 from .protocol import canonical_payload_hash
 from .recovery_budget import OperationRecoveryBudget, recovery_operation_key
 from .native_skills import NativeSkillReader
+from .personal_skills import PersonalSkillReader
+from .history_recall import CurrentSessionHistoryReader, RECALL_GUIDANCE
 from .completion import operation_keys, parse_outcomes
 from .document_reads import DocumentReadLedger, result_error, is_read_recovery_tool
 from .document_inputs import normalize_document_input, document_call_argument_hint
@@ -99,6 +101,8 @@ class _PreparedExecution:
     preflight: dict[str, Any]
     claimed: bool = False
     native_skill: bool = False
+    personal_skill: bool = False
+    history_recall: bool = False
 
 
 class BankRuntimeGatewayMiddleware(MiddlewareBase):
@@ -118,6 +122,7 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
         self.model_reliability = model_reliability
         self.sandbox_executor = sandbox_executor
         self.native_analysis_enabled = native_analysis_enabled is True
+        self._native_uncertain_scopes: set[tuple] = set()
         self.configuration_error = str(configuration_error or "")
         self.artifact_intent = artifact_intent
         self._prepared: dict[tuple[str, str], deque[_PreparedExecution]] = defaultdict(
@@ -142,11 +147,30 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
         self._partial_generated_ids: set[str] = set()
         self._reply_text: list[str] = []
         self.native_skills: NativeSkillReader | None = None
+        self.personal_skills: PersonalSkillReader | None = None
+        self.history_recall: CurrentSessionHistoryReader | None = None
+        self._model_tool_projection_logged = False
         self.allowed_tool_names: frozenset[str] | None = None
         self.document_preparation = DocumentSourcePreparation(self._run_file_preparation_tool)
 
-    def bind_native_skills(self, agent: Any) -> None:
+    def _native_scope_key(self):
+        context = getattr(self.sandbox_executor, 'sandbox_context', {})
+        scope = context.get('task_scope_id')
+        instance = context.get('sandbox_instance_id')
+        return (scope, instance) if scope and instance else (id(self.sandbox_executor),)
+
+    def native_execution_paused(self, tool_name: str) -> bool:
+        return (self.native_analysis_enabled and is_physical_tool(tool_name)
+                and self._native_scope_key() in self._native_uncertain_scopes)
+
+    def bind_native_skills(self, agent: Any, request: Any = None) -> None:
         self.native_skills = NativeSkillReader(agent)
+        self.personal_skills = PersonalSkillReader(agent)
+        self.history_recall = CurrentSessionHistoryReader(agent, request, self.client)
+        for group in agent.toolkit.tool_groups:
+            group.tools[:] = [tool for tool in group.tools if getattr(tool, 'name', '') not in {'recall_history', 'recall_history_python'}]
+        if self.history_recall.eligible():
+            agent.toolkit.tool_groups[0].tools.append(self.history_recall.tool)
 
     async def on_reply(
         self,
@@ -378,6 +402,9 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
         # Inspect completed model calls before AgentScope sanitizes malformed
         # JSON into synthetic tool errors (which never enter the Gateway).
         input_kwargs = dict(input_kwargs)
+        if self._native_scope_key() in self._native_uncertain_scopes:
+            input_kwargs['tools'] = [schema for schema in (input_kwargs.get('tools') or [])
+                if not self.native_execution_paused(str(schema.get('function', {}).get('name', '')))]
         input_kwargs["tools"] = describe_docx_tools(
             input_kwargs.get("tools"), self.artifact_intent or self._artifact_schema_hint,
         )
@@ -476,6 +503,12 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
                 allowed = model_tool_names(allowed, self.sandbox_executor)
             if self.native_skills is not None and await self.native_skills.visible():
                 allowed.add("Skill")
+            if self.personal_skills is not None and await self.personal_skills.visible():
+                allowed.add(self.personal_skills.tool.name)
+            if self.history_recall is not None and await self.history_recall.visible():
+                allowed.add(self.history_recall.tool.name)
+                input_kwargs = {**input_kwargs, 'messages':[*list(input_kwargs.get('messages') or []),
+                    SystemMsg('system', RECALL_GUIDANCE)]}
             input_kwargs = dict(input_kwargs)
             input_kwargs["tools"] = [
                 schema
@@ -483,6 +516,20 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
                 if isinstance(schema, dict)
                 and str(schema.get("function", {}).get("name") or "") in allowed
             ]
+        if not self._model_tool_projection_logged:
+            schemas = input_kwargs.get("tools") or []
+            catalog_present = any(
+                msg.role == "system" and any(
+                    isinstance(block, TextBlock) and "<agent-skills>" in block.text
+                    for block in msg.content
+                ) for msg in input_kwargs.get("messages") or []
+            )
+            _logger.info(
+                "Bank Runtime model tool projection: task_id=%s tool_count=%d skill_reader=%s skill_catalog=%s",
+                getattr(getattr(self.client, "config", None), "task_id", ""), len(schemas),
+                any(s.get("function", {}).get("name") == "Skill" for s in schemas), catalog_present,
+            )
+            self._model_tool_projection_logged = True
         if (
             self.artifact_intent is not None
             and self.artifact_intent.layout_kind == "official_document"
@@ -805,11 +852,15 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
         preflight: dict[str, Any],
         *,
         native_skill: bool = False,
+        personal_skill: bool = False,
+        history_recall: bool = False,
     ) -> None:
         key = (str(tool_name), canonical_payload_hash(tool_input))
         self._prepared[key].append(
             _PreparedExecution(
-                key[0], key[1], dict(preflight), native_skill=native_skill
+                key[0], key[1], dict(preflight), native_skill=native_skill,
+                personal_skill=personal_skill,
+                history_recall=history_recall,
             )
         )
 
@@ -955,6 +1006,9 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
             )
         tool_call = input_kwargs.get("tool_call")
         tool_name = str(getattr(tool_call, "name", "") or "")
+        if self.native_execution_paused(tool_name):
+            # Also reject calls admitted in a batch before its first unknown result.
+            raise GatewayError('当前处理环境的执行结果尚未确认，已停止继续执行；可使用已有结果完成独立操作。')
         try:
             tool_input = json.loads(str(getattr(tool_call, "input", "") or "{}"))
         except (TypeError, ValueError) as exc:
@@ -982,6 +1036,20 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
         self.unresolved_file_operations.update(self._operation_keys(tool_name, tool_input))
         if not self._source_block(tool_name, tool_input) and not invalid_document_reference_argument(tool_name, tool_input):
             self.document_reads.start(tool_name, tool_input)
+        if prepared.personal_skill:
+            reader = self.personal_skills
+            if reader is None or reader.agent is not agent or not await reader.available(tool_input):
+                raise GatewayError("Personal Skill read scope changed")
+            async for item in next_handler():
+                yield item
+            return
+        if prepared.history_recall:
+            reader = self.history_recall
+            if reader is None or reader.agent is not agent or not await reader.available(tool_input):
+                raise GatewayError('History read scope changed')
+            async for item in next_handler():
+                yield item
+            return
         if prepared.native_skill:
             reader = self.native_skills
             if (
@@ -1189,10 +1257,7 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
             raise
         except Exception as exc:
             if self.native_analysis_enabled and getattr(exc,'execution_uncertain',False):
-                blocked = getattr(self, '_native_uncertain_calls', None)
-                if blocked is None:
-                    self._native_uncertain_calls = blocked = set()
-                blocked.add((tool_name,canonical_payload_hash(tool_input)))
+                self._native_uncertain_scopes.add(self._native_scope_key())
                 result_reported = True
                 await self._report_native_terminal(tool_call_id,'execution_unknown',started_at,'TOOL_EXECUTION_UNKNOWN')
             self._remember_conversion_failure(tool_name, tool_input, getattr(exc, "conversion_failure", ""))
@@ -1249,6 +1314,29 @@ class GatewayPermissionEngine:
     ) -> PermissionDecision:
         if self.middleware.configuration_error or self.middleware.client is None:
             return _deny("此操作当前不可用，本次未执行。")
+        personal_reader = self.middleware.personal_skills
+        history_reader = self.middleware.history_recall
+        if history_reader is not None and history_reader.recognizes(tool):
+            if not await history_reader.available(tool_input):
+                return _deny('当前会话历史不可用。')
+            input_hash = canonical_payload_hash(tool_input)
+            decision = await self.delegate.check_permission(tool, tool_input)
+            if (decision.behavior != PermissionBehavior.ALLOW or canonical_payload_hash(tool_input) != input_hash
+                    or not await history_reader.available(tool_input)):
+                return _deny('当前会话历史不可用。')
+            self.middleware.prepare(tool.name, tool_input, {}, history_recall=True)
+            return decision
+        if personal_reader is not None and personal_reader.recognizes(tool):
+            if not await personal_reader.available(tool_input):
+                return _deny("当前个人技能说明不可用。")
+            input_hash = canonical_payload_hash(tool_input)
+            decision = await self.delegate.check_permission(tool, tool_input)
+            if (decision.behavior != PermissionBehavior.ALLOW
+                    or canonical_payload_hash(tool_input) != input_hash
+                    or not await personal_reader.available(tool_input)):
+                return _deny("当前个人技能说明不可用。")
+            self.middleware.prepare(tool.name, tool_input, {}, personal_skill=True)
+            return decision
         reader = self.middleware.native_skills
         if reader is not None and reader.recognizes(tool):
             if not await reader.available(tool_input):
@@ -1259,12 +1347,12 @@ class GatewayPermissionEngine:
             self.middleware.prepare("Skill", tool_input, {}, native_skill=True)
             return decision
         tool_name = str(getattr(tool, "name", "") or "")
+        if self.middleware.native_execution_paused(tool_name):
+            return _deny('当前处理环境的执行结果尚未确认，已停止继续执行；可使用已有结果完成独立操作。')
         tool_input = complete_artifact_tool_input(
             tool_name, tool_input, self.middleware.artifact_intent
         )
         tool_input = normalize_chart_input(tool_name, self.middleware.document_input(tool_name, tool_input))
-        if (tool_name,canonical_payload_hash(tool_input)) in getattr(self.middleware,'_native_uncertain_calls',set()):
-            return _deny('该操作结果未知，不可重复提交；请保留当前调用等待确认。')
         if (document_call_argument_hint(tool_name, tool_input)
                 and self.middleware.document_reads.call_argument_failures.get(
                     (tool_name, str(tool_input.get('document_ref') or '')), 0) >= 2):
@@ -1425,7 +1513,7 @@ class BankRuntimeGatewayInstallHook(LifecycleHook):
             raise GatewayError("Bank Runtime Gateway middleware is missing")
         if middleware.configuration_error:
             raise GatewayError(middleware.configuration_error)
-        middleware.bind_native_skills(agent)
+        middleware.bind_native_skills(agent, ctx.request)
         for group in getattr(getattr(agent, "toolkit", None), "tool_groups", ()):
             group.tools[:] = [tool for tool in group.tools if _is_managed_tool(tool)]
         engine = getattr(agent, "_engine", None)

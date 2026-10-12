@@ -410,6 +410,10 @@ class PersonalSkillsRegistry:
     def has_items(self) -> bool:
         return bool(self._items)
 
+    def has_reference(self, skill_ref: Any) -> bool:
+        """Check current request membership without fetching private content."""
+        return not self.closed and isinstance(skill_ref, str) and skill_ref in self._items
+
     async def activate(self, skill_ref: str) -> str:
         async with self._activation_lock:
             if self.closed:

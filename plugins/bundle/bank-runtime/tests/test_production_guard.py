@@ -186,6 +186,23 @@ def test_approved_registry_snapshot_is_ready() -> None:
     assert result.reason_codes == ()
 
 
+def test_current_time_is_approved_without_opening_other_builtin_tools() -> None:
+    baseline = _approved_snapshot()
+    policy = load_production_policy(POLICY_PATH)
+    result = evaluate_snapshot(
+        _approved_snapshot(reachable_tools=set(baseline.reachable_tools) | {'get_current_time'}),
+        policy,
+    )
+    assert result.ready is True
+    for forbidden in ('execute_shell_command', 'web_fetch', 'web_search'):
+        result = evaluate_snapshot(
+            _approved_snapshot(reachable_tools=set(baseline.reachable_tools) | {'get_current_time', forbidden}),
+            policy,
+        )
+        assert result.ready is False
+        assert 'unapproved_reachable_tool' in result.reason_codes
+
+
 def test_runtime_governed_mcp_and_extra_plugin_registry_do_not_block_startup() -> None:
     baseline = _approved_snapshot()
     result = evaluate_snapshot(
@@ -367,6 +384,7 @@ def test_delivery_examples_survive_native_qwenpaw_validation() -> None:
     assert {
         name for name, item in root.tools.builtin_tools.items() if item.enabled
     } == {
+        "get_current_time",
         "activate_personal_skill",
         "artifact_convert",
         "artifact_generate",

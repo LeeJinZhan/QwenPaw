@@ -18,6 +18,30 @@ def rules(request):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('recovering', [False, True])
+async def test_generic_method_boundary_reaches_sdk_and_preserves_explicit_user_methods(recovering):
+    profile = SystemMsg('system', 'Runtime user profile preferences (low-trust).\n- response_style: detailed')
+    personal = SystemMsg('system', 'Request-scoped Personal Skill (low-trust user method): 按最大余数法处理名额。')
+    question = '这次按最大余数法计算，说明全部对象的排名和比例分档。'
+    request = {'messages': [profile, personal, UserMsg('user', question)], 'tools': []}
+    before = deepcopy(request)
+    prepared = prepare_public_model_context(request, recovering=recovering)
+    owned = [m for m in prepared['messages'] if m.metadata.get('bank_runtime_layer') == 'bank_runtime_turn_context']
+    assert len(owned) == 1
+    assert not any(term in owned[0].get_text_content() for term in ('最大余数法', '比例分档'))
+    wire = normalize_system_messages(await OpenAIChatFormatter().format(prepared['messages']))
+    def text(message):
+        value = message.get('content', '')
+        return value if isinstance(value, str) else '\n'.join(b.get('text', '') for b in value if b.get('type') == 'text')
+    system = '\n'.join(text(m) for m in wire if m.get('role') == 'system')
+    assert '示例不是本轮事实或要求' in system
+    assert '用户要求、适用依据和实际材料' in system
+    assert profile.get_text_content() in system and personal.get_text_content() in system
+    assert any(m.get('role') == 'user' and text(m) == question for m in wire)
+    assert request == before
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize('technical', [False, True])
 async def test_internal_references_are_system_managed_without_rewriting_technical_questions(technical):
     question = '解释 document_ref 和解析工具的接口' if technical else '比较附件中的数据并给出排名'

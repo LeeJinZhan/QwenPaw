@@ -355,6 +355,9 @@ class ManagedSessionPrepareHook(LifecycleHook):
             # bypass this session's task-safe projection. Request data alone
             # is insufficient; this marker follows verified session preparation.
             ctx.extras['managed_history_projection'] = True
+        else:
+            from .gateway.history_recall import SCOPED_SCROLL_PROMPT
+            ctx.extras['bank_runtime_session_recall_prompt'] = SCOPED_SCROLL_PROMPT
         return HookResult()
 
 

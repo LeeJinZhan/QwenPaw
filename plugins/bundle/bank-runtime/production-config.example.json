@@ -1,4 +1,5 @@
 {
+  "user_timezone": "Asia/Shanghai",
   "channels": {
     "imessage": {"enabled": false},
     "discord": {"enabled": false},
@@ -58,7 +59,7 @@
       "desktop_screenshot": {"name": "desktop_screenshot", "enabled": false},
       "edit_file": {"name": "edit_file", "enabled": false},
       "execute_shell_command": {"name": "execute_shell_command", "enabled": false},
-      "get_current_time": {"name": "get_current_time", "enabled": false},
+      "get_current_time": {"name": "get_current_time", "enabled": true},
       "get_goal": {"name": "get_goal", "enabled": false},
       "get_token_usage": {"name": "get_token_usage", "enabled": false},
       "glob_search": {"name": "glob_search", "enabled": false},

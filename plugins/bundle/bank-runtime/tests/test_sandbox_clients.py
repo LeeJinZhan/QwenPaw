@@ -15,6 +15,7 @@ if str(PLUGIN_ROOT) not in sys.path:
 from bank_runtime.sandbox import broker as broker_module
 from bank_runtime.sandbox import executor as executor_module
 from bank_runtime.sandbox.broker import RuntimeFileBroker
+from bank_runtime.sandbox.broker import SandboxBrokerError
 from bank_runtime.sandbox.executor import RuntimeSandboxExecutor
 from bank_runtime.sandbox.scope import SandboxRequestScope
 
@@ -122,6 +123,46 @@ async def test_physical_executor_uses_fixed_endpoint_and_exact_arguments(
 def test_current_browser_is_a_physical_tool():
     assert executor_module.is_physical_tool("browser")
     assert executor_module._operation_for("browser") == "browser.execute"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("remaining", [600, 10])
+async def test_original_preparation_waits_within_task_deadline(monkeypatch, remaining):
+    _AsyncClient.calls = []
+    _AsyncClient.response_data = {"files": []}
+    monkeypatch.setattr(broker_module.httpx, "AsyncClient", _AsyncClient)
+    scope = _scope()
+    scope.sandbox_context["expires_at"] = (datetime.now(timezone.utc) + timedelta(seconds=remaining)).isoformat()
+    await RuntimeFileBroker("https://runtime.internal", "token").prepare_originals(scope, [])
+    timeout = _AsyncClient.calls[-1][2]["timeout"]
+    timeout = timeout if isinstance(timeout, broker_module.httpx.Timeout) else broker_module.httpx.Timeout(timeout)
+    assert remaining - 1 < timeout.read <= remaining
+    assert timeout.connect <= 5
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("expiry", [None, "bad", "2099-01-01T00:00:00", "2000-01-01T00:00:00Z"])
+async def test_original_preparation_rejects_invalid_or_expired_deadline_before_http(monkeypatch, expiry):
+    _AsyncClient.calls = []
+    monkeypatch.setattr(broker_module.httpx, "AsyncClient", _AsyncClient)
+    scope = _scope()
+    scope.sandbox_context["expires_at"] = expiry
+    with pytest.raises(SandboxBrokerError):
+        await RuntimeFileBroker("https://runtime.internal", "token").prepare_originals(scope, [])
+    assert _AsyncClient.calls == []
+
+
+@pytest.mark.asyncio
+async def test_original_preparation_total_wait_cannot_outlive_task(monkeypatch):
+    class SlowClient(_AsyncClient):
+        async def post(self, *args, **kwargs):
+            await asyncio.sleep(0.08)
+            return _Response({"files": []})
+    monkeypatch.setattr(broker_module.httpx, "AsyncClient", SlowClient)
+    scope = _scope()
+    scope.sandbox_context["expires_at"] = (datetime.now(timezone.utc) + timedelta(seconds=0.03)).isoformat()
+    with pytest.raises(SandboxBrokerError):
+        await RuntimeFileBroker("https://runtime.internal", "token").prepare_originals(scope, [])
 
 
 @pytest.mark.asyncio

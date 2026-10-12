@@ -57,6 +57,7 @@
       "write_file"
     ],
     "reachable_tools": [
+      "get_current_time",
       "activate_personal_skill",
       "chart_generate",
             "chart_export",

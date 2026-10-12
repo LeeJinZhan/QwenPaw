@@ -327,6 +327,9 @@ class ScrollContextContributor(SyncPromptContributor):
             return None
         if strategy != "scroll":
             return None
+        scoped = extras.get('bank_runtime_session_recall_prompt')
+        if isinstance(scoped, str):
+            return scoped
         from ..agents.context.scroll.prompt import build_scroll_system_prompt
 
         language = getattr(agent_config, "language", "en")

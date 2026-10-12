@@ -101,6 +101,10 @@ async def test_service_exposes_exact_native_mcp_tools_and_stops_idempotently() -
         "aggregate",
         "search",
     ]
+    chunk_schema = next(tool for tool in tools.tools if tool.name == "read_document_chunks").inputSchema
+    assert chunk_schema["properties"]["limit"]["minimum"] == 1
+    assert chunk_schema["properties"]["limit"]["maximum"] == 10
+    assert chunk_schema["properties"]["limit"]["default"] == 5
     assert client.probes == 1
 
     await service.stop()
@@ -161,3 +165,28 @@ async def authorized_call(session, name, arguments):
     from bank_runtime.gateway.document_access import approved_document_call
     with approved_document_call("task_001", name, arguments) as metadata:
         return await session.call_tool(name, arguments, meta=metadata)
+
+
+@pytest.mark.asyncio
+async def test_chunk_limit_schema_keeps_validation_after_task_authorization(monkeypatch):
+    from types import SimpleNamespace
+    from bank_runtime.gateway.document_access import approved_document_call
+
+    calls = []
+
+    class InvalidLimitTools(_Tools):
+        def read_document_chunks(self, document_ref, cursor=None, limit=5):
+            calls.append(limit)
+            raise ToolContractError("DOCUMENT_ARGUMENT_INVALID", "CHUNK_LIMIT")
+
+    service = MinerUMcpService(settings=_settings(_port()), tool_service=InvalidLimitTools(), mineru_client=_Client())
+    arguments = {"document_ref": "r", "limit": 100}
+    monkeypatch.setattr(service.mcp, "get_context", lambda: SimpleNamespace(request_context=SimpleNamespace(meta=None)))
+    _, denied = await service.mcp.call_tool("read_document_chunks", arguments)
+    assert denied["error_code"] == "FILE_ACCESS_DENIED"
+    assert not calls
+    with approved_document_call("task_001", "read_document_chunks", arguments) as metadata:
+        monkeypatch.setattr(service.mcp, "get_context", lambda: SimpleNamespace(request_context=SimpleNamespace(meta=metadata)))
+        _, invalid = await service.mcp.call_tool("read_document_chunks", arguments)
+    assert invalid["error_code"] == "DOCUMENT_ARGUMENT_INVALID"
+    assert calls == [100]

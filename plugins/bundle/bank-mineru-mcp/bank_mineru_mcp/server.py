@@ -136,7 +136,10 @@ class MinerUMcpService:
         async def read_document_chunks(
             document_ref: str,
             cursor: str | None = None,
-            limit: int = 5,
+            limit: Annotated[int, WithJsonSchema({
+                "type": "integer", "minimum": 1, "maximum": 10,
+                "description": "Chunks per page, 1-10 (default 5). This is not the search hit limit. Continue with next_cursor to read further chunks.",
+            })] = 5,
         ) -> dict[str, Any]:
             try:
                 return await self._authorized_call("read_document_chunks", {"document_ref": document_ref, "cursor": cursor, "limit": limit})
@@ -161,10 +164,10 @@ class MinerUMcpService:
         )
         async def read_range(
             document_ref: str,
-            sheet: str | None = None,
-            rows: list[int] | None = None,
+            sheet: Annotated[str | None, Field(description="Exact sheet name from inventory. Required for row reads in a multi-sheet workbook. For inventory across sheets, omit or use JSON null; never use the literal strings 'none', 'null' or 'all'.")] = None,
+            rows: Annotated[list[int] | None, Field(description="Inclusive [start,end], 1-based analysis rows after the selected header_row. To address original physical Excel rows including titles and headers, use format='source'. Follow returned coordinate_space/source_row rather than assuming both row numbers are equal.")] = None,
             row_cursor: int | None = None,
-            columns: list[str] | None = None,
+            columns: Annotated[list[str] | None, Field(description="Exact inventory column names. Omit or use JSON null to read all columns; '*' is not a column selector. Cell labels and displayed titles are not necessarily inventory column names.")] = None,
             format: str = "markdown",
             include_header: bool = True,
         ) -> dict[str, Any]:
@@ -187,7 +190,7 @@ class MinerUMcpService:
                 'Use metrics=[{"column":"exact inventory column","fn":"count"}]; metric uses fn, NOT op. '
                 "filter uses column/op/value. Every query must include the current document_ref returned by parse_documents. "
                 "Verify analysis header_row first: default 1 is explicit, not automatic header detection. "
-                "If inventory columns are titles or colN, inspect source rows and explicitly reparse with a per-sheet header_row map; use the new reference and restart pagination. "
+                "If inventory columns are titles or colN, inspect source rows: use verified summary cells when they answer the question; for detail calculations explicitly reparse with the actual per-sheet header_row and exclude titles/summaries using row_range. Use the new reference and restart pagination after reparse. "
                 "null numeric totals are unavailable, never zero: check header/range and numeric quality. Use this instead of reading every row for totals."
             ),
             structured_output=True,
@@ -210,14 +213,14 @@ class MinerUMcpService:
                 "Locate rows containing a substring (or simple pattern) across "
                 "sheets of a structured document_ref; returns sheet, row number "
                 "and values, capped at limit (<=100). Use to find relevant rows "
-                "before reading ranges."
+                "before reading ranges. A truncated result omits matches; without a search cursor, narrow sheet to missing worksheets instead of repeating the same global search."
             ),
             structured_output=True,
         )
         async def search(
             document_ref: str,
             query: str,
-            sheet: str | None = None,
+            sheet: Annotated[str | None, Field(description="Exact inventory sheet name to search one sheet. Omit or use JSON null to search all sheets; never use the literal strings 'none', 'null' or 'all'.")] = None,
             limit: int = 100,
         ) -> dict[str, Any]:
             try:

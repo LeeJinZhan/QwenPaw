@@ -417,6 +417,15 @@ class StructuredStore:
         for sheet_meta in targets:
             for row_number, values in self._iter_rows(entry, sheet_meta, 1):
                 if any(needle in str(value).lower() for value in values if value is not None):
+                    # Reaching the cap alone does not prove omitted matches.
+                    # Look ahead to one further match without returning it.
+                    if len(hits) >= limit:
+                        return {
+                            "document_ref": document_ref,
+                            "hits": hits,
+                            "truncated": True,
+                            "signature": self._sign("search", len(hits), len(hits)),
+                        }
                     hit = {"sheet": sheet_meta["name"], "row": row_number, "values": values}
                     if _response_bytes(hit) > 14000:
                         hit = {"sheet": sheet_meta["name"], "row": row_number,
@@ -426,13 +435,6 @@ class StructuredStore:
                         return {"document_ref": document_ref, "hits": hits, "truncated": True,
                                 "signature": self._sign("search", len(hits), len(hits))}
                     hits.append(hit)
-                    if len(hits) >= limit:
-                        return {
-                            "document_ref": document_ref,
-                            "hits": hits,
-                            "truncated": True,
-                            "signature": self._sign("search", len(hits), len(hits)),
-                        }
         return {
             "document_ref": document_ref,
             "hits": hits,

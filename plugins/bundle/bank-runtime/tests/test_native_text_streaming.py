@@ -105,6 +105,43 @@ def test_cancel_does_not_replay_streamed_text_or_claim_success():
     assert projector.project({"object": "response", "status": "completed"}) == []
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize('boundary', ['call', 'result'])
+async def test_unclosed_preamble_rotates_before_tool_and_preserves_final_answer(boundary):
+    from agentscope.event import (
+        TextBlockStartEvent, TextBlockDeltaEvent, TextBlockEndEvent,
+        ToolCallStartEvent, ToolResultStartEvent, ToolResultEndEvent,
+    )
+    from agentscope.message import ToolResultState
+    from qwenpaw.runtime.envelope import Envelope
+
+    envelope = Envelope('document-read')
+    projector = CompactEventProjector('task')
+    output = []
+    tool_args = dict(reply_id='read', tool_call_id='read', tool_call_name='parse_documents')
+    events = [TextBlockStartEvent(reply_id='read', block_id='preamble'),
+              TextBlockDeltaEvent(reply_id='read', block_id='preamble', delta='我来读取文档。')]
+    if boundary == 'call':
+        events.append(ToolCallStartEvent(**tool_args))
+    events += [ToolResultStartEvent(**tool_args),
+               ToolResultEndEvent(reply_id='read', tool_call_id='read', state=ToolResultState.SUCCESS),
+               TextBlockEndEvent(reply_id='read', block_id='preamble'),
+               TextBlockStartEvent(reply_id='final', block_id='answer'),
+               TextBlockDeltaEvent(reply_id='final', block_id='answer', delta='文档条款已识别。'),
+               TextBlockEndEvent(reply_id='final', block_id='answer')]
+    for event in events:
+        async for native in envelope.translate_event(event):
+            output.extend(projector.project(native.model_dump(mode='json')))
+    async for native in envelope.finalize():
+        output.extend(projector.project(native.model_dump(mode='json')))
+    phases = [e for e in output if e['event'] == 'answer.phase']
+    answers = [e for e in output if e['event'] == 'answer.chunk']
+    assert [e['text'] for e in phases] == ['我来读取文档。']
+    assert answers[-1]['text'] == '文档条款已识别。'
+    assert answers[-1]['message_id'] != phases[0]['message_id']
+    assert output[-1]['event'] == 'answer.completed'
+
+
 @pytest.mark.parametrize('code',['DOCUMENT_PLAN_INVALID','DOCUMENT_INVENTORY_INCOMPLETE','DOCUMENT_STATISTICS_INCOMPLETE'])
 def test_document_workflow_failure_stage_survives_native_event_projection(code):
     projector=CompactEventProjector('task')
@@ -146,3 +183,83 @@ async def test_multiple_native_text_blocks_do_not_repeat_completed_snapshots():
                 output.extend(projector.project(native.model_dump(mode="json")))
     output.extend(projector.project({"object": "response", "status": "completed"}))
     assert [item["text"] for item in output if item["event"] == "answer.chunk"] == ["第一段", "第二段"]
+
+
+async def project_native_events(events):
+    from qwenpaw.runtime.envelope import Envelope
+    envelope = Envelope('boundary-audit')
+    projector = CompactEventProjector('task')
+    output = []
+    for event in events:
+        async for native in envelope.translate_event(event):
+            output.extend(projector.project(native.model_dump(mode='json')))
+    async for native in envelope.finalize():
+        output.extend(projector.project(native.model_dump(mode='json')))
+    return output
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('closed', ['first', 'second', 'both'])
+async def test_partial_and_repeated_text_ends_preserve_complete_answer(closed):
+    from agentscope.event import TextBlockStartEvent, TextBlockDeltaEvent, TextBlockEndEvent
+    events = []
+    for block_id, text in [('first', '第一段'), ('second', '第二段')]:
+        args = dict(reply_id='reply', block_id=block_id)
+        events += [TextBlockStartEvent(**args), TextBlockDeltaEvent(**args, delta=text)]
+        if closed in {block_id, 'both'}:
+            events.append(TextBlockEndEvent(**args))
+    if closed == 'both':
+        events.append(TextBlockEndEvent(reply_id='reply', block_id='second'))
+    output = await project_native_events(events)
+    assert ''.join(e['text'] for e in output if e['event'] == 'answer.chunk') == '第一段第二段'
+    assert output[-1]['event'] == 'answer.completed'
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('after_answer', [False, True])
+async def test_late_preamble_deltas_cannot_reappear_in_answer(after_answer):
+    from agentscope.event import TextBlockStartEvent, TextBlockDeltaEvent, TextBlockEndEvent, ToolResultStartEvent
+    events = [TextBlockStartEvent(reply_id='read', block_id='old'),
+              TextBlockDeltaEvent(reply_id='read', block_id='old', delta='读取中。'),
+              ToolResultStartEvent(reply_id='read', tool_call_id='read', tool_call_name='read')]
+    final = [TextBlockStartEvent(reply_id='answer', block_id='new'),
+             TextBlockDeltaEvent(reply_id='answer', block_id='new', delta='实际结果。'),
+             TextBlockEndEvent(reply_id='answer', block_id='new')]
+    late = [TextBlockDeltaEvent(reply_id='read', block_id='old', delta='迟到的过程说明。'),
+            TextBlockEndEvent(reply_id='read', block_id='old')]
+    events += final + late if after_answer else late + final
+    output = await project_native_events(events)
+    assert [e['text'] for e in output if e['event'] == 'answer.phase'] == ['读取中。']
+    assert ''.join(e['text'] for e in output if e['event'] == 'answer.chunk') == '读取中。实际结果。'
+
+
+@pytest.mark.asyncio
+async def test_real_cancel_after_partial_text_still_fails_when_native_cleanup_completes():
+    from agentscope.event import TextBlockDeltaEvent
+    from qwenpaw.runtime.envelope import Envelope
+    ready = asyncio.Event()
+    envelope = Envelope('cancel-boundary')
+
+    async def source():
+        async for native in envelope.translate_event(TextBlockDeltaEvent(
+            reply_id='reply', block_id='text', delta='未完成的结果。',
+        )):
+            yield 'data: ' + native.model_dump_json() + '\n\n'
+        ready.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            async for native in envelope.cancel_envelope():
+                yield 'data: ' + native.model_dump_json() + '\n\n'
+
+    async def consume():
+        return [json.loads(item.removeprefix('data: '))
+                async for item in project_sse_stream(source(), 'task')]
+
+    task = asyncio.create_task(consume())
+    await asyncio.wait_for(ready.wait(), timeout=1)
+    task.cancel()
+    output = await asyncio.wait_for(task, timeout=1)
+    assert output[-1]['event'] == 'answer.failed'
+    assert output[-1]['error_code'] == 'QWENPAW_TASK_CANCELLED'
+    assert not any(e['event'] == 'answer.completed' for e in output)

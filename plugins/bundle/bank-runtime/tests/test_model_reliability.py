@@ -222,6 +222,41 @@ async def test_text_continuation_is_buffered_and_uses_original_response_id():
     assert calls[1]['tools'] == []
     assert len(calls[0]['messages']) == 1
 
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('first_content', [[], [ThinkingBlock(thinking='private reasoning')]])
+async def test_length_without_text_or_tool_keeps_original_tools_for_one_recovery(first_content):
+    calls = []
+    history = [UserMsg('user', '继续核对尚未读取的材料')]
+    tools = [{'type': 'function', 'function': {'name': 'read_range'}}]
+    policy = BankModelReliability(10)
+
+    async def model(**kwargs):
+        calls.append(kwargs)
+        async def stream():
+            if len(calls) == 1:
+                yield ChatResponse(first_content, False)
+                raise ModelExecutionException('upstream', details={'finish_reason': 'length'})
+            yield ChatResponse([ToolCallBlock(id='next', name='read_range', input='{}')], True)
+        return stream()
+
+    chunks = await collect(policy, model, messages=history, tools=tools)
+    assert len(calls) == 2
+    assert calls[1]['tools'] is tools
+    assert calls[1]['messages'][0] is history[0]
+    assert history == calls[0]['messages'] and len(history) == 1
+    assert chunks[-1].content[0].name == 'read_range'
+    assert policy.recovery_used is True
+
+    async def truncated_again(**kwargs):
+        calls.append(kwargs)
+        raise ModelExecutionException('upstream', details={'finish_reason': 'length'})
+
+    with pytest.raises(Exception) as caught:
+        await collect(policy, truncated_again, messages=history, tools=tools)
+    assert caught.value.error_code == 'MODEL_OUTPUT_TRUNCATED'
+    assert len(calls) == 3
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize('mode', ['length', 'content_filter', 'invalid_tool', 'duplicate_text'])
 async def test_failed_recovery_or_filter_does_not_get_more_attempts(mode):

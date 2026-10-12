@@ -312,7 +312,13 @@ def _ensure_request_tool(agent: Any, function: Any) -> None:
     basic.tools[:] = [
         tool for tool in basic.tools if str(getattr(tool, "name", "") or "") != name
     ]
-    basic.tools.append(FunctionTool(function, is_read_only=False))
+    if function is activate_personal_skill:
+        from qwenpaw.runtime.tool_guard import GuardedFunctionTool
+        basic.tools.append(GuardedFunctionTool(function, is_read_only=True,
+            agent_id=getattr(getattr(agent, '_agent_config', None), 'id', None),
+            request_context=dict(getattr(agent, '_request_context', None) or {})))
+    else:
+        basic.tools.append(FunctionTool(function, is_read_only=False))
 
 
 __all__ = [

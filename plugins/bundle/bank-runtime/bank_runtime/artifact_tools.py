@@ -249,6 +249,13 @@ async def artifact_generate(
             [{"heading": "标题", "heading_level": 1, "paragraphs": ["正文"]}]}``. Arrays must be
             JSON arrays; never wrap them in an ``{"item": ...}`` object. Pass
             structured content as an object; do not JSON-encode it as a string.
+            For PDF, plain prose is a string and sections/paragraphs are an
+            object. To reproduce literal JSON, place its exact source string
+            in the text field of a content object, even when the example's
+            keys are text, paragraphs or sections.
+            A complete JSON string with those keys is ambiguous and requires
+            explicit typing before rendering; never reinterpret the example
+            as document structure or omit its keys.
             For an official document draft, use ``{"kind": "official_document",
             "layout_version": "bank-official-docx-v1", "document": {"title":
             "标题", "recipients": [], "blocks": [{"type": "paragraph",

@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
+from datetime import datetime, timezone
+import logging
 import os
 from pathlib import Path
+import time
 from typing import Any
 
 import httpx
@@ -31,6 +35,14 @@ class RuntimeFileBroker:
         self.token = str(token or os.environ.get("QWENPAW_SERVICE_TOKEN") or "").strip()
         if not self.base_url or not self.token:
             raise SandboxBrokerError("Runtime file broker is unavailable")
+
+    async def expand_conversation_context(
+        self, scope: SandboxRequestScope, *, before_turn_id: str = '', query: str = '', limit: int = 8,
+    ) -> dict[str, Any]:
+        return await self._post('/runtime/internal/conversation/context/expand', {
+            'sandbox_context': dict(scope.sandbox_context),
+            'before_turn_id': before_turn_id, 'query': query, 'limit': limit,
+        })
 
     async def search(
         self,
@@ -81,22 +93,29 @@ class RuntimeFileBroker:
             raise SandboxBrokerError("Runtime attachment authorization is invalid")
         return data
 
-    async def _post(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
+    async def _post(self, path: str, payload: dict[str, Any], *, timeout_seconds: float = 30) -> dict[str, Any]:
+        started = time.monotonic()
         try:
-            async with httpx.AsyncClient(
-                timeout=30,
-                follow_redirects=False,
-                trust_env=False,
-            ) as client:
-                response = await client.post(
-                    f"{self.base_url}{path}",
-                    json=payload,
-                    headers={
-                        "Authorization": f"Bearer {self.token}",
-                        "Content-Type": "application/json",
-                    },
-                )
-        except httpx.HTTPError as exc:
+            async with asyncio.timeout(timeout_seconds):
+                async with httpx.AsyncClient(
+                    timeout=httpx.Timeout(timeout_seconds, connect=min(5, timeout_seconds),
+                                          write=min(30, timeout_seconds), pool=min(5, timeout_seconds)),
+                    follow_redirects=False,
+                    trust_env=False,
+                ) as client:
+                    response = await client.post(
+                        f"{self.base_url}{path}",
+                        json=payload,
+                        headers={
+                            "Authorization": f"Bearer {self.token}",
+                            "Content-Type": "application/json",
+                        },
+                    )
+        except (TimeoutError, httpx.HTTPError) as exc:
+            logging.getLogger(__name__).warning(
+                "Runtime file broker transport failed: endpoint=%s elapsed_seconds=%.3f error_type=%s",
+                path, time.monotonic() - started, type(exc).__name__,
+            )
             raise SandboxBrokerError("Runtime file broker request failed") from exc
         if response.status_code >= 400:
             raise SandboxBrokerError("Runtime file broker request rejected")
@@ -119,8 +138,20 @@ class RuntimeFileBroker:
             raise SandboxBrokerError("Cached source authority or integrity changed")
 
     async def prepare_originals(self, scope, files):
+        # Preparation may wait for physical container admission/startup. Its
+        # deadline is the signed task expiry, rather than the short read RPC budget.
+        try:
+            expiry = datetime.fromisoformat(scope.sandbox_context['expires_at'].replace('Z', '+00:00'))
+            if expiry.tzinfo is None:
+                raise ValueError('Missing timezone')
+            remaining = (expiry - datetime.now(timezone.utc)).total_seconds()
+            if remaining <= 0:
+                raise ValueError('Expired task')
+        except (AttributeError, KeyError, TypeError, ValueError, OverflowError) as exc:
+            raise SandboxBrokerError('Original preparation task deadline is invalid or expired') from exc
         data = await self._post('/runtime/internal/sandbox/attachments/prepare-originals',
-            {'sandbox_context': dict(scope.sandbox_context), 'file_ids': [item.file_id for item in files]})
+            {'sandbox_context': dict(scope.sandbox_context), 'file_ids': [item.file_id for item in files]},
+            timeout_seconds=min(remaining, 3600))
         raw = data.get('files')
         if not isinstance(raw, list) or len(raw) != len(files):
             raise SandboxBrokerError('Original preparation response is invalid')

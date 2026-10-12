@@ -246,7 +246,9 @@ class BankModelReliability:
                 if code == 'MODEL_OUTPUT_TRUNCATED':
                     prefix, original_id, expected_tools = text, response_id, list(tool_calls.values())
                     request = self._recovery_request(request, prefix, expected_tools)
-                    recovering = True
+                    # With no public text or tool proposal, resume the same
+                    # agent step; there is no partial answer to concatenate.
+                    recovering = bool(prefix or expected_tools)
                 elif code == 'WORKER_EMPTY_RESPONSE':
                     # Re-enter only this model call with its completed tool
                     # evidence intact; do not replay the enclosing agent turn.
@@ -263,7 +265,11 @@ class BankModelReliability:
 
     def _recovery_request(self, request, prefix, names):
         result = {**request, 'messages': list(request.get('messages') or [])}
-        if names:
+        if not prefix and not names:
+            instruction = ('上一模型调用在生成有效正文或工具调用前达到输出长度限制。'
+                '继续完成用户本轮尚未完成的目标，依据已有证据选择必要的下一步工具或有效答复。'
+                '保留原要求和已完成的工具结果，不重复已成功的操作，不扩大交付目标。')
+        elif names:
             allowed = [s for s in request.get('tools') or []
                        if s.get('function', {}).get('name') in names]
             if len({s['function']['name'] for s in allowed}) != len(set(names)):

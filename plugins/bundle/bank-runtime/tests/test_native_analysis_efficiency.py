@@ -96,6 +96,16 @@ def test_environment_guidance_does_not_expose_authority_or_untrusted_configurati
     assert _analysis_environment_guidance({'analysis_environment': 'bad'}) == ''
 
 
+def test_shared_environment_guidance_does_not_prescribe_a_spreadsheet_algorithm():
+    from bank_runtime.sandbox.hooks import _analysis_environment_guidance
+    actual = _analysis_environment_guidance({'analysis_environment': {
+        'python': '3.11.16', 'packages': {'pypdf': '6.0.0'}, 'memory_bytes': 2*1024**3}})
+    for method in ('workbook', 'Worksheet', 'OOXML', 'zipfile', 'iterparse'):
+        assert method not in actual
+    assert '2147483648' in actual and 'pypdf' in actual
+    assert 'memory limit' in actual and 'required records' in actual
+
+
 @pytest.mark.parametrize('environment', [None, 'bad', {'packages': None}, {'packages': 'bad'},
                                              {'packages': {}}, {'packages': {'openpyxl': None}}])
 def test_unknown_environment_keeps_native_tables_and_explicit_missing_reader_keeps_fallback(environment):

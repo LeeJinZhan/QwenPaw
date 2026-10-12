@@ -239,6 +239,23 @@ def test_search_locates_rows(tmp_path) -> None:
     assert hits["hits"][0]["row"] == 42
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize('execution', ['guest', 'subprocess'])
+@pytest.mark.parametrize('limit', [59, 60, 61])
+async def test_search_truncation_requires_an_omitted_match(tmp_path, execution, limit):
+    from bank_mineru_mcp.processing_guest import query
+    from bank_mineru_mcp.parse_jobs import query_job
+
+    store, handle = _parse_csv(tmp_path)
+    arguments = {'document_ref': handle.document_ref, 'query': '员工', 'limit': limit}
+    if execution == 'guest':
+        result = query(store, 'search', arguments)
+    else:
+        result = await query_job(store, 'search', arguments)
+    assert [hit['row'] for hit in result['hits']] == list(range(1, min(limit, 60) + 1))
+    assert result['truncated'] is (limit < 60)
+
+
 def test_read_chunks_shim_covers_blocks(tmp_path) -> None:
     store, handle = _parse_csv(tmp_path)
     seen = []

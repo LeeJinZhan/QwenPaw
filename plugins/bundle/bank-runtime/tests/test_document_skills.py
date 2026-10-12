@@ -4,6 +4,20 @@ import re
 ROOT = Path(__file__).resolve().parents[1] / "skills"
 
 
+def test_common_native_skills_do_not_select_case_specific_business_methods():
+    import asyncio
+
+    for name in ('bank-assistant-zh', 'bank-document-qa'):
+        content = asyncio.run(_read_native_skill(name))
+        for obsolete in ('比例分档', '最大余数法', '风险分布可一次取齐', '缺少机构、日期'):
+            assert obsolete not in content
+    qa = asyncio.run(_read_native_skill('bank-document-qa'))
+    assert '用户要求、适用依据和实际材料' in qa
+    assert '所需记录' in qa and '遗漏' in qa and '重复' in qa
+    # Parameter contracts and permission boundaries still reach the real viewer.
+    assert 'next_group_cursor' in qa and '真实权限拒绝' in qa
+
+
 def test_complex_report_methods_are_readable_without_inventing_tabular_columns():
     import asyncio
     content = asyncio.run(_read_native_skill('bank-document-qa'))
@@ -147,7 +161,7 @@ def test_table_completeness_rules_survive_native_skill_viewer():
     import asyncio
 
     content = asyncio.run(_read_native_skill("bank-document-qa"))
-    for required in ("next_cursor", "has_more=false", "chunk_count", "按 chunk index 去重", "去重", "未分类项", "生成报告文件也不能替代完整性核对"):
+    for required in ("next_cursor", "has_more=false", "chunk_count", "按 chunk index 去重", "去重", "未匹配记录", "生成报告文件也不能替代完整性核对"):
         assert required in content
 
 
