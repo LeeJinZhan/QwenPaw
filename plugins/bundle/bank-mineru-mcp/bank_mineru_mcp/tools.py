@@ -17,6 +17,7 @@ from pathlib import Path
 import zipfile
 from typing import Any, Mapping
 
+from bank_runtime.gateway.file_diagnostics import source_call
 from .document_store import DocumentStore, DocumentStoreError
 from .mineru_client import MinerUClientError
 from .normalization import normalize_mineru_result
@@ -547,6 +548,7 @@ class MinerUToolService:
         except DocumentAccessError as exc:
             raise ToolContractError(exc.code, str(exc), argument_reason=getattr(exc, "argument_error", {}).get("reason", "")) from exc
 
+    @source_call
     def _resolve_authorized_source(self, file_ref):
         task_id = self._current_task()
         try:

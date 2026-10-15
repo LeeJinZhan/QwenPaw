@@ -13,6 +13,7 @@ from mcp.server.fastmcp import FastMCP
 from pydantic import BaseModel, ConfigDict, Field, WithJsonSchema
 import uvicorn
 
+from bank_runtime.gateway.file_diagnostics import mcp_call
 from .config import MinerUSettings
 from .document_store import DocumentStore
 from .mineru_client import build_mineru_client
@@ -65,6 +66,7 @@ class MinerUMcpService:
         self._started = False
         self._closed = False
 
+    @mcp_call
     async def _authorized_call(self, name, arguments):
         from bank_runtime.gateway.document_access import consume_document_call, DocumentAccessError
 

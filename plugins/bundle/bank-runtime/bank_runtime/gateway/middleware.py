@@ -33,6 +33,7 @@ from .personal_skills import PersonalSkillReader
 from .history_recall import CurrentSessionHistoryReader, RECALL_GUIDANCE
 from .completion import operation_keys, parse_outcomes
 from .document_reads import DocumentReadLedger, result_error, is_read_recovery_tool
+from . import file_diagnostics as file_diag
 from .document_inputs import normalize_document_input, document_call_argument_hint
 from .document_preparation import DocumentSourcePreparation
 from .document_access import DocumentAccessError, DocumentReferenceArgumentError, invalid_document_reference_argument
@@ -797,12 +798,15 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
                          for gap in self.document_reads.unfinished_scopes()]}
 
     def document_input(self, tool_name, tool_input):
+        task_id = getattr(getattr(self.client, "config", None), "task_id", "")
+        file_diag.emit(task_id, 'gateway.raw', tool=tool_name, arguments=tool_input)
         partial = self._partial_report(tool_name, tool_input)
         if partial is not None:
             return partial
-        return normalize_document_input(tool_name, tool_input,
-            task_id=getattr(getattr(self.client, "config", None), "task_id", ""),
-            ledger=self.document_reads)
+        normalized = normalize_document_input(tool_name, tool_input,
+            task_id=task_id, ledger=self.document_reads)
+        file_diag.emit(task_id, 'gateway.normalized', tool=tool_name, arguments=normalized)
+        return normalized
 
     def reject_document_preflight(self, name, payload, code):
         from .document_access import DOCUMENT_TOOLS
@@ -891,6 +895,7 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
                 yield item
             return
         task_id = getattr(getattr(self.client, "config", None), "task_id", "")
+        file_diag.ledger(task_id, tool_name, tool_input, self.document_reads.documents)
         if invalid_document_reference_argument(tool_name, tool_input):
             raise DocumentReferenceArgumentError()
         if raw_name != "parse_documents" and tool_input.get("document_ref") not in self.document_reads.documents:

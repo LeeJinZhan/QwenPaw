@@ -3,6 +3,7 @@
 The loopback MCP listener shares this process registry with the bank plugin.
 A signed document reference locates cached data; it is never authorization.
 """
+from . import file_diagnostics as file_diag
 from contextlib import contextmanager
 from contextvars import ContextVar
 import hashlib
@@ -66,6 +67,7 @@ def approved_document_grant(task_id, name, arguments, *, execution=None):
             _grants.pop(key, None)
     nonce = secrets.token_urlsafe(32)
     _grants[nonce] = (task_id, name, _digest(name, arguments), now + 60, execution)
+    file_diag.grant_issued(task_id, nonce, name, arguments)
     metadata = {_KEY: nonce}
     try:
         yield metadata
@@ -85,6 +87,7 @@ def consume_document_call(metadata, name, arguments):
         metadata = metadata.model_dump()
     nonce = metadata.get(_KEY) if isinstance(metadata, dict) else None
     grant = _grants.pop(nonce, None) if isinstance(nonce, str) else None
+    file_diag.grant_consumed(metadata, grant, name, arguments)
     if not grant or grant[1] != name or grant[2] != _digest(name, arguments) or grant[3] <= time.monotonic():
         raise DocumentAccessError()
     token = _task.set(grant[0])
