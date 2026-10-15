@@ -99,9 +99,16 @@ async def test_personal_loader_reaches_final_model_request_without_business_gran
 
 
 @pytest.mark.asyncio
-async def test_personal_loader_runs_through_guard_and_request_registry(monkeypatch):
+@pytest.mark.parametrize('scheme', ['https', 'http'])
+async def test_personal_loader_runs_through_guard_and_request_registry(monkeypatch, scheme):
+    monkeypatch.setenv('OSS_ENDPOINT', f'{scheme}://oss.example.com')
     monkeypatch.setenv('PERSONAL_SKILLS_ALLOWED_OSS_HOSTS', 'runtime-test.oss.example.com')
-    ctx, middleware, guard, body = await _build()
+    catalog, manifest = _skill_payloads(
+        url=f'{scheme}://runtime-test.oss.example.com/skill.md?secret=token',
+    )
+    ctx, middleware, guard, body = await _build(
+        personal_skills_catalog=catalog, personal_skills_access_manifest=manifest,
+    )
     calls = []
     try:
         registry = current_personalization_context().registry

@@ -307,7 +307,17 @@ def _validate_url(url: str) -> str:
     parsed = urlparse(url)
     host = (parsed.hostname or "").lower().rstrip(".")
     if parsed.scheme.lower() != "https":
-        raise PersonalSkillLoadError("Personal Skill URL must use HTTPS.")
+        try:
+            endpoint = urlparse(os.environ.get("OSS_ENDPOINT", "").strip())
+        except ValueError:
+            endpoint = None
+        if (
+            parsed.scheme.lower() != "http"
+            or endpoint is None
+            or endpoint.scheme.lower() != "http"
+            or not endpoint.hostname
+        ):
+            raise PersonalSkillLoadError("Personal Skill URL must use HTTPS.")
     allowed = _allowed_hosts()
     if (
         not host

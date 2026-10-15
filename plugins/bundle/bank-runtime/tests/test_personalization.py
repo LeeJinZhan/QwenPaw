@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
+import httpx
 import pytest
 from agentscope.permission import PermissionBehavior, PermissionDecision
 from agentscope.tool import Toolkit
@@ -222,6 +223,7 @@ async def test_personal_skill_url_and_redirect_fail_closed(
     expected,
 ):
     del case
+    monkeypatch.setenv("OSS_ENDPOINT", "https://oss.example.com")
     monkeypatch.setenv(
         "PERSONAL_SKILLS_ALLOWED_OSS_HOSTS",
         "oss.example.com",
@@ -250,6 +252,93 @@ async def test_personal_skill_url_and_redirect_fail_closed(
     if expected in {"HTTPS", "host"}:
         assert calls == 0
     assert "secret=token" not in result
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("endpoint", "url", "allowed_hosts", "expected_error"),
+    [
+        ("http://oss.example.com", "http://oss.example.com/skill.md", "oss.example.com", None),
+        (" http://oss.example.com ", "http://bucket.oss.example.com/skill.md", "oss.example.com", None),
+        ("http://192.0.2.10:9000", "http://192.0.2.10:9000/skill.md", "192.0.2.10", None),
+        ("", "http://oss.example.com/skill.md", "oss.example.com", "HTTPS"),
+        ("https://oss.example.com", "http://oss.example.com/skill.md", "oss.example.com", "HTTPS"),
+        ("oss.example.com", "http://oss.example.com/skill.md", "oss.example.com", "HTTPS"),
+        ("http://", "http://oss.example.com/skill.md", "oss.example.com", "HTTPS"),
+        ("http://[", "http://oss.example.com/skill.md", "oss.example.com", "HTTPS"),
+        ("http://oss.example.com", "http://oss.example.com/skill.md", "", "host"),
+        ("http://oss.example.com", "http://attacker.example.net/skill.md", "oss.example.com", "host"),
+        ("http://oss.example.com", "http://fakeoss.example.com/skill.md", "oss.example.com", "host"),
+        ("http://oss.example.com", "file://oss.example.com/skill.md", "oss.example.com", "HTTPS"),
+        ("http://oss.example.com", "ftp://oss.example.com/skill.md", "oss.example.com", "HTTPS"),
+        ("http://oss.example.com", "http://user:password@oss.example.com/skill.md", "oss.example.com", "invalid"),
+        ("http://oss.example.com", "http://oss.example.com/skill.md#fragment", "oss.example.com", "invalid"),
+    ],
+)
+async def test_personal_skill_http_requires_explicit_oss_and_allowed_host(
+    monkeypatch, endpoint, url, allowed_hosts, expected_error,
+):
+    monkeypatch.setenv("OSS_ENDPOINT", endpoint)
+    monkeypatch.setenv("PERSONAL_SKILLS_ALLOWED_OSS_HOSTS", allowed_hosts)
+    content = _skill_bytes()
+    catalog, manifest = _skill_payloads(content, url=url)
+    calls = []
+
+    async def fetch(fetch_url, _max_bytes):
+        calls.append(fetch_url)
+        return DownloadedPersonalSkill(content, fetch_url, False)
+
+    registry = PersonalSkillsRegistry.from_payloads(catalog, manifest, fetcher=fetch)
+    try:
+        result = await registry.activate("personal:skill_001")
+        if expected_error:
+            assert expected_error.lower() in result.lower()
+            assert calls == []
+        else:
+            assert "汇总本月进展" in result
+            assert calls == [url]
+    finally:
+        registry.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [200, 302])
+async def test_personal_skill_http_download_and_redirect_rejection(monkeypatch, status):
+    monkeypatch.setenv("OSS_ENDPOINT", "http://oss.example.com")
+    monkeypatch.setenv("PERSONAL_SKILLS_ALLOWED_OSS_HOSTS", "oss.example.com")
+    content = _skill_bytes()
+    url = "http://bucket.oss.example.com/skill.md?secret=token"
+    catalog, manifest = _skill_payloads(content, url=url)
+    calls = []
+
+    def respond(request):
+        calls.append(str(request.url))
+        return httpx.Response(
+            status,
+            content=content,
+            headers={"Location": "http://attacker.example.net/skill.md"},
+        )
+
+    client_type = httpx.AsyncClient
+    transport = httpx.MockTransport(respond)
+    monkeypatch.setattr(
+        httpx, "AsyncClient", lambda **kwargs: client_type(transport=transport, **kwargs),
+    )
+    registry = PersonalSkillsRegistry.from_payloads(catalog, manifest)
+    state = DeliveryState("task-http-probe")
+    try:
+        with delivery_scope(state):
+            result = await registry.activate("personal:skill_001")
+        assert calls == [url]
+        assert ("汇总本月进展" in result) == (status == 200)
+        if status == 302:
+            assert "redirect" in result.lower()
+        assert state.operations_events[0]["result"] == (
+            "activated" if status == 200 else "load_failed"
+        )
+        assert "secret=token" not in result + str(state.operations_events)
+    finally:
+        registry.close()
 
 
 @pytest.mark.asyncio
@@ -302,6 +391,7 @@ def test_manifest_binding_mismatch_degrades_safely(field):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("scheme", ["https", "http"])
 @pytest.mark.parametrize(
     ("downloaded_content", "expected"),
     [
@@ -319,13 +409,17 @@ async def test_downloaded_content_hash_and_size_mismatch_degrade_safely(
     monkeypatch,
     downloaded_content,
     expected,
+    scheme,
 ):
+    monkeypatch.setenv("OSS_ENDPOINT", f"{scheme}://oss.example.com")
     monkeypatch.setenv(
         "PERSONAL_SKILLS_ALLOWED_OSS_HOSTS",
         "oss.example.com",
     )
     declared = _skill_bytes()
-    catalog, manifest = _skill_payloads(declared)
+    catalog, manifest = _skill_payloads(
+        declared, url=f"{scheme}://runtime-test.oss.example.com/skill.md?secret=token",
+    )
 
     async def fetch(url, max_bytes):
         return DownloadedPersonalSkill(downloaded_content, url, False)
