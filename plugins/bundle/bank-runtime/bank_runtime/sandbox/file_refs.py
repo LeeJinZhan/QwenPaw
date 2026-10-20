@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import re
 import secrets
+from weakref import WeakMethod
 from typing import Callable
 
 from .cache import PreparedSandboxFile
@@ -37,6 +38,7 @@ class ResolvedTaskFile:
     size_bytes: int
     sha256: str
     expires_at: datetime
+    original_name: str = ""
 
 
 class FileRefRegistry:
@@ -64,6 +66,19 @@ class FileRefRegistry:
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._entries: dict[str, ResolvedTaskFile] = {}
         self._expired: dict[str, datetime] = {}
+        self._file_tokens: dict[tuple[str, str], str] = {}
+        self._revocation_listeners: set[WeakMethod] = set()
+
+    def on_task_revoked(self, callback: Callable[[str], None]) -> None:
+        """Register a service cleanup method without retaining its lifetime."""
+        self._revocation_listeners.add(WeakMethod(callback))
+
+    def reference_for_file(self, file_id: str, *, expected_task_id: str) -> str:
+        token = self._file_tokens.get((expected_task_id, file_id))
+        if not token:
+            raise FileRefError("FILE_ACCESS_DENIED", "File has not been prepared for this task")
+        self.resolve(token, expected_task_id=expected_task_id)
+        return token
 
     def issue(
         self,
@@ -104,6 +119,8 @@ class FileRefRegistry:
                 "FILE_TYPE_UNSUPPORTED", "Task file extension is unsupported"
             )
         digest = _sha256_file(path)
+        if prepared.sha256 and not hmac.compare_digest(digest, prepared.sha256):
+            raise FileRefError("FILE_REF_INVALID", "Task file integrity check failed")
         nonce = secrets.token_bytes(32)
         nonce_text = _encode(nonce)
         mac = hmac.new(self._key, b"fr1\0" + nonce, hashlib.sha256).digest()
@@ -118,8 +135,10 @@ class FileRefRegistry:
             size_bytes=size_bytes,
             sha256=digest,
             expires_at=expiry,
+            original_name=prepared.original_name,
         )
         self._expired.pop(nonce_hash, None)
+        self._file_tokens[(task_id, str(prepared.file_id))] = token
         return token
 
     def resolve(
@@ -173,6 +192,12 @@ class FileRefRegistry:
         for nonce_hash, entry in list(self._entries.items()):
             if entry.task_id == normalized:
                 self._expire(nonce_hash)
+        for reference in list(self._revocation_listeners):
+            callback = reference()
+            if callback is None:
+                self._revocation_listeners.discard(reference)
+            else:
+                callback(normalized)
 
     def purge_expired(self, now: datetime | None = None) -> int:
         cutoff = _as_utc(now or self._clock())
@@ -207,7 +232,12 @@ class FileRefRegistry:
         return nonce, hashlib.sha256(nonce).hexdigest()
 
     def _expire(self, nonce_hash: str) -> None:
-        self._entries.pop(nonce_hash, None)
+        entry = self._entries.pop(nonce_hash, None)
+        if entry is not None:
+            key = (entry.task_id, entry.file_id)
+            token = self._file_tokens.get(key, "")
+            if token and hashlib.sha256(_decode(token.split("_")[1])).hexdigest() == nonce_hash:
+                self._file_tokens.pop(key, None)
         self._expired[nonce_hash] = _as_utc(self._clock())
 
 

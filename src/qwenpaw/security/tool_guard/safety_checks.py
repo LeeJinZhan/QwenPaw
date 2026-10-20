@@ -662,6 +662,9 @@ def _collapse_slashes_and_dot(token: str) -> str:
 
 def _expand_rm_path_token(token: str) -> str:
     """Expand ``$VAR`` / ``~`` / ``~user`` when the account is known."""
+    from .virtual_paths import current_container_paths
+    scope=current_container_paths()
+    if scope is not None:return scope.expand(token)
     expanded = os.path.expandvars(token)
     try:
         return os.path.expanduser(expanded)
@@ -822,6 +825,9 @@ def _split_trailing_glob(normalized: str) -> tuple[str, bool]:
 
 def _resolve_path_token(token: str, base: Path) -> Path | None:
     """Resolve an already-expanded / normalized *token* against *base*."""
+    from .virtual_paths import current_container_paths
+    scope=current_container_paths()
+    if scope is not None:return scope.resolve(token,base=base)
     try:
         # Re-expand in case caller passed a still-literal home/var token.
         expanded = _expand_rm_path_token(token)
@@ -835,6 +841,9 @@ def _resolve_path_token(token: str, base: Path) -> Path | None:
 
 def _resolve_base_dir(cwd: str | Path | None) -> Path:
     """Prefer explicit *cwd*, then ToolGuard workspace, then process cwd."""
+    from .virtual_paths import current_container_paths
+    scope=current_container_paths()
+    if scope is not None:return scope.resolve(cwd if cwd is not None else scope.cwd)
     if cwd is not None:
         try:
             return Path(cwd).expanduser().resolve()
@@ -1073,6 +1082,13 @@ def is_path_outside_boundary(
     rejected because ``relative_to()`` raises ``ValueError`` when
     the drives differ.
     """
+    from .virtual_paths import current_container_paths
+    scope=current_container_paths()
+    if scope is not None:
+        try:
+            scope.resolve(path,base=scope.resolve(cwd)).relative_to(scope.resolve(cwd))
+            return False
+        except ValueError:return True
     if cwd_is_resolved:
         cwd_resolved = Path(cwd)
     else:

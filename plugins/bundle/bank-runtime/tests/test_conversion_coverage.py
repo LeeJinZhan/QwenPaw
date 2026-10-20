@@ -180,14 +180,17 @@ def test_report_limits_and_editability_are_strict():
 
 
 @pytest.mark.asyncio
-async def test_unknown_reason_does_not_disable_retry_or_expose_text():
+async def test_unknown_execution_requires_status_check_even_with_unknown_reason():
+    from bank_runtime.gateway.client import GatewayError
     client = Client()
     client.envelope = {"status": "failed", "error_code": "ARTIFACT_RENDER_FAILED", "result": {"reason": "SECRET"}}
     middleware = BankRuntimeGatewayMiddleware(client)
-    for _ in range(2):
-        response = await invoke(middleware, "artifact_convert", PAYLOAD)
-        assert "SECRET" not in response[0].content[0].text
-    assert len(client.executions) == 2
+    response = await invoke(middleware, "artifact_convert", PAYLOAD)
+    assert "SECRET" not in response[0].content[0].text
+    assert 'check_status' in response[0].content[0].text
+    with pytest.raises(GatewayError):
+        await invoke(middleware, "artifact_convert", PAYLOAD)
+    assert len(client.executions) == 1
 
 
 def test_convert_schema_exposes_read_purpose_without_pdf_confirmation():
@@ -233,7 +236,8 @@ async def test_terminal_conversion_reason_is_fixed_for_runtime_translator():
     client.envelope = {"status": "failed", "error_code": "ARTIFACT_VALIDATION_FAILED", "result": {"reason": "office_active_content"}}
     middleware = BankRuntimeGatewayMiddleware(client)
     await invoke(middleware, "artifact_convert", PAYLOAD)
-    async def model(**kwargs): pytest.fail("known permanent failure must not prompt further model retries")
+    async def model(**kwargs):
+        return ChatResponse(id='done', content=[TextBlock(text='转换未完成。')], is_last=True)
     with pytest.raises(OfficeConversionFailureError) as error:
         await middleware.on_model_call(None, {}, model)
     assert error.value.message == "OFFICE_CONVERSION|office_active_content"

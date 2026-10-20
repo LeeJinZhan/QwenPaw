@@ -20,6 +20,7 @@ import shutil
 from statistics import median
 import sqlite3
 from .aggregation import disk_aggregate
+from .aggregate_contract import FUNCTIONS, FILTERS, argument_detail, invalid_ops
 from typing import Any, Callable, Iterable
 
 from .schemas import DocumentHandle
@@ -27,14 +28,15 @@ from .spreadsheet import CHUNK_SIM_ROWS, SpreadsheetExtractError, SourceRow, ren
 
 _KEY_FILE = ".bank-mineru-struct.key"
 _DIR_NAME = ".mineru-struct"
-_FILTER_OPS = {"eq", "ne", "gt", "gte", "lt", "lte", "contains", "in"}
-_METRICS = {"sum", "avg", "count", "count_distinct", "min", "max", "median"}
+_FILTER_OPS = set(FILTERS)
+_METRICS = set(FUNCTIONS)
 
 
 class StructuredStoreError(RuntimeError):
-    def __init__(self, code: str, message: str) -> None:
+    def __init__(self, code: str, message: str, *, argument_reason: str = "") -> None:
         super().__init__(message)
         self.code = code
+        self.argument_error = argument_detail(argument_reason or message) if code == "DOCUMENT_ARGUMENT_INVALID" else {}
 
 
 @dataclass(frozen=True)
@@ -69,6 +71,7 @@ class StructuredStore:
         self.max_groups = max(1, min(int(max_groups), 5_000))
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         self._documents: dict[str, _Entry] = {}
+        self._verified_files = {}
         self._recover()
 
     # ---------------------------------------------------------------- registry
@@ -124,6 +127,10 @@ class StructuredStore:
             "total_rows": inventory["total_rows"],
             "expires_at": expiry.isoformat(),
             "inventory": inventory,
+            "source_file_id": getattr(source, "file_id", ""),
+            "source_hash": getattr(source, "sha256", "") or _file_hash(source.path),
+            "engine_version": "table-facts-3",
+            "files": {path.name: _file_hash(path) for path in work_dir.iterdir() if path.is_file()},
         }
         payload["sha256"] = hashlib.sha256(
             json.dumps(payload, sort_keys=True).encode("utf-8")
@@ -201,6 +208,11 @@ class StructuredStore:
     ) -> dict[str, Any]:
         entry, manifest = self._entry(document_ref)
         sheet_meta = self._sheet(manifest, sheet)
+        source_mode = format == "source"
+        if source_mode:
+            sheet_meta = {**sheet_meta, "rows": sheet_meta["source_rows"], "header_row": 0,
+                          "file": sheet_meta["source_file"], "block_offsets": sheet_meta["source_block_offsets"]}
+            format = "records"
         total = sheet_meta["rows"]
         if format not in {"markdown", "records"}:
             raise StructuredStoreError("DOCUMENT_ARGUMENT_INVALID", "format is invalid")
@@ -226,7 +238,7 @@ class StructuredStore:
                 break
             if row_number > total:
                 break
-            projected = [values[index] for index in selected["indices"]]
+            projected = [values[index] if index < len(values) else None for index in selected["indices"]]
             rendered = json.dumps(projected, ensure_ascii=False) if format == "records" else _md_row(projected)
             if picked and size + len(rendered) + 1 > self.page_chars:
                 break
@@ -240,9 +252,14 @@ class StructuredStore:
             body = {
                 "columns": selected["names"],
                 "records": [
-                    {"row": number, "values": values} for number, values in picked
+                    {"row": number, "source_row": number + sheet_meta["header_row"], "values": values} for number, values in picked
                 ],
             }
+            if source_mode:
+                facts = {number: values.cell_facts for number, values in self._iter_rows(entry, sheet_meta, start, last)}
+                for record in body["records"]:
+                    record["cell_facts"] = {selected["names"][position]: facts[record["row"]][str(index)]
+                        for position, index in enumerate(selected["indices"]) if str(index) in facts[record["row"]]}
         else:
             header = selected["names"] if include_header else []
             lines = []
@@ -256,6 +273,8 @@ class StructuredStore:
             **body,
             "document_ref": document_ref,
             "sheet": sheet_meta["name"],
+            "coordinate_space": "source" if source_mode else "analysis",
+            "source_columns": [index+1 for index in selected['indices']],
             "rows_returned": [picked[0][0], last] if picked else [start, start - 1],
             "sheet_total_rows": total,
             "rows_scanned": len(picked),
@@ -264,6 +283,14 @@ class StructuredStore:
             "all_columns": not invalid_cells and set(selected["indices"]) == set(range(len(sheet_meta["columns"]))),
             "has_more": has_more,
             "next_row_cursor": next_cursor,
+            "range_complete": last >= min(end if end is not None else total, total),
+            "sheet_has_more": last < total,
+            "sheet_complete": start == 1 and last == total and not invalid_cells
+                              and set(selected["indices"]) == set(range(len(sheet_meta["columns"]))),
+            "coverage": {"coordinate_space": "source" if source_mode else "analysis",
+                         "range": [picked[0][0], last] if picked else [start, start - 1],
+                         "total_rows": total, "all_columns": not invalid_cells
+                         and set(selected["indices"]) == set(range(len(sheet_meta["columns"])))},
             "signature": self._sign(sheet_meta["name"], picked[0][0] if picked else start, last),
         }
 
@@ -271,10 +298,11 @@ class StructuredStore:
             if len(picked) <= 1:
                 raise StructuredStoreError("DOCUMENT_RESULT_TOO_LARGE", "Select fewer columns; a single row exceeds the response budget")
             reduced = self.read_range(document_ref, sheet=sheet, rows=[start, picked[len(picked) // 2 - 1][0]],
-                                      columns=columns, format=format, include_header=include_header)
+                                      columns=columns, format="source" if source_mode else format, include_header=include_header)
             last = reduced["rows_returned"][1]
             reduced["has_more"] = last < total and (end is None or last < end)
             reduced["next_row_cursor"] = last + 1 if reduced["has_more"] else None
+            reduced["range_complete"] = last >= min(end if end is not None else total, total)
             return reduced
         return result
 
@@ -293,17 +321,19 @@ class StructuredStore:
         end = offset + len(fragment)
         return {"document_ref": document_ref, "content_mode": "cell", "sheet": meta["name"],
                 "row": row, "column": column, "text": fragment, "offset": offset,
+                "source_row": row + meta["header_row"], "source_column": selected["indices"][0] + 1,
                 "total_chars": len(text), "next_cell_cursor": end if end < len(text) else None,
                 "cell_complete": offset == 0 and end == len(text), "all_columns": False,
                 "signature": self._sign(meta["name"], row, row)}
 
     def aggregate(self, document_ref: str, ops: list[dict[str, Any]]) -> dict[str, Any]:
         entry, manifest = self._entry(document_ref)
+        reason = invalid_ops(ops)
+        if reason:
+            raise StructuredStoreError("DOCUMENT_ARGUMENT_INVALID", reason)
         results = []
         size = 0
         truncated = False
-        if not isinstance(ops, list) or not 1 <= len(ops) <= 10 or not all(isinstance(op, dict) for op in ops):
-            raise StructuredStoreError("DOCUMENT_ARGUMENT_INVALID", "ops must contain 1-10 operations")
         for op in ops:
             sheet_name = str(op.get("sheet") or "")
             union_key = op.get("cross_sheet_union") or {}
@@ -330,7 +360,11 @@ class StructuredStore:
                 rows_iter = self._iter_rows(entry, sheet_meta, start, end, aggregate=True)
                 scanned = max(0, end - start + 1)
                 sources = [{"sheet": sheet_meta["name"], "range": [start, end], "rows_scanned": scanned}]
-            result = self._aggregate_op(sheet_meta, rows_iter, op, key_column, workspace=entry.path)
+            # Reserve a response share for every requested operation so a large
+            # first grouping cannot silently discard subsequent statistics.
+            share = (min(self.page_chars, 26000) - 1000) // len(ops)
+            result = self._aggregate_op(sheet_meta, rows_iter, op, key_column, workspace=entry.path,
+                                        response_bytes=max(128, share - _response_bytes(sources) - 1000))
             result.update(
                 sheet="*" if key_column else sheet_meta["name"],
                 sources=sources,
@@ -338,13 +372,20 @@ class StructuredStore:
                 rows_scanned=scanned,
                 full_range=full_range,
                 range=matched_range,
+                union_mode=union_key.get("mode", "append") if key_column else None,
             )
+            # Account for the final nested JSON, including metadata/indentation.
+            while len(result["groups"]) > 1 and _response_bytes(result) > share:
+                result["groups"].pop()
+                result["next_group_cursor"] = (op.get("group_cursor") or 0) + len(result["groups"])
+                result["groups_complete"] = False
+            if _response_bytes(result) > share:
+                raise StructuredStoreError("DOCUMENT_RESULT_TOO_LARGE", "One aggregate group exceeds response budget; reduce operations or metrics")
             if result.get("groups_complete") is False:
                 truncated = True
             encoded = _response_bytes(result)
             if size + encoded > min(self.page_chars, 26000):
-                truncated = True
-                break
+                raise StructuredStoreError("DOCUMENT_RESULT_TOO_LARGE", "Aggregate metadata exceeds response budget; reduce operations")
             size += encoded
             results.append(result)
         return {
@@ -376,6 +417,15 @@ class StructuredStore:
         for sheet_meta in targets:
             for row_number, values in self._iter_rows(entry, sheet_meta, 1):
                 if any(needle in str(value).lower() for value in values if value is not None):
+                    # Reaching the cap alone does not prove omitted matches.
+                    # Look ahead to one further match without returning it.
+                    if len(hits) >= limit:
+                        return {
+                            "document_ref": document_ref,
+                            "hits": hits,
+                            "truncated": True,
+                            "signature": self._sign("search", len(hits), len(hits)),
+                        }
                     hit = {"sheet": sheet_meta["name"], "row": row_number, "values": values}
                     if _response_bytes(hit) > 14000:
                         hit = {"sheet": sheet_meta["name"], "row": row_number,
@@ -385,13 +435,6 @@ class StructuredStore:
                         return {"document_ref": document_ref, "hits": hits, "truncated": True,
                                 "signature": self._sign("search", len(hits), len(hits))}
                     hits.append(hit)
-                    if len(hits) >= limit:
-                        return {
-                            "document_ref": document_ref,
-                            "hits": hits,
-                            "truncated": True,
-                            "signature": self._sign("search", len(hits), len(hits)),
-                        }
         return {
             "document_ref": document_ref,
             "hits": hits,
@@ -399,7 +442,7 @@ class StructuredStore:
             "signature": self._sign("search", len(hits), len(hits)),
         }
 
-    def read_chunks(self, document_ref: str, *, cursor: str | None, limit: int) -> dict[str, Any]:
+    def read_chunks(self, document_ref: str, *, cursor: str | None = None, limit: int = 5) -> dict[str, Any]:
         entry, manifest = self._entry(document_ref)
         if not 1 <= int(limit) <= 10:
             raise StructuredStoreError("FILE_REF_INVALID", "Chunk limit is invalid")
@@ -438,7 +481,7 @@ class StructuredStore:
 
     # ---------------------------------------------------------------- helpers
 
-    def _aggregate_op(self, sheet_meta, rows_iter, op: dict[str, Any], key_column: str, *, workspace=None):
+    def _aggregate_op(self, sheet_meta, rows_iter, op: dict[str, Any], key_column: str, *, workspace=None, response_bytes=16000):
         filters = op.get("filter") or {}
         group_by = op.get("group_by") or []
         metrics = op.get("metrics")
@@ -450,7 +493,8 @@ class StructuredStore:
             raise StructuredStoreError("DOCUMENT_ARGUMENT_INVALID", "aggregate metrics are required")
         for metric in metrics:
             if not isinstance(metric, dict) or not isinstance(metric.get("fn"), str) or metric.get("fn") not in _METRICS or metric.get("column") not in names:
-                raise StructuredStoreError("DOCUMENT_ARGUMENT_INVALID", "aggregate metric or column is invalid")
+                reason = "METRIC_FUNCTION" if metric.get("fn") not in _METRICS else "METRIC_COLUMN"
+                raise StructuredStoreError("DOCUMENT_ARGUMENT_INVALID", reason)
         if not isinstance(filters, dict):
             raise StructuredStoreError("DOCUMENT_ARGUMENT_INVALID", "aggregate filter is invalid")
         if filters:
@@ -459,13 +503,14 @@ class StructuredStore:
             value = filters.get("value")
             if column not in names or not isinstance(op_name, str) or op_name not in _FILTER_OPS or (op_name == "in" and not isinstance(value, list)):
                 raise StructuredStoreError("DOCUMENT_ARGUMENT_INVALID", "aggregate filter is invalid")
-        cursor = op.get("group_cursor")
+        cursor = op.get("group_cursor", 0)
         if cursor is not None and (type(cursor) is not int or cursor < 0):
             raise StructuredStoreError("DOCUMENT_ARGUMENT_INVALID", "group_cursor must be nonnegative")
         try:
             return disk_aggregate(rows_iter, names=names, group_by=group_by, metrics=metrics,
                 filters=filters, match=_match, directory=workspace or self.root, max_bytes=self.max_document_bytes,
-                max_groups=self.max_groups, group_cursor=cursor)
+                max_groups=self.max_groups, group_cursor=cursor, response_bytes=response_bytes,
+                numeric_text=op.get("numeric_text", "strict"))
         except SpreadsheetExtractError as exc:
             raise StructuredStoreError(exc.code, str(exc)) from exc
         except (OverflowError, sqlite3.OperationalError) as exc:
@@ -500,9 +545,26 @@ class StructuredStore:
         if first_meta is None:
             raise StructuredStoreError("DOCUMENT_ARGUMENT_INVALID", "union key column is absent")
         def stream():
-            for meta, lookup in selected:
-                for number, values in self._iter_rows(entry, meta, 1, aggregate=True):
-                    yield number, SourceRow([values[lookup[name]] if name in lookup and lookup[name] < len(values) else None for name in base_names], [i for i, name in enumerate(base_names) if lookup.get(name) in values.invalid_columns])
+            import tempfile
+            with tempfile.TemporaryDirectory(prefix="union-", dir=os.environ.get("BANK_READING_WORK_ROOT") or entry.path) as work:
+                connection = sqlite3.connect(str(Path(work) / "rows.sqlite"))
+                try:
+                    connection.execute("CREATE TABLE seen (row BLOB PRIMARY KEY)")
+                    count = 0
+                    for meta, lookup in selected:
+                        for number, values in self._iter_rows(entry, meta, 1, aggregate=True):
+                            aligned = SourceRow([values[lookup[name]] if name in lookup and lookup[name] < len(values) else None for name in base_names], [i for i, name in enumerate(base_names) if lookup.get(name) in values.invalid_columns])
+                            if op["cross_sheet_union"].get("mode", "append") == "deduplicate_rows":
+                                encoded = json.dumps([list(aligned), sorted(aligned.invalid_columns)], ensure_ascii=False).encode()
+                                inserted = connection.execute("INSERT OR IGNORE INTO seen VALUES (?)", (encoded,)).rowcount
+                                count += 1
+                                if count % 1000 == 0 and connection.execute("PRAGMA page_count").fetchone()[0] * connection.execute("PRAGMA page_size").fetchone()[0] > self.max_document_bytes:
+                                    raise StructuredStoreError("DOCUMENT_RESULT_TOO_LARGE", "Union workspace quota exceeded")
+                                if not inserted:
+                                    continue
+                            yield number, aligned
+                finally:
+                    connection.close()
         return stream(), first_meta, scanned, sources
 
     def _entry(self, document_ref: str) -> tuple[_Entry, dict[str, Any]]:
@@ -524,8 +586,22 @@ class StructuredStore:
             ) from exc
         if stored != digest:
             raise StructuredStoreError("FILE_REF_INVALID", "Document result integrity failed")
+        for name, expected in payload.get("files", {}).items():
+            path = entry.path / name
+            if Path(name).name != name or path.is_symlink() or not path.is_file():
+                raise StructuredStoreError("FILE_REF_INVALID", "Document facts are unavailable")
+            stat = path.stat()
+            fingerprint = (expected, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+            if self._verified_files.get(path) != fingerprint:
+                if _file_hash(path) != expected:
+                    raise StructuredStoreError("FILE_REF_INVALID", "Document facts integrity failed")
+                if len(self._verified_files) >= 1000:
+                    self._verified_files.clear()
+                self._verified_files[path] = fingerprint
         inventory = payload["inventory"]
-        if inventory.get("engine") == "ooxml-1" and any(sheet.get("formula_cache_status") not in ({"available", "not_applicable", "partial"} if inventory.get("format_version") == 2 else {"available", "not_applicable"}) for sheet in inventory["sheets"]):
+        if payload.get("engine_version") != "table-facts-3" or inventory.get("engine") != "table-facts-3":
+            raise StructuredStoreError("DOCUMENT_REF_EXPIRED", "Reparse with the current table engine")
+        if (inventory.get("engine") == "ooxml-1" or inventory.get("source_format") == ".xlsx") and any(sheet.get("formula_cache_status") not in ({"available", "not_applicable", "partial"} if inventory.get("format_version", 0) >= 2 else {"available", "not_applicable"}) for sheet in inventory["sheets"]):
             raise StructuredStoreError("DOCUMENT_REF_EXPIRED", "Reparse workbook with formula cache validation")
         payload["sha256"] = stored
         return entry, payload
@@ -570,12 +646,12 @@ class StructuredStore:
                 if not line.strip():
                     continue
                 record = json.loads(line)
-                number = int(record["r"])
+                number = int(record.get("r", record.get("source_row")))
                 if number < start:
                     continue
                 if end is not None and number > end:
                     return
-                yield number, SourceRow(record.get("a", record["v"]) if aggregate else record["v"], record.get("e", []))
+                yield number, SourceRow(record["v"], record.get("e", []), record.get("cells", {}))
 
     def _chunk_count(self, inventory: dict[str, Any]) -> int:
         return sum(
@@ -662,6 +738,14 @@ class StructuredStore:
             derived = task_root / _DIR_NAME
             if task_root.is_dir() and derived.is_dir() and not derived.is_symlink():
                 shutil.rmtree(derived)
+
+
+def _file_hash(path):
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as stream:
+        while chunk := stream.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _load_key(path: Path) -> bytes:

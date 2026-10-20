@@ -958,7 +958,7 @@ async def _execute_posix_host(
 )
 async def execute_shell_command(
     command: str,
-    timeout: float = 60.0,
+    timeout: float = 300.0,
     cwd: Optional[Path] = None,
     sandbox_config: Optional[Any] = None,
 ) -> ToolChunk:
@@ -979,9 +979,9 @@ async def execute_shell_command(
     Args:
         command (`str`):
             The shell command to execute.
-        timeout (`float`, defaults to `60.0`):
+        timeout (`float`, defaults to `300.0`):
             The maximum time (in seconds) allowed for the command to run.
-            Default is 60.0 seconds.
+            Default is 300.0 seconds.
         cwd (`Optional[Path]`, defaults to `None`):
             The working directory for the command execution.
             If None, defaults to the agent workspace.
@@ -1027,11 +1027,11 @@ async def execute_shell_command(
         try:
             timeout = float(timeout)
         except (ValueError, TypeError):
-            timeout = 60.0
+            timeout = 300.0
 
     # Apply agent-configured default when the caller used the hardcoded
-    # default (60.0).  An explicit LLM-provided value != 60.0 is kept.
-    if timeout == 60.0:
+    # default (300.0).  An explicit LLM-provided value != 300.0 is kept.
+    if timeout == 300.0:
         configured = get_current_shell_command_timeout()
         if configured is not None:
             timeout = configured

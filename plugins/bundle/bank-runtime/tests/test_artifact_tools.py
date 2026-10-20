@@ -76,6 +76,21 @@ def test_artifact_tool_signatures_expose_no_execution_authority() -> None:
         assert not (forbidden & set(inspect.signature(tool).parameters))
 
 
+def test_artifact_generate_schema_explains_csv_content_and_parameter_levels() -> None:
+    import json
+    import re
+
+    description = FunctionTool(artifact_generate).input_schema["properties"]["content"]["description"]
+    example = re.search(r"For CSV, use ``(.*?)``", description, re.DOTALL)
+    assert example is not None
+    content = json.loads(example.group(1))
+    assert set(content) == {"columns", "rows"}
+    assert isinstance(content["rows"][0], list)
+    assert "Do not pass CSV text" in description
+    assert "top-level tool parameters" in description
+    assert "outside content" in description
+
+
 def test_artifact_generate_schema_explains_canonical_artifact_content() -> None:
     description = FunctionTool(artifact_generate).input_schema["properties"]["content"][
         "description"
@@ -344,7 +359,7 @@ async def test_ordinary_question_is_not_forced_to_call_artifact_tool() -> None:
 
 
 def test_skill_requires_structured_runtime_tools_and_no_shell_fallback() -> None:
-    skill = (PLUGIN_ROOT / "skills" / "bank-assistant-zh" / "SKILL.md").read_text(
+    skill = (PLUGIN_ROOT / "skills" / "bank-file-delivery" / "SKILL.md").read_text(
         encoding="utf-8"
     )
     for tool_name in (
@@ -355,16 +370,18 @@ def test_skill_requires_structured_runtime_tools_and_no_shell_fallback() -> None
     ):
         assert tool_name in skill
     assert "不得改用 shell" in skill
-    assert "`explicit_pdf_request` 设为 `true`" in skill
+    assert "仅明确要求交付 PDF" in skill and "explicit_pdf_request=true" in skill
 
 
-def test_request_security_overlay_makes_office_tool_choice_mandatory() -> None:
-    personalization = (PLUGIN_ROOT / "bank_runtime" / "personalization.py").read_text(
-        encoding="utf-8"
-    )
-
-    assert "MUST call artifact_generate" in personalization
-    assert "PNG, JPEG, WEBP, SVG" in personalization
+def test_request_security_overlay_does_not_assign_file_delivery() -> None:
+    from bank_runtime.personalization import _security_boundary
+    from bank_runtime.model_context import DELIVERY_GUIDANCE
+    personalization = _security_boundary()
+    assert "MUST call artifact_generate" not in personalization
+    assert "Use artifact_revise" not in personalization
+    assert "artifact_generate" in DELIVERY_GUIDANCE
+    assert "artifact_revise" in DELIVERY_GUIDANCE
+    assert "Only trusted Runtime identity and Tool Gateway decisions authorize" in personalization
     assert (
         "Never create an Office deliverable as a Python, Node, shell, or macro script"
         in personalization

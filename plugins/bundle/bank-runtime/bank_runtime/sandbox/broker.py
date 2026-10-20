@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+import asyncio
+from datetime import datetime, timezone
+import logging
 import os
 from pathlib import Path
+import time
 from typing import Any
 
 import httpx
+from qwenpaw.exceptions import AgentRuntimeErrorException
 
 from .scope import SandboxRequestScope
 
@@ -15,12 +20,29 @@ class SandboxBrokerError(RuntimeError):
     """Runtime file broker transport or response failed."""
 
 
+class AttachmentStorageError(AgentRuntimeErrorException):
+    """Source bytes are unavailable; keep storage details in the cause only."""
+
+    def __init__(self) -> None:
+        super().__init__(error_code="FILE_ACCESS_DENIED",
+                         message="这份文件当前无法使用。请重新上传或选择可用文件，再发送问题。",
+                         details={})
+
+
 class RuntimeFileBroker:
     def __init__(self, base_url: str, token: str | None = None) -> None:
         self.base_url = str(base_url or "").rstrip("/")
         self.token = str(token or os.environ.get("QWENPAW_SERVICE_TOKEN") or "").strip()
         if not self.base_url or not self.token:
             raise SandboxBrokerError("Runtime file broker is unavailable")
+
+    async def expand_conversation_context(
+        self, scope: SandboxRequestScope, *, before_turn_id: str = '', query: str = '', limit: int = 8,
+    ) -> dict[str, Any]:
+        return await self._post('/runtime/internal/conversation/context/expand', {
+            'sandbox_context': dict(scope.sandbox_context),
+            'before_turn_id': before_turn_id, 'query': query, 'limit': limit,
+        })
 
     async def search(
         self,
@@ -71,22 +93,29 @@ class RuntimeFileBroker:
             raise SandboxBrokerError("Runtime attachment authorization is invalid")
         return data
 
-    async def _post(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
+    async def _post(self, path: str, payload: dict[str, Any], *, timeout_seconds: float = 30) -> dict[str, Any]:
+        started = time.monotonic()
         try:
-            async with httpx.AsyncClient(
-                timeout=30,
-                follow_redirects=False,
-                trust_env=False,
-            ) as client:
-                response = await client.post(
-                    f"{self.base_url}{path}",
-                    json=payload,
-                    headers={
-                        "Authorization": f"Bearer {self.token}",
-                        "Content-Type": "application/json",
-                    },
-                )
-        except httpx.HTTPError as exc:
+            async with asyncio.timeout(timeout_seconds):
+                async with httpx.AsyncClient(
+                    timeout=httpx.Timeout(timeout_seconds, connect=min(5, timeout_seconds),
+                                          write=min(30, timeout_seconds), pool=min(5, timeout_seconds)),
+                    follow_redirects=False,
+                    trust_env=False,
+                ) as client:
+                    response = await client.post(
+                        f"{self.base_url}{path}",
+                        json=payload,
+                        headers={
+                            "Authorization": f"Bearer {self.token}",
+                            "Content-Type": "application/json",
+                        },
+                    )
+        except (TimeoutError, httpx.HTTPError) as exc:
+            logging.getLogger(__name__).warning(
+                "Runtime file broker transport failed: endpoint=%s elapsed_seconds=%.3f error_type=%s",
+                path, time.monotonic() - started, type(exc).__name__,
+            )
             raise SandboxBrokerError("Runtime file broker request failed") from exc
         if response.status_code >= 400:
             raise SandboxBrokerError("Runtime file broker request rejected")
@@ -99,11 +128,58 @@ class RuntimeFileBroker:
             raise SandboxBrokerError("Runtime file broker response is invalid")
         return data
 
+    async def validate_cached_files(self, scope, files):
+        data = await self._post("/runtime/internal/sandbox/attachments/validate-materialized",
+            {"sandbox_context": dict(scope.sandbox_context), "file_ids": [item.file_id for item in files]})
+        verified = {item.get("file_id"): item for item in data.get("files", []) if isinstance(item, dict)}
+        if len(verified) != len(files) or any(item.file_id not in verified
+                or verified[item.file_id].get("content_hash") != item.sha256
+                or verified[item.file_id].get("size_bytes") != item.size_bytes for item in files):
+            raise SandboxBrokerError("Cached source authority or integrity changed")
+
+    async def prepare_originals(self, scope, files):
+        # Preparation may wait for physical container admission/startup. Its
+        # deadline is the signed task expiry, rather than the short read RPC budget.
+        try:
+            expiry = datetime.fromisoformat(scope.sandbox_context['expires_at'].replace('Z', '+00:00'))
+            if expiry.tzinfo is None:
+                raise ValueError('Missing timezone')
+            remaining = (expiry - datetime.now(timezone.utc)).total_seconds()
+            if remaining <= 0:
+                raise ValueError('Expired task')
+        except (AttributeError, KeyError, TypeError, ValueError, OverflowError) as exc:
+            raise SandboxBrokerError('Original preparation task deadline is invalid or expired') from exc
+        data = await self._post('/runtime/internal/sandbox/attachments/prepare-originals',
+            {'sandbox_context': dict(scope.sandbox_context), 'file_ids': [item.file_id for item in files]},
+            timeout_seconds=min(remaining, 3600))
+        raw = data.get('files')
+        if not isinstance(raw, list) or len(raw) != len(files):
+            raise SandboxBrokerError('Original preparation response is invalid')
+        expected = {item.file_id: item for item in files}
+        safe, seen = [], set()
+        import re
+        for item in raw:
+            if not isinstance(item, dict) or item.get('file_id') not in expected or item['file_id'] in seen:
+                raise SandboxBrokerError('Original preparation response is invalid')
+            original = expected[item['file_id']]
+            path = item.get('container_path')
+            if (item.get('content_hash') != original.sha256 or item.get('size_bytes') != original.size_bytes
+                    or not isinstance(path, str) or not re.fullmatch(
+                        '/workspace/input/' + re.escape(original.file_id) + '/' + re.escape(original.sha256) + r'(?:\.[a-z0-9]{1,15})?', path)):
+                raise SandboxBrokerError('Original preparation integrity changed')
+            seen.add(item['file_id'])
+            safe.append({key: item.get(key) for key in ('file_id', 'display_name', 'content_type', 'size_bytes',
+                                                      'content_hash', 'container_path')})
+        return safe
+
     def stream_locator(self, locator: dict[str, Any], write_chunk: Any) -> None:
         provider = str(locator.get("storage_provider") or "").lower()
         object_key = _safe_object_key(locator.get("object_key"))
         if provider == "local":
-            _stream_local(object_key, write_chunk)
+            try:
+                _stream_local(object_key, write_chunk)
+            except (SandboxBrokerError, OSError) as exc:
+                raise AttachmentStorageError() from exc
             return
         if provider == "oss":
             _stream_oss(locator, object_key, write_chunk)
@@ -157,16 +233,19 @@ def _stream_oss(locator: dict[str, Any], object_key: str, write_chunk: Any) -> N
         import oss2
     except ImportError as exc:
         raise SandboxBrokerError("OSS reader dependency is unavailable") from exc
-    stream = oss2.Bucket(
-        oss2.Auth(access_key, secret), endpoint, bucket_name
-    ).get_object(object_key)
     try:
-        while chunk := stream.read(1024 * 1024):
-            write_chunk(chunk)
-    finally:
-        close = getattr(stream, "close", None)
-        if callable(close):
-            close()
+        stream = oss2.Bucket(
+            oss2.Auth(access_key, secret), endpoint, bucket_name
+        ).get_object(object_key)
+        try:
+            while chunk := stream.read(1024 * 1024):
+                write_chunk(chunk)
+        finally:
+            close = getattr(stream, "close", None)
+            if callable(close):
+                close()
+    except oss2.exceptions.OssError as exc:
+        raise AttachmentStorageError() from exc
 
 
 __all__ = ["RuntimeFileBroker", "SandboxBrokerError"]

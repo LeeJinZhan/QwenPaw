@@ -43,17 +43,19 @@ def write_state(path, status, **fields):
     temporary.replace(path)
 
 
-def source_nonce(store, source):
+def source_nonce(store, source, *, header_row=1):
     digest = hashlib.sha256()
     with source.path.open('rb') as stream:
         while chunk := stream.read(1024 * 1024):
             digest.update(chunk)
-    identity = json.dumps([source.task_id, getattr(source, 'file_id', source.path.name), digest.hexdigest(), 'reading-2'], separators=(',', ':')).encode()
+    # Cached source facts must include physical-column and typed formula-cache
+    # fields. Keep the calculation engine version separate from this contract.
+    identity = json.dumps([source.task_id, getattr(source, 'file_id', source.path.name), digest.hexdigest(), getattr(source, 'original_name', ''), 'table-facts-3', 'cell-facts-2', header_row], sort_keys=True, separators=(',', ':')).encode()
     return hmac.new(store.key, identity, hashlib.sha256).digest()
 
 
-async def parse_job(store, source, *, timeout=900, memory_bytes=4 * 1024**3, progress=None):
-    nonce = await asyncio.to_thread(source_nonce, store, source)
+async def parse_job(store, source, *, timeout=1800, memory_bytes=4 * 1024**3, progress=None, header_row=1):
+    nonce = await asyncio.to_thread(source_nonce, store, source, header_row=header_row)
     identifier = hashlib.sha256(nonce).hexdigest()
     task = (store.root / source.task_id).resolve(strict=True)
     if task.parent != store.root or (store.root / source.task_id).is_symlink():
@@ -91,7 +93,7 @@ async def parse_job(store, source, *, timeout=900, memory_bytes=4 * 1024**3, pro
                         package_root = str(Path(__file__).resolve().parents[1])
                         environment = {**os.environ, 'PYTHONPATH': package_root + os.pathsep + os.environ.get('PYTHONPATH', '')}
                         process = await asyncio.create_subprocess_exec(sys.executable, '-m', 'bank_mineru_mcp.extract_process',
-                            str(source.path), str(work), str(store.max_document_bytes), str(memory_bytes), str(result_path),
+                            str(source.path), str(work), str(store.max_document_bytes), str(memory_bytes), str(result_path), json.dumps(header_row),
                             env=environment, pass_fds=(job_fd, slot_fd), start_new_session=True,
                             stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
                         while process.returncode is None:
@@ -108,6 +110,8 @@ async def parse_job(store, source, *, timeout=900, memory_bytes=4 * 1024**3, pro
                         saved = json.loads(result_path.read_text())
                 if saved.get('status') != 'ready':
                     raise StructuredStoreError(saved.get('error_code', 'DOCUMENT_PARSE_FAILED'), 'Extraction failed')
+                if getattr(source, 'original_name', ''):
+                    saved['inventory']['title'] = source.original_name
                 handle = store.write(source, saved['inventory'], work, nonce=nonce)
                 write_state(state, 'ready', document_ref=handle.document_ref)
                 return handle, saved['inventory']
@@ -159,7 +163,7 @@ async def query_job(store, name, arguments, *, timeout=300, memory_bytes=4 * 102
                     raise StructuredStoreError('DOCUMENT_PARSE_FAILED','Query process failed')
                 data=json.loads(response.read_text())
                 if data['status']!='completed':
-                    raise StructuredStoreError(data['error_code'],'Query failed')
+                    raise StructuredStoreError(data['error_code'],'Query failed', argument_reason=data.get('argument_reason',''))
                 return data['result']
         finally:
             if process is not None and process.returncode is None:

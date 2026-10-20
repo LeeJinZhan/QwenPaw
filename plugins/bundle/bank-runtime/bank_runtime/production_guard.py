@@ -14,8 +14,11 @@ from fastapi import HTTPException, status
 
 
 _BANK_RUNTIME_REACHABLE_TOOLS = {
+    "get_current_time",
     "activate_personal_skill",
     "artifact_generate",
+    "chart_generate",
+    "chart_export",
     "artifact_revise",
     "artifact_convert",
     "bank_assistant",

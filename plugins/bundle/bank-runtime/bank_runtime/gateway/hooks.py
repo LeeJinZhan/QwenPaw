@@ -61,9 +61,18 @@ class BankRuntimeToolVisibilityHook(LifecycleHook):
             gateway_snapshot_hash[:15],
             sorted(allowed_names),
         )
-        filter_managed_driver_tools(agent.toolkit, allowed_names)
         from .middleware import BankRuntimeGatewayMiddleware
 
+        context_names = set()
+        for middleware in getattr(agent, "_acting_middlewares", ()):
+            if isinstance(middleware, BankRuntimeGatewayMiddleware):
+                reader = middleware.personal_skills
+                if reader is not None and await reader.visible():
+                    context_names.add(reader.tool.name)
+                history = middleware.history_recall
+                if history is not None and await history.visible():
+                    context_names.add(history.tool.name)
+        filter_managed_driver_tools(agent.toolkit, allowed_names | frozenset(context_names))
         for middleware in getattr(agent, "_acting_middlewares", ()):
             if isinstance(middleware, BankRuntimeGatewayMiddleware):
                 middleware.allowed_tool_names = allowed_names

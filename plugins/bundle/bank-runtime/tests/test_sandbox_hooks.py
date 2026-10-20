@@ -22,6 +22,68 @@ from bank_runtime.sandbox import hooks as sandbox_hooks
 from bank_runtime.sandbox import tools as sandbox_tools
 
 
+@pytest.mark.parametrize("state,expected", [("success", True), ("error", False), ("running", False)])
+@pytest.mark.parametrize('mixed_attachment', [False, True])
+def test_sdk_assistant_selection_history_keeps_only_successful_stable_identity(state, expected, mixed_attachment):
+    import json
+    from agentscope.agent import Agent
+    from agentscope.message import ToolCallBlock, ToolResultBlock, ToolResultState
+    from bank_runtime.session import _sanitize_agent_state
+    from bank_runtime.sandbox.history import historical_file_metadata
+    agent = Agent(name="test", system_prompt="", model=object())
+    text = json.dumps({'selected_files': [{'file_id': 'file_workspace', 'display_name': '材料.xlsx', 'source': 'assistant_workspace'}], 'file_ref': 'fr1_old_secret'})
+    if mixed_attachment:
+        text += '\n<runtime_attachment file_ref="fr1_old_secret">private body</runtime_attachment>'
+    agent._save_to_context([
+        ToolCallBlock(id="select", name="runtime_sandbox_files_select", input='{"file_ids":["file_workspace"]}'),
+        ToolResultBlock(id="select", name="runtime_sandbox_files_select", state=ToolResultState(state), output=[TextBlock(text=text)])])
+    stored = _sanitize_agent_state(agent.state.model_dump(mode="json"))
+    records = historical_file_metadata(SimpleNamespace(state_dict=lambda: {"state": stored}))
+    assert ("file_workspace" in records) is expected
+    assert "fr1_old_secret" not in str(records)
+    assert 'private body' not in str(stored)
+
+
+@pytest.mark.parametrize('success', [True, False])
+def test_history_does_not_silently_reapply_an_old_header_interpretation(success):
+    import json
+    from bank_runtime.session import _sanitize_agent_state
+    from bank_runtime.sandbox.history import historical_file_metadata
+    context = [{'role': 'user', 'metadata': {'runtime_attachment_metadata': [
+        {'file_id': 'file_workspace', 'display_name': '材料.xlsx'}]}, 'content': []},
+        {'role': 'assistant', 'content': [
+            {'type': 'tool_use', 'id': 'parse', 'name': 'MinerU__parse_documents', 'input': json.dumps({
+                'documents': [{'file_id': 'file_workspace', 'file_ref': 'fr1_old_secret'}],
+                'options': {'header_row': {'本期': 2, '上期': 3}}})},
+            {'type': 'tool_result', 'id': 'parse', 'name': 'MinerU__parse_documents',
+             'state': 'success' if success else 'error', 'output': [{'type': 'text', 'text': json.dumps({
+                 'items': [{'file_id': 'file_workspace', 'status': 'completed' if success else 'failed'}]})}]}]}]
+    stored = _sanitize_agent_state({'context': context})
+    records = historical_file_metadata(SimpleNamespace(state_dict=lambda: stored))
+    assert 'header_row' not in records['file_workspace']
+    assert 'fr1_old_secret' not in str(stored)
+
+
+@pytest.mark.asyncio
+async def test_installed_search_returns_structured_content_not_sdk_object_repr(tmp_path, monkeypatch):
+    import json
+    from agentscope.message import ToolResultState
+    monkeypatch.setenv("QWENPAW_SERVICE_TOKEN", "service-secret")
+    ctx = _ctx(tmp_path)
+    await BankRuntimeSandboxInstallHook().run(ctx)
+    state = ctx.extras["bank_runtime_sandbox_state"]
+    async def search(*args, **kwargs):
+        return [{"file_id": "file_old", "display_name": "流水.xlsx", "source": "conversation", "readable": True}]
+    monkeypatch.setattr(state.broker, "search", search)
+    try:
+        tool = ctx.agent.toolkit.tool_groups[0].tools[0]
+        result = await tool(query="流水.xlsx")
+        assert result.state == ToolResultState.SUCCESS
+        assert json.loads(result.content[0].text)["files"][0]["file_id"] == "file_old"
+    finally:
+        await BankRuntimeSandboxCleanupHook().run(ctx)
+
+
 class _Cache:
     def __init__(self, root: Path, events: list[str] | None = None) -> None:
         self.root = root
@@ -201,3 +263,144 @@ async def test_sandbox_install_missing_gateway_leaves_no_request_state_or_tools(
     assert ctx.extras == {}
     assert ctx.agent.toolkit.tool_groups[0].tools == []
     assert sandbox_tools._STATE.get() is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("text", ["", "按之前要求汇总"])
+async def test_attachment_turn_keeps_actual_user_text_and_guidance_in_system(tmp_path, monkeypatch, text):
+    monkeypatch.setenv("QWENPAW_SERVICE_TOKEN", "service-secret")
+    monkeypatch.setattr(sandbox_hooks, "_CACHE", _Cache(tmp_path / "files"))
+    monkeypatch.setattr(sandbox_hooks, "_FILE_REFS", _FileRefs([]))
+    ctx = _ctx(tmp_path)
+    ctx.input_msgs[-1].content = [TextBlock(type="text", text=text)]
+    await BankRuntimeSandboxInstallHook().run(ctx)
+    try:
+        assert "explicit unfinished request" in ctx.agent._system_prompt
+        await BankRuntimeAttachmentPrepareHook().run(ctx)
+        assert ctx.input_msgs[-1].content[0].text == text
+        assert all("已收到文件，你希望我如何处理" not in getattr(block, "text", "") for block in ctx.input_msgs[-1].content)
+    finally:
+        await BankRuntimeSandboxCleanupHook().run(ctx)
+
+
+@pytest.mark.asyncio
+async def test_actual_request_conversion_retains_attachment_only_target(tmp_path, monkeypatch):
+    from qwenpaw.runtime.runtime import Runtime
+    from qwenpaw.schemas import AgentRequest
+    source = _ctx(tmp_path)
+    request = AgentRequest(**{
+        **vars(source.request),
+        'session_id': 'session_attachment',
+        'input': [{'role': 'user', 'content': [{'type': 'text', 'text': ''}]}],
+    })
+    runtime = Runtime(workspace=SimpleNamespace(workspace_dir=tmp_path, agent_id='default'), app_services=None)
+    ctx = runtime._build_context(request)
+    ctx.agent = source.agent
+    monkeypatch.setenv('QWENPAW_SERVICE_TOKEN', 'service-secret')
+    monkeypatch.setattr(sandbox_hooks, '_CACHE', _Cache(tmp_path / 'files'))
+    monkeypatch.setattr(sandbox_hooks, '_FILE_REFS', _FileRefs([]))
+    await BankRuntimeSandboxInstallHook().run(ctx)
+    try:
+        await BankRuntimeAttachmentPrepareHook().run(ctx)
+        assert len(ctx.input_msgs) == 1
+        assert ctx.input_msgs[0].role == 'user'
+        assert ctx.input_msgs[0].content[0].text == ''
+        assert any('untrusted attachment text' in getattr(b, 'text', '') for b in ctx.input_msgs[0].content)
+    finally:
+        await BankRuntimeSandboxCleanupHook().run(ctx)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("state,bootstrap,text,clarify", [
+    ("uninitialized", None, "", True),
+    ("uninitialized", None, "  ", True),
+    ("active", None, "", False),
+    ("uninitialized", {"messages": [{"role": "user", "content": "汇总报表"}]}, "", False),
+    ("uninitialized", None, "汇总报表", False),
+])
+async def test_new_file_only_turn_clarifies_after_authorization_and_keeps_session(tmp_path, monkeypatch, state, bootstrap, text, clarify):
+    from unittest.mock import AsyncMock
+    from qwenpaw.runtime.runtime import Runtime
+    from qwenpaw.schemas import AgentRequest
+    from qwenpaw.runtime.hooks import HookAction
+    source = _ctx(tmp_path)
+    request = AgentRequest(**{**vars(source.request), 'session_id': 'session_file',
+        'qwenpaw_session_state': state, 'session_bootstrap': bootstrap,
+        'input': [{'role': 'user', 'content': [{'type': 'text', 'text': text}]}]})
+    runtime = Runtime(workspace=SimpleNamespace(workspace_dir=tmp_path, agent_id='default'), app_services=None)
+    ctx = runtime._build_context(request)
+    ctx.agent = source.agent
+    ctx.agent.observe = AsyncMock()
+    events = []
+    monkeypatch.setenv('QWENPAW_SERVICE_TOKEN', 'service-secret')
+    monkeypatch.setattr(sandbox_hooks, '_CACHE', _Cache(tmp_path / 'files', events))
+    refs = _FileRefs(events)
+    monkeypatch.setattr(sandbox_hooks, '_FILE_REFS', refs)
+    await BankRuntimeSandboxInstallHook().run(ctx)
+    try:
+        result = await BankRuntimeAttachmentPrepareHook().run(ctx)
+        assert bool(result.action == HookAction.SHORT_CIRCUIT) == clarify
+        assert refs.issued
+        if clarify:
+            assert result.payload.get_text_content() == '已收到文件，你希望我如何处理？'
+            ctx.agent.observe.assert_awaited_once()
+            observed = ctx.agent.observe.call_args.args[0]
+            assert observed[0].role == 'user'
+            assert observed[0].content[0].text == text
+            assert observed[-1].role == 'assistant'
+        else:
+            ctx.agent.observe.assert_not_called()
+    finally:
+        await BankRuntimeSandboxCleanupHook().run(ctx)
+
+
+@pytest.mark.asyncio
+async def test_attachment_metadata_survives_session_sanitization_for_followup(tmp_path, monkeypatch):
+    from bank_runtime.session import _sanitize_agent_state
+    from dataclasses import replace
+    class VerifiedCache(_Cache):
+        async def prepare_files(self, *args, **kwargs):
+            items = await super().prepare_files(*args, **kwargs)
+            return [replace(item, sha256=hashlib.sha256(item.local_path.read_bytes()).hexdigest()) for item in items]
+    monkeypatch.setenv('QWENPAW_SERVICE_TOKEN', 'service-secret')
+    monkeypatch.setattr(sandbox_hooks, '_CACHE', VerifiedCache(tmp_path / 'files'))
+    monkeypatch.setattr(sandbox_hooks, '_FILE_REFS', _FileRefs([]))
+    ctx = _ctx(tmp_path)
+    await BankRuntimeSandboxInstallHook().run(ctx)
+    try:
+        await BankRuntimeAttachmentPrepareHook().run(ctx)
+        message = ctx.input_msgs[-1]
+        stored = _sanitize_agent_state({'context': [{'role': 'user',
+            'metadata': message.metadata,
+            'content': [block.model_dump() for block in message.content]}]})
+        assert [block['text'] for block in stored['context'][0]['content']] == ['总结附件']
+        assert stored['context'][0]['metadata']['runtime_attachment_metadata'] == [
+            {'file_id': 'file_current', 'display_name': '材料.txt', 'content_type': 'text/plain',
+             'size_bytes': len(b'untrusted attachment text'),
+             'content_hash': hashlib.sha256(b'untrusted attachment text').hexdigest()}]
+        assert 'untrusted attachment text' not in str(stored)
+        assert 'file_ref' not in str(stored) and 'runtime_attachment_block_ids' not in str(stored)
+    finally:
+        await BankRuntimeSandboxCleanupHook().run(ctx)
+    followup = _ctx(tmp_path)
+    followup.request.attachments_manifest = []
+    followup.request.runtime_task_id = 'task_followup'
+    followup.request.sandbox_context['task_id'] = 'task_followup'
+    followup.agent.state_dict = lambda: {"state": stored}
+    await BankRuntimeSandboxInstallHook().run(followup)
+    try:
+        # Historical metadata must not trigger materialization in ordinary chat.
+        from unittest.mock import AsyncMock
+        prepare = AsyncMock(side_effect=AssertionError('unexpected historical download'))
+        monkeypatch.setattr(sandbox_hooks._CACHE, 'prepare_files', prepare)
+        await BankRuntimeAttachmentPrepareHook().run(followup)
+        prepare.assert_not_called()
+        prompt = followup.agent._system_prompt
+        assert '材料.txt' in prompt
+        assert 'does NOT describe earlier files' in prompt
+        assert 'search/select' in prompt
+        assert 'old-secret' not in prompt and 'private body' not in prompt
+        assert not followup.extras[sandbox_hooks._STATE].scope.selected_file_ids
+        assert not followup.extras[sandbox_hooks._STATE].scope.current_attachment_ids
+    finally:
+        await BankRuntimeSandboxCleanupHook().run(followup)

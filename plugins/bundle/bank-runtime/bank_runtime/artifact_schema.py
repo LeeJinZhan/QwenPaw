@@ -88,11 +88,11 @@ def _official_content_schema() -> dict[str, Any]:
                             'rows': {'type': 'array', 'items': texts}},
              'required': ['type', 'headers', 'rows']}
     document = {'type': 'object', 'additionalProperties': False, 'properties': {
-        'title': text, 'recipients': {**texts, 'description': '主送单位专用字段，排在标题后顶格；不要写进 blocks。初稿缺失时用【主送单位待填写】。'},
+        'title': text, 'recipients': {**texts, 'description': '主送单位专用字段，排在标题后顶格；不要写进 blocks。初稿缺失时用明确待补标记，遵从用户指定的占位方式，不编造单位。'},
         'blocks': {'type': 'array', 'minItems': 1, 'maxItems': 500,
                    'items': {'anyOf': [paragraph, heading, table]}},
-        'signatory': {**text, 'description': '落款单位或部门专用字段，右对齐；不要写进 blocks。缺失时用【申请单位待填写】。'},
-        'date': {**text, 'description': '成文日期专用字段，排在落款下方；不要写进 blocks。未提供时用【成文日期待填写】，不得擅用当天日期。'},
+        'signatory': {**text, 'description': '落款单位或部门专用字段，右对齐；不要写进 blocks。初稿缺失时用明确待补标记，遵从用户指定的占位方式，不编造单位。'},
+        'date': {**text, 'description': '成文日期专用字段，排在落款下方；不要写进 blocks。初稿缺失时用明确待补标记，遵从用户指定的占位方式，不得擅用当天日期。'},
         'classification': text, 'urgency': text,
         'attachments': texts, 'cc': texts,
     }, 'required': ['title', 'recipients', 'blocks']}

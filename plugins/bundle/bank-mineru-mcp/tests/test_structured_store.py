@@ -72,6 +72,52 @@ def _parse_csv(tmp_path: Path):
     return store, handle
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize('execution', ['guest', 'subprocess'])
+@pytest.mark.parametrize('options', [{}, {'limit': 10}, {'cursor': None}])
+async def test_optional_chunk_arguments_page_all_100_sheets(tmp_path, execution, options):
+    from bank_mineru_mcp.processing_guest import query
+    from bank_mineru_mcp.parse_jobs import query_job
+
+    source = _source(tmp_path, 'many.xlsx', '.xlsx',
+                     'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+    workbook = openpyxl.Workbook()
+    workbook.remove(workbook.active)
+    for index in range(100):
+        sheet = workbook.create_sheet(f'sheet{index:03d}')
+        sheet.append(['id', 'value'])
+        for row in range(107):
+            sheet.append([f'{index}:{row}', row])
+    workbook.save(source.path)
+    work = tmp_path / 'work'
+    inventory = extract_workbook(source.path, work, stem='file_001')
+    store = _store(tmp_path)
+    handle = store.write(source, inventory, work)
+    arguments = {'document_ref': handle.document_ref, **options}
+    seen = {}
+    pages = 0
+    while True:
+        if execution == 'guest':
+            page = query(store, 'read_chunks', arguments)
+        else:
+            page = await query_job(store, 'read_document_chunks', arguments)
+        assert 1 <= len(page['chunks']) <= options.get('limit', 5)
+        for chunk in page['chunks']:
+            assert chunk['index'] not in seen
+            seen[chunk['index']] = chunk
+        pages += 1
+        if not page['has_more']:
+            assert page['next_cursor'] is None
+            break
+        assert page['next_cursor'] != arguments.get('cursor')
+        arguments = {**arguments, 'cursor': page['next_cursor']}
+        assert pages <= 1000
+    assert {chunk['heading'] for chunk in seen.values()} == {f'sheet{i:03d}' for i in range(100)}
+    assert sum(chunk['rows_returned'][1] - chunk['rows_returned'][0] + 1
+               for chunk in seen.values()) == 10700
+    assert page['coverage']['read'] == page['coverage']['total'] == len(seen)
+
+
 def test_csv_inventory_and_range_paging(tmp_path) -> None:
     store, handle = _parse_csv(tmp_path)
     inventory = store.inventory(handle.document_ref)
@@ -90,6 +136,20 @@ def test_csv_inventory_and_range_paging(tmp_path) -> None:
     assert paged["rows_returned"][0] == 11
 
 
+def test_requested_range_completion_does_not_claim_whole_source_sheet(tmp_path):
+    store, handle = _parse_csv(tmp_path)
+    result = store.read_range(handle.document_ref, rows=[1, 60], format='source')
+    assert result['has_more'] is False
+    assert result['range_complete'] is True
+    assert result['sheet_complete'] is False
+    assert result['sheet_has_more'] is True
+    assert result['coverage'] == {'coordinate_space':'source','range':[1,60], 'total_rows':61,'all_columns':True}
+    full = store.read_range(handle.document_ref, rows=[1,61], format='source')
+    assert full['sheet_complete'] is True and full['sheet_has_more'] is False
+    subset = store.read_range(handle.document_ref, rows=[1,61], columns=['姓名'], format='source')
+    assert subset['range_complete'] is True and subset['sheet_complete'] is False
+
+
 def test_range_page_respects_char_budget(tmp_path) -> None:
     source = _source(tmp_path, "big.csv", ".csv", "text/csv")
     _write_csv(source.path, rows=4000)
@@ -102,7 +162,7 @@ def test_range_page_respects_char_budget(tmp_path) -> None:
     assert page["has_more"] is True
 
 
-def test_xlsx_merged_ranges_expand(tmp_path) -> None:
+def test_xlsx_merged_ranges_preserve_raw_anchor(tmp_path) -> None:
     source = _source(
         tmp_path,
         "book.xlsx",
@@ -117,7 +177,7 @@ def test_xlsx_merged_ranges_expand(tmp_path) -> None:
     sheet = store.inventory(handle.document_ref)["sheets"][0]
     assert sheet["merged_ranges"], "merged ranges must be preserved"
     page = store.read_range(handle.document_ref, sheet="支行01", rows=[1, 20])
-    assert page["markdown"].count("团队1") == 10, "row-span values must fill down"
+    assert page["markdown"].count("团队1") == 1, "Only the source anchor contains a value"
     assert page["sheet"] == "支行01"
 
 
@@ -130,7 +190,7 @@ def test_aggregate_metrics_median_filter_and_union(tmp_path) -> None:
     )
     _write_xlsx(source.path)
     work = tmp_path / "work"
-    inventory = extract_workbook(source.path, work, stem="file_001")
+    inventory = extract_workbook(source.path, work, stem="file_001", header_row=2)
     store = _store(tmp_path)
     handle = store.write(source, inventory, work)
     result = store.aggregate(
@@ -160,9 +220,9 @@ def test_aggregate_metrics_median_filter_and_union(tmp_path) -> None:
     assert union["rows_matched"] == 40
     first_group = grouped["groups"][0]
     assert first_group["group"]["岗位"] == "团队1"
-    assert first_group["营销笔数:sum"] == sum(range(3, 13))
-    assert first_group["营销金额:median"] == 15.0
-    assert first_group["姓名:count_distinct"] == 10
+    assert first_group["营销笔数:sum"] == 3
+    assert first_group["营销金额:median"] == 6.0
+    assert first_group["姓名:count_distinct"] == 1
 
 
 def test_aggregate_invalid_metric_rejected(tmp_path) -> None:
@@ -177,6 +237,23 @@ def test_search_locates_rows(tmp_path) -> None:
     hits = store.search(handle.document_ref, query="员工042")
     assert len(hits["hits"]) == 1
     assert hits["hits"][0]["row"] == 42
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('execution', ['guest', 'subprocess'])
+@pytest.mark.parametrize('limit', [59, 60, 61])
+async def test_search_truncation_requires_an_omitted_match(tmp_path, execution, limit):
+    from bank_mineru_mcp.processing_guest import query
+    from bank_mineru_mcp.parse_jobs import query_job
+
+    store, handle = _parse_csv(tmp_path)
+    arguments = {'document_ref': handle.document_ref, 'query': '员工', 'limit': limit}
+    if execution == 'guest':
+        result = query(store, 'search', arguments)
+    else:
+        result = await query_job(store, 'search', arguments)
+    assert [hit['row'] for hit in result['hits']] == list(range(1, min(limit, 60) + 1))
+    assert result['truncated'] is (limit < 60)
 
 
 def test_read_chunks_shim_covers_blocks(tmp_path) -> None:
@@ -469,9 +546,34 @@ def test_delimited_quoted_cells_preserve_linebreaks_quotes_and_separators(tmp_pa
 def test_union_echoes_every_source_sheet_instead_of_first_sheet(tmp_path):
     source=_source(tmp_path,'book.xlsx','.xlsx','application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
     _write_xlsx(source.path)
-    work=tmp_path/'work'; inventory=extract_workbook(source.path,work,stem='f')
+    work=tmp_path/'work'; inventory=extract_workbook(source.path,work,stem='f',header_row=2)
     store=_store(tmp_path); handle=store.write(source,inventory,work)
     result=store.aggregate(handle.document_ref,[{'cross_sheet_union':{'key_column':'姓名'},'metrics':[{'column':'营销金额','fn':'sum'}]}])['results'][0]
     assert result['sheet'] == '*'
     assert result['sources'] == [{'sheet':'支行01','range':[1,20],'rows_scanned':20},{'sheet':'支行02','range':[1,20],'rows_scanned':20}]
     assert result['filter'] is None
+
+
+def test_batched_category_pages_keep_every_operation_and_default_to_first_page(tmp_path):
+    source = _source(tmp_path, 'categories.csv', '.csv', 'text/csv')
+    source.path.write_text('类别,风险,编号\n' + '\n'.join(f'类别{i:03d},风险{i%3},{i}' for i in range(600)), encoding='utf-8')
+    work = tmp_path / 'work'
+    inventory = extract_workbook(source.path, work, stem='file_001')
+    store = _store(tmp_path, max_groups=500)
+    ref = store.write(source, inventory, work).document_ref
+    ops = [{'group_by': [column], 'metrics': [{'column': '编号', 'fn': 'count'}]} for column in ['类别', '风险']]
+    result = store.aggregate(ref, ops)
+    assert len(result['results']) == 2
+    first, second = result['results']
+    assert first['groups_complete'] is False
+    assert first['next_group_cursor'] == len(first['groups'])
+    assert sum(group['编号:count'] for group in second['groups']) == 600
+    assert second['groups_complete'] is True
+    groups = list(first['groups'])
+    cursor = first['next_group_cursor']
+    while cursor is not None:
+        page = store.aggregate(ref, [{**ops[0], 'group_cursor': cursor}])['results'][0]
+        groups.extend(page['groups'])
+        cursor = page['next_group_cursor']
+    assert len(groups) == 600
+    assert sum(group['编号:count'] for group in groups) == 600

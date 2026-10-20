@@ -3,6 +3,7 @@
 import re
 
 from fastapi import HTTPException
+from qwenpaw.config import utils as config_utils
 
 from .auth import require_service_identity
 
@@ -30,7 +31,16 @@ def authenticate_runtime_request(request) -> bool:
         )
     except HTTPException:
         return False
-    return agent == "bank-assistant" and (path_agent is None or path_agent == agent)
+    if path_agent is not None and path_agent != agent:
+        return False
+    # Resolve the current trusted registry on each request so disabling an
+    # Agent also revokes its service ingress. Bootstrap's default Agent name
+    # does not restrict the other enabled Agents managed by this instance.
+    try:
+        profile = config_utils.load_config().agents.profiles.get(agent)
+    except (OSError, ValueError):
+        return False
+    return profile is not None and profile.id == agent and profile.enabled is True
 
 
 def install_native_auth_bridge(app):

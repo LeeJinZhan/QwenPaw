@@ -6,6 +6,7 @@ import asyncio
 import copy
 import hashlib
 import os
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable
@@ -64,6 +65,37 @@ PersonalSkillFetcher = Callable[
     [str, int],
     Awaitable[DownloadedPersonalSkill],
 ]
+
+
+def _record_activation(item: PersonalSkillItem, result: str, elapsed: float) -> None:
+    """Record a catalog-bound load outcome, never the Skill body or URL."""
+    from .delivery_state import current_delivery_state
+
+    state = current_delivery_state()
+    if state is None:
+        return
+    if elapsed < 0.1:
+        duration_bucket = "lt_100ms"
+    elif elapsed < 0.5:
+        duration_bucket = "lt_500ms"
+    elif elapsed < 2:
+        duration_bucket = "lt_2s"
+    else:
+        duration_bucket = "gte_2s"
+    event_type = (
+        "personal_skill.activated"
+        if result == "activated"
+        else "personal_skill.load_failed"
+    )
+    state.operations_events.append({
+        "event_type": event_type,
+        "task_id": state.task_id,
+        "skill_id": item.skill_id,
+        "version_no": item.version_no,
+        "content_hash": item.content_hash,
+        "result": result,
+        "duration_bucket": duration_bucket,
+    })
 
 
 def _required_text(value: Any, field: str) -> str:
@@ -275,7 +307,17 @@ def _validate_url(url: str) -> str:
     parsed = urlparse(url)
     host = (parsed.hostname or "").lower().rstrip(".")
     if parsed.scheme.lower() != "https":
-        raise PersonalSkillLoadError("Personal Skill URL must use HTTPS.")
+        try:
+            endpoint = urlparse(os.environ.get("OSS_ENDPOINT", "").strip())
+        except ValueError:
+            endpoint = None
+        if (
+            parsed.scheme.lower() != "http"
+            or endpoint is None
+            or endpoint.scheme.lower() != "http"
+            or not endpoint.hostname
+        ):
+            raise PersonalSkillLoadError("Personal Skill URL must use HTTPS.")
     allowed = _allowed_hosts()
     if (
         not host
@@ -378,6 +420,10 @@ class PersonalSkillsRegistry:
     def has_items(self) -> bool:
         return bool(self._items)
 
+    def has_reference(self, skill_ref: Any) -> bool:
+        """Check current request membership without fetching private content."""
+        return not self.closed and isinstance(skill_ref, str) and skill_ref in self._items
+
     async def activate(self, skill_ref: str) -> str:
         async with self._activation_lock:
             if self.closed:
@@ -386,17 +432,24 @@ class PersonalSkillsRegistry:
                 return "Personal Skill could not be activated: unknown skill_ref."
             if skill_ref in self._activated:
                 return self._activated[skill_ref]
+            started = time.monotonic()
             try:
                 rendered = await self._load(skill_ref)
             except asyncio.CancelledError:
                 raise
             except PersonalSkillLoadError as exc:
+                _record_activation(
+                    self._items[skill_ref], "load_failed", time.monotonic() - started
+                )
                 return (
                     f"Personal Skill could not be activated: {exc} "
                     "Continue without it."
                 )
             self._activated[skill_ref] = rendered
             self._sensitive.add(rendered)
+            _record_activation(
+                self._items[skill_ref], "activated", time.monotonic() - started
+            )
             return rendered
 
     async def _load(self, skill_ref: str) -> str:

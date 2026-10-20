@@ -11,6 +11,7 @@ injects all dependencies into the agent constructor.
 from __future__ import annotations
 
 import logging
+import copy
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Iterable
 
@@ -223,6 +224,19 @@ class AgentBuilder:
                 )
         return dirs
 
+    @staticmethod
+    def _apply_context_history_policy(agent_config: Any, ctx: Any) -> Any:
+        """Honor a trusted hook's projected history without raw archive recall.
+
+        The request-local copy retains all personal config and native compaction
+        limits. Ordinary sessions never set this internal hook marker.
+        """
+        if getattr(ctx, 'extras', {}).get('managed_history_projection') is not True:
+            return agent_config
+        result = copy.deepcopy(agent_config)
+        result.running.light_context_config.strategy = 'native'
+        return result
+
     # ----------------------------------------------------------------- build
 
     async def build(  # pylint: disable=too-many-statements,too-many-branches
@@ -254,6 +268,7 @@ class AgentBuilder:
             agent_config,
             request_context,
         )
+        agent_config = self._apply_context_history_policy(agent_config, ctx)
         ctx.agent_config = agent_config
 
         # Validate model availability.

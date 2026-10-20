@@ -86,6 +86,10 @@ def _validated_chat_request(
 
 def build_ingress_router() -> APIRouter:
     router = APIRouter()
+    from .classification_operations import build_classification_router
+    router.include_router(build_classification_router())
+    from .content_review import build_content_review_router
+    router.include_router(build_content_review_router())
 
     @router.get("/health")
     @router.get("/agents/{agent_id}/health")
@@ -146,6 +150,7 @@ def build_ingress_router() -> APIRouter:
             lambda item: project_sse_stream(
                 channel.stream_one(item),
                 runtime_task_id,
+                str(getattr(agent_request, "trace_id", "") or ""),
             ),
             owner=workspace,
         )

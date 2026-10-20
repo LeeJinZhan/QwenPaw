@@ -147,6 +147,11 @@ class DriverConfigService:
         self._reload_tasks.add(task)
         task.add_done_callback(self._reload_tasks.discard)
 
+    async def wait_for_reloads(self) -> None:
+        """Drain this publication's scheduled reloads before applying policy."""
+        while self._reload_tasks:
+            await asyncio.gather(*tuple(self._reload_tasks), return_exceptions=True)
+
     async def delete_driver_best_effort(self, name: str) -> None:
         manager = getattr(self._workspace, "driver_manager", None)
         if manager is not None:

@@ -6,9 +6,22 @@ from types import SimpleNamespace
 import pytest
 
 from qwenpaw.runtime.prompt_contributors import (
+    ScrollContextContributor,
     WorkspacePromptFilesContributor,
     build_default_prompt_manager,
 )
+
+
+def test_scoped_scroll_guidance_preserves_ordinary_and_native_modes():
+    from qwenpaw.agents.context.scroll.prompt import build_scroll_system_prompt
+    config = SimpleNamespace(language='en', running=SimpleNamespace(light_context_config=SimpleNamespace(strategy='scroll')))
+    ctx = SimpleNamespace(extras={'agent_config':config})
+    contributor = ScrollContextContributor()
+    assert contributor.contribute_sync(ctx) == build_scroll_system_prompt('en')
+    ctx.extras['bank_runtime_session_recall_prompt'] = 'Controlled current-session guidance'
+    assert contributor.contribute_sync(ctx) == 'Controlled current-session guidance'
+    config.running.light_context_config.strategy = 'native'
+    assert contributor.contribute_sync(ctx) is None
 
 
 def _ctx(tmp_path, system_prompt_files):

@@ -46,8 +46,11 @@ def test_initial_config_aligns_general_assistant_and_governed_document_tools(
     for config in [root, agent]:
         tools = config["tools"]["builtin_tools"]
         assert {name for name, item in tools.items() if item["enabled"]} == {
+            "get_current_time",
             "activate_personal_skill",
             "artifact_generate",
+            "chart_generate",
+            "chart_export",
             "artifact_revise",
             "artifact_convert",
         }

@@ -2378,6 +2378,20 @@ async def test_windows_host_task_cancel_still_sets_stop_event():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("arguments,configured,expected", [({}, None, 300.0), ({"timeout": 60.0}, 900.0, 60.0)])
+async def test_native_shell_default_is_five_minutes_and_explicit_shorter_limit_is_preserved(arguments, configured, expected):
+    from qwenpaw.agents.tools.shell import execute_shell_command
+    with (
+        patch("qwenpaw.agents.tools.shell.sys.platform", "win32"),
+        patch("qwenpaw.agents.tools.shell._execute_windows_host", AsyncMock(return_value=(0, "ok", ""))) as host,
+        patch("qwenpaw.agents.tools.shell.get_current_shell_command_timeout", return_value=configured),
+        patch("qwenpaw.agents.tools.shell.get_current_shell_command_executable", return_value=None),
+    ):
+        await execute_shell_command("echo hi", **arguments)
+    assert host.await_args.args[2] == expected
+
+
+@pytest.mark.asyncio
 async def test_execute_shell_command_win32_uses_windows_host():
     """Host shell on win32 must go through the dual-deadline helper."""
     from qwenpaw.agents.tools.shell import execute_shell_command

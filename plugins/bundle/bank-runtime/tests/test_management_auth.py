@@ -1,5 +1,6 @@
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
@@ -14,7 +15,21 @@ from qwenpaw.app import auth
 
 
 @pytest.fixture
-def client(monkeypatch):
+def agent_profiles(monkeypatch):
+    profiles = {
+        agent_id: SimpleNamespace(id=agent_id, enabled=True)
+        for agent_id in ("bank-assistant", "assistant-a", "assistant_b")
+    }
+    profiles["disabled-agent"] = SimpleNamespace(id="disabled-agent", enabled=False)
+    monkeypatch.setattr(
+        "qwenpaw.config.utils.load_config",
+        lambda: SimpleNamespace(agents=SimpleNamespace(profiles=profiles)),
+    )
+    return profiles
+
+
+@pytest.fixture
+def client(monkeypatch, agent_profiles):
     monkeypatch.setattr(auth, "is_auth_enabled", lambda: True)
     monkeypatch.setattr(auth, "has_registered_users", lambda: True)
     monkeypatch.setattr(
@@ -33,6 +48,128 @@ def client(monkeypatch):
 
     with TestClient(app) as value:
         yield value
+
+
+@pytest.mark.parametrize("agent_id", ["bank-assistant", "assistant-a", "assistant_b"])
+@pytest.mark.parametrize(
+    "method, path",
+    [
+        ("GET", "/api/bank-runtime/agents/{agent_id}/health"),
+        ("POST", "/api/bank-runtime/agents/{agent_id}/chat"),
+        ("POST", "/api/bank-runtime/agents/{agent_id}/chat/stop"),
+        ("GET", "/api/bank-runtime/health"),
+        ("GET", "/api/bank-runtime/capabilities"),
+    ],
+)
+def test_service_identity_accepts_each_enabled_agent(client, agent_id, method, path):
+    response = client.request(
+        method,
+        path.format(agent_id=agent_id),
+        headers={
+            "Authorization": "Bearer runtime-service",
+            "X-Agent-Id": agent_id,
+        },
+    )
+    assert response.status_code == 200
+
+
+@pytest.mark.parametrize("agent_id", ["missing-agent", "disabled-agent"])
+@pytest.mark.parametrize(
+    "path", ["/api/bank-runtime/agents/{agent_id}/health", "/api/bank-runtime/health"]
+)
+def test_service_identity_rejects_missing_or_disabled_agent(client, agent_id, path):
+    response = client.get(
+        path.format(agent_id=agent_id),
+        headers={"Authorization": "Bearer runtime-service", "X-Agent-Id": agent_id},
+    )
+    assert response.status_code == 401
+
+
+@pytest.mark.parametrize("agent_id", ["bank-assistant", "assistant-a"])
+def test_service_identity_observes_agent_disable_on_next_request(
+    client, agent_profiles, agent_id
+):
+    headers = {"Authorization": "Bearer runtime-service", "X-Agent-Id": agent_id}
+    path = f"/api/bank-runtime/agents/{agent_id}/health"
+    assert client.get(path, headers=headers).status_code == 200
+    agent_profiles[agent_id].enabled = False
+    assert client.get(path, headers=headers).status_code == 401
+
+
+def test_service_identity_rejects_removed_default_agent(client, agent_profiles):
+    del agent_profiles["bank-assistant"]
+    response = client.get(
+        "/api/bank-runtime/agents/bank-assistant/health",
+        headers={
+            "Authorization": "Bearer runtime-service",
+            "X-Agent-Id": "bank-assistant",
+        },
+    )
+    assert response.status_code == 401
+
+
+def test_service_identity_rejects_mismatched_registry_id(client, agent_profiles):
+    agent_profiles["bank-assistant"].id = "another-agent"
+    response = client.get(
+        "/api/bank-runtime/agents/bank-assistant/health",
+        headers={
+            "Authorization": "Bearer runtime-service",
+            "X-Agent-Id": "bank-assistant",
+        },
+    )
+    assert response.status_code == 401
+
+
+@pytest.mark.parametrize("failure", [OSError, ValueError, RuntimeError])
+def test_service_identity_fails_closed_when_registry_unavailable(
+    client, monkeypatch, failure
+):
+    def unavailable():
+        raise failure("private-registry-details")
+
+    monkeypatch.setattr("qwenpaw.config.utils.load_config", unavailable)
+    response = client.get(
+        "/api/bank-runtime/agents/bank-assistant/health",
+        headers={
+            "Authorization": "Bearer runtime-service",
+            "X-Agent-Id": "bank-assistant",
+        },
+    )
+    assert response.status_code == 401
+    assert "private-registry-details" not in response.text
+
+
+@pytest.mark.parametrize(
+    "method, path",
+    [
+        ("GET", "/api/bank-runtime/agents/assistant_b/health"),
+        ("POST", "/api/bank-runtime/agents/assistant_b/chat"),
+        ("POST", "/api/bank-runtime/agents/assistant_b/chat/stop"),
+        ("POST", "/api/bank-runtime/agents/assistant-a/health"),
+        ("GET", "/api/bank-runtime/agents/assistant-a/chat"),
+        ("GET", "/api/agents/assistant-a/models/active"),
+        ("POST", "/api/agents"),
+        ("GET", "/api/bank-runtime/agents/assistant-a/admin"),
+    ],
+)
+def test_non_default_agent_identity_stays_scoped(client, method, path):
+    response = client.request(
+        method,
+        path,
+        headers={
+            "Authorization": "Bearer runtime-service",
+            "X-Agent-Id": "assistant-a",
+        },
+    )
+    assert response.status_code == 401
+
+
+def test_non_default_agent_rejects_wrong_service_token(client):
+    response = client.get(
+        "/api/bank-runtime/agents/assistant-a/health",
+        headers={"Authorization": "Bearer wrong", "X-Agent-Id": "assistant-a"},
+    )
+    assert response.status_code == 401
 
 
 def test_service_token_cannot_authenticate_management_routes(client):
@@ -105,7 +242,8 @@ def test_public_reads_do_not_allow_anonymous_management_writes(client):
     assert client.post("/api/auth/login").status_code == 200
 
 
-def test_native_admin_token_does_not_replace_runtime_identity(monkeypatch):
+@pytest.mark.parametrize("agent_id", ["bank-assistant", "assistant-a"])
+def test_native_admin_token_does_not_replace_runtime_identity(monkeypatch, agent_id):
     from bank_runtime.router import build_ingress_router
 
     monkeypatch.setattr(auth, "is_auth_enabled", lambda: True)
@@ -122,10 +260,134 @@ def test_native_admin_token_does_not_replace_runtime_identity(monkeypatch):
             "/api/bank-runtime/health",
             headers={
                 "Authorization": "Bearer native-session",
-                "X-Agent-Id": "bank-assistant",
+                "X-Agent-Id": agent_id,
             },
         )
         assert response.status_code == 401
+
+
+def test_non_default_agents_chat_and_stop_resolve_their_own_workspaces(
+    monkeypatch, agent_profiles
+):
+    import json
+    from bank_runtime.router import build_ingress_router
+    from qwenpaw.app.task_tracker import TaskTracker
+    from qwenpaw.runtime.hooks import HookRegistry
+
+    monkeypatch.setattr(auth, "is_auth_enabled", lambda: True)
+    monkeypatch.setattr(auth, "has_registered_users", lambda: True)
+    monkeypatch.setattr(auth, "verify_token", lambda token: None)
+    monkeypatch.setenv("QWENPAW_SERVICE_TOKEN", "runtime-service")
+    monkeypatch.delenv("BANK_RUNTIME_PRODUCTION_GUARD", raising=False)
+    monkeypatch.setattr(
+        "qwenpaw.app.agent_context.load_config",
+        lambda: SimpleNamespace(agents=SimpleNamespace(profiles=agent_profiles)),
+    )
+
+    class Channel:
+        def __init__(self, agent_id):
+            self.agent_id = agent_id
+            self.requests = []
+
+        async def stream_one(self, request):
+            self.requests.append(request)
+            yield "data: " + json.dumps(
+                {
+                    "object": "message",
+                    "id": "answer",
+                    "type": "message",
+                    "status": "completed",
+                    "content": self.agent_id,
+                }
+            ) + "\n\n"
+            yield 'data: {"object":"response","status":"completed"}\n\n'
+
+        async def get_channel(self, name):
+            assert name == "bank-runtime"
+            return self
+
+    class Chats:
+        def __init__(self, agent_id):
+            self.chat_id = agent_id + ":session"
+            self.stops = []
+
+        async def get_or_create_chat(self, session_id, user_id, channel):
+            assert (session_id, user_id, channel) == (
+                "same-session",
+                "user-001",
+                "bank-runtime",
+            )
+            return SimpleNamespace(id=self.chat_id)
+
+        async def get_chat_id_by_session(self, *, session_id, channel):
+            self.stops.append((session_id, channel))
+            return self.chat_id
+
+    workspaces = {
+        agent_id: SimpleNamespace(
+            channel_manager=Channel(agent_id),
+            chat_manager=Chats(agent_id),
+            task_tracker=TaskTracker(),
+            plugins=SimpleNamespace(hook_registry=HookRegistry()),
+        )
+        for agent_id in ("assistant-a", "assistant_b")
+    }
+    selected = []
+
+    async def get_agent(agent_id):
+        selected.append(agent_id)
+        return workspaces[agent_id]
+
+    app = FastAPI()
+    app.add_middleware(auth.AuthMiddleware)
+    install_native_auth_bridge(app)
+    app.state.multi_agent_manager = SimpleNamespace(get_agent=get_agent)
+    app.include_router(build_ingress_router(), prefix="/api/bank-runtime")
+    with TestClient(app) as value:
+        for agent_id in workspaces:
+            response = value.post(
+                f"/api/bank-runtime/agents/{agent_id}/chat",
+                headers={
+                    "Authorization": "Bearer runtime-service",
+                    "X-Agent-Id": agent_id,
+                },
+                json={
+                    "runtime_task_id": "task-" + agent_id,
+                    "session_id": "same-session",
+                    "user_id": "user-001",
+                    "channel": "bank-runtime",
+                    "input": [
+                        {"role": "user", "content": [{"type": "text", "text": "hello"}]}
+                    ],
+                },
+            )
+            assert response.status_code == 200
+            events = [
+                json.loads(line[6:])
+                for line in response.text.splitlines()
+                if line.startswith("data: ")
+            ]
+            assert any(
+                event.get("event") == "answer.chunk" and event.get("text") == agent_id
+                for event in events
+            )
+            assert any(event.get("event") == "answer.completed" for event in events)
+        response = value.post(
+            "/api/bank-runtime/agents/assistant-a/chat/stop?chat_id=same-session",
+            headers={
+                "Authorization": "Bearer runtime-service",
+                "X-Agent-Id": "assistant-a",
+            },
+            json={"runtime_task_id": "task-assistant-a", "session_id": "same-session"},
+        )
+        assert response.status_code == 200
+    assert selected == ["assistant-a", "assistant_b", "assistant-a"]
+    assert len(workspaces["assistant-a"].channel_manager.requests) == 1
+    assert len(workspaces["assistant_b"].channel_manager.requests) == 1
+    assert workspaces["assistant-a"].chat_manager.stops == [
+        ("same-session", "bank-runtime")
+    ]
+    assert workspaces["assistant_b"].chat_manager.stops == []
 
 
 def test_native_router_allowlist_keeps_models_without_exposing_other_actions():

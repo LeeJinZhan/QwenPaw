@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import copy
+import json
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -28,6 +30,54 @@ from qwenpaw.hooks.session.session_hook import SessionLoadHook, SessionSaveHook
 from qwenpaw.runtime.hooks import HookRegistry
 from qwenpaw.runtime.phases import Phase
 from qwenpaw.runtime.runtime import Runtime
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("prefix,offset", [("fr1", None), ("dr1", None), ("ds1", None),
+                                           ("cur1", 5), ("cs1", 10)])
+@pytest.mark.parametrize("key", ["document_ref", "doc_ref", "next_cursor", "group_cursor", "next_group_cursor"])
+async def test_managed_history_redacts_document_handles_on_commit_and_legacy_load(tmp_path, prefix, offset, key):
+    # Match the formats actually emitted by FileRefRegistry/DocumentStore/StructuredStore.
+    token = (f"{prefix}_" + "a" * 64 + "_" + "b" * 64 if offset is None
+             else f"{prefix}_{offset}_" + "a" * 32 + "_" + "b" * 64)
+    state = {"state": {"context": [
+        {"role": "user", "content": [{"type": "text", "text": "识别中文台账.xlsx"}],
+         "metadata": {"runtime_attachment_metadata": [{"file_id": "file_a", "display_name": "中文台账.xlsx"}]}},
+        {"role": "assistant", "content": [{"type": "tool_use", "id": "call-original",
+         "name": "MinerU__read_range", "input": json.dumps({key: token})}]},
+        {"role": "tool", "content": [{"type": "tool_result", "id": "call-original",
+         "output": [{"type": "text", "text": json.dumps({key: token, "rows": 12})}]}]},
+        {"role": "assistant", "content": [{"type": "text", "text": "台账共12条记录。"}]},
+    ]}}
+    original = copy.deepcopy(state)
+    delegate = SafeJSONSession(str(tmp_path))
+    ctx = _ctx(delegate, agent=_Agent(state))
+    await _prepare_and_load(ctx)
+    await _commit_and_cleanup(ctx)
+    saved = await delegate.get_session_state_dict(session_id="session-001", user_id="user-a", channel="bank-runtime")
+    # Also test old sessions already containing the token, without rewriting their storage.
+    legacy = copy.deepcopy(saved)
+    legacy["agent"] = original
+    class LegacySession:
+        async def get_session_state_dict(self, **kwargs):
+            return legacy
+    resumed = _ctx(LegacySession(), request=_request(task_id="task-next", session_state="active"))
+    try:
+        await _prepare_and_load(resumed)
+        for actual in (saved["agent"], resumed.session_state):
+            serialized = json.dumps(actual, ensure_ascii=False)
+            assert token not in serialized
+            assert "runtime-reference-redacted" not in serialized
+            assert key not in serialized
+            assert "中文台账.xlsx" in serialized
+            assert "file_a" in serialized
+            assert serialized.count("call-original") == 2
+            assert "台账共12条记录。" in serialized
+            assert 'requires_current_verification' not in serialized
+        assert ctx.agent.state == original
+        assert legacy["agent"] == original
+    finally:
+        await ManagedSessionCleanupHook().run(resumed)
 
 
 class _Agent:
@@ -678,6 +728,36 @@ async def test_cancel_while_waiting_does_not_release_another_request_lock(
 
 
 @pytest.mark.asyncio
+async def test_cancel_cleanup_in_another_context_releases_owned_session_lock(
+    tmp_path,
+):
+    first = _ctx(SafeJSONSession(str(tmp_path)))
+    await ManagedSessionPrepareHook().run(first)
+    first_scope = current_managed_session_scope()
+    assert first_scope is not None and first_scope.lock.locked()
+
+    # Streaming generators can be finalized by a different asyncio task.
+    await asyncio.create_task(
+        ManagedSessionCleanupHook().run(first),
+        context=contextvars.Context(),
+    )
+    assert not first_scope.lock.locked()
+
+    second = _ctx(
+        first.workspace.session,
+        request=_request(task_id="task-002"),
+    )
+    async def followup():
+        await ManagedSessionPrepareHook().run(second)
+        await ManagedSessionCleanupHook().run(second)
+
+    await asyncio.wait_for(
+        asyncio.create_task(followup(), context=contextvars.Context()),
+        timeout=1,
+    )
+
+
+@pytest.mark.asyncio
 async def test_error_hook_restores_stable_session_code_after_generic_mapping(
     tmp_path,
 ):
@@ -692,3 +772,56 @@ async def test_error_hook_restores_stable_session_code_after_generic_mapping(
 
     assert ctx.extras["_error_code"] == "RUNTIME_SESSION_NOT_FOUND"
     assert ctx.extras["_error_text"] == "Managed session is unavailable"
+
+
+@pytest.mark.asyncio
+async def test_cleanup_in_fresh_context_releases_owned_scope_and_allows_next_turn(tmp_path):
+    from contextvars import Context
+    first = _ctx(SafeJSONSession(str(tmp_path)))
+    await ManagedSessionPrepareHook().run(first)
+    owned = current_managed_session_scope()
+    await asyncio.create_task(ManagedSessionCleanupHook().run(first), context=Context())
+    assert not owned.lock.locked()
+    assert current_managed_session_scope() is None
+    second = _ctx(first.workspace.session, request=_request(task_id='task-002'))
+    await asyncio.wait_for(ManagedSessionPrepareHook().run(second), timeout=1)
+    await ManagedSessionCleanupHook().run(second)
+
+
+@pytest.mark.asyncio
+async def test_shielded_cancel_cleanup_does_not_unlock_another_request(tmp_path):
+    from contextvars import Context
+    first = _ctx(SafeJSONSession(str(tmp_path)))
+    await ManagedSessionPrepareHook().run(first)
+    first_scope = current_managed_session_scope()
+    second = _ctx(first.workspace.session, request=_request(task_id='task-002'))
+    entered = asyncio.Event()
+    async def waiter():
+        try:
+            entered.set()
+            await ManagedSessionPrepareHook().run(second)
+        finally:
+            cleanup = asyncio.create_task(ManagedSessionCleanupHook().run(second), context=Context())
+            await asyncio.shield(cleanup)
+    waiting = asyncio.create_task(waiter())
+    await entered.wait()
+    await asyncio.sleep(0)
+    waiting.cancel()
+    with pytest.raises(asyncio.CancelledError): await waiting
+    assert first_scope.lock.locked()
+    await asyncio.create_task(ManagedSessionCleanupHook().run(first), context=Context())
+    assert not first_scope.lock.locked()
+
+
+@pytest.mark.asyncio
+async def test_normal_nested_cleanup_restores_outer_scope(tmp_path):
+    first = _ctx(SafeJSONSession(str(tmp_path)))
+    await ManagedSessionPrepareHook().run(first)
+    parent_scope = current_managed_session_scope()
+    nested = _ctx(first.workspace.session, request=_request(user_id='other',task_id='other-task'))
+    await ManagedSessionPrepareHook().run(nested)
+    await ManagedSessionCleanupHook().run(nested)
+    assert current_managed_session_scope() is parent_scope
+    assert parent_scope.lock.locked()
+    await ManagedSessionCleanupHook().run(first)
+    assert current_managed_session_scope() is None

@@ -19,10 +19,10 @@ from bank_runtime.session import _sanitize_agent_state
 
 @pytest.mark.parametrize("encoding", ["utf-8", "utf-8-sig", "utf-16", "gb18030"])
 @pytest.mark.parametrize("text", ["中", "中文", "姓名,部门\n测试,运营\n"])
-def test_text_encoding_preserves_short_and_csv_content(tmp_path, encoding, text):
-    path = tmp_path / "table.csv"
+def test_text_encoding_preserves_short_and_delimited_text_content(tmp_path, encoding, text):
+    path = tmp_path / "table.txt"
     path.write_bytes(text.encode(encoding))
-    block = AttachmentProcessor().process([_prepared(path, content_type="text/csv")])[0]
+    block = AttachmentProcessor().process([_prepared(path, content_type="text/plain")])[0]
     assert f"\n{text}\n</runtime_attachment>" in block.text
     assert "truncated" not in block.text
 
@@ -56,6 +56,23 @@ def _prepared(path: Path, *, content_type: str) -> PreparedSandboxFile:
         original_name=path.name,
         expires_at="2026-08-19T12:00:00+08:00",
     )
+
+
+@pytest.mark.parametrize("suffix,mime", [("csv", "text/csv"), ("tsv", "text/tab-separated-values")])
+@pytest.mark.parametrize("encoding", ["utf-8-sig", "utf-16", "gb18030"])
+def test_delimited_tables_use_authorized_tool_reference_not_inline_text(tmp_path, suffix, mime, encoding):
+    path = tmp_path / f"table.{suffix}"
+    path.write_bytes("账号,金额\n00000000000000000001,10.10\n".encode(encoding))
+    processor = AttachmentProcessor(per_file_chars=1)
+    prepared = _prepared(path, content_type=mime)
+    with pytest.raises(SandboxCacheError, match="reference"):
+        processor.process([prepared])
+    block = processor.process([prepared], file_refs={"file_001": "fr1_table"})[0]
+    assert 'processing="tool_required"' in block.text
+    assert 'file_id="file_001"' in block.text
+    assert 'file_ref="fr1_table"' in block.text
+    assert "00000000000000000001" not in block.text
+    assert processor.read_failures == {}
 
 
 def test_processor_does_not_inspect_office_archive_members(tmp_path) -> None:
@@ -186,13 +203,14 @@ def test_image_keeps_native_block_and_exposes_optional_opaque_tool_ref(
     assert 'processing="native_or_tool"' in blocks[1].text
     assert 'file_ref="fr1_image"' in blocks[1].text
 
-@pytest.mark.parametrize("extension,mime,target", [("doc", "application/msword", "docx"), ("xls", "application/vnd.ms-excel", "xlsx")])
-def test_legacy_office_is_routed_to_governed_conversion(tmp_path, extension, mime, target):
+@pytest.mark.parametrize("extension,mime", [("doc", "application/msword"), ("xls", "application/vnd.ms-excel"), ("ppt", "application/vnd.ms-powerpoint")])
+def test_legacy_office_is_routed_to_native_tool(tmp_path, extension, mime):
     path = tmp_path / f"legacy.{extension}"
     path.write_bytes(bytes.fromhex("d0cf11e0a1b11ae1") + b"\0" * 512)
     block = AttachmentProcessor().process([_prepared(path, content_type=mime)], file_refs={"file_001": "fr1_old"})[0]
-    assert 'processing="conversion_required"' in block.text
-    assert "artifact_convert" in block.text and target in block.text
+    assert 'processing="tool_required"' in block.text
+    assert "原生" in block.text
+    assert "artifact_convert" not in block.text
     assert "approved Worker Skill" not in block.text
     path.write_bytes(b"not an OLE document")
     with pytest.raises(SandboxCacheError):

@@ -11,7 +11,8 @@
     "bank-assistant/1.0",
     "tool-gateway/2.0",
     "sandbox-files/2.0",
-    "physical-sandbox/1.0"
+    "physical-sandbox/1.0",
+    "chart/1"
   ],
   "runtime_release_id": "candidate-2.1-production-guard",
   "optional_pawapps": {
@@ -38,6 +39,7 @@
   "candidate_image_digest": null,
   "promotion_blockers": [
     "stable_image_digest_missing",
-    "candidate_image_digest_missing"
+    "candidate_image_digest_missing",
+    "chart_visio2016_and_integrated_acceptance_pending"
   ]
 }

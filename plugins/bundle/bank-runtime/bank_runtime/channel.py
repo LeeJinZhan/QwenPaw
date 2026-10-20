@@ -12,6 +12,12 @@ class BankRuntimeChannel(ConsoleChannel):
     channel = "bank-runtime"
     uses_manager_queue = False
 
+    def _apply_no_text_debounce(self, session_id, content_parts):
+        # Every authenticated Runtime HTTP request is a complete submitted turn.
+        # Files arrive through attachments_manifest and are prepared later by
+        # the authorized sandbox hook, not as Console upload fragments.
+        return True, list(content_parts)
+
     @classmethod
     def from_config(
         cls,

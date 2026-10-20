@@ -7,6 +7,7 @@ import inspect
 import json
 import logging
 import re
+from copy import copy
 from datetime import datetime
 from types import SimpleNamespace
 from typing import Any, AsyncGenerator, Callable
@@ -15,6 +16,11 @@ from agentscope.message import ToolCallBlock
 from agentscope.model import OpenAIChatModel
 from agentscope.model._model_response import ChatResponse
 from qwenpaw.exceptions import ModelExecutionException
+from qwenpaw.providers.reasoning_stream import ReasoningTextStream, invalid_reasoning_stream
+from qwenpaw.providers.chat_message_order import (
+    SystemMessageOrderFormatter,
+    validate_extra_body,
+)
 
 from qwenpaw.local_models.tag_parser import (
     parse_tool_calls_from_text,
@@ -178,11 +184,13 @@ class _SanitizedStream:
     captures ``extra_content`` from tool-call chunks (used by Gemini
     thinking models to carry ``thought_signature``)."""
 
-    def __init__(self, stream: Any):
+    def __init__(self, stream: Any, *, buffer_unclassified: bool = False):
         self._stream = stream
         self._ctx_stream: Any | None = None
         self.extra_contents: dict[str, Any] = {}
         self._tool_call_ids: dict[int, str] = {}
+        self._reasoning_text = ReasoningTextStream(buffer_unclassified=buffer_unclassified)
+        self._finished = False
 
     async def __aenter__(self) -> "_SanitizedStream":
         self._ctx_stream = await self._stream.__aenter__()
@@ -202,9 +210,41 @@ class _SanitizedStream:
     async def __anext__(self) -> Any:
         if self._ctx_stream is None:
             raise StopAsyncIteration
-        item = await self._ctx_stream.__anext__()
+        try:
+            item = await self._ctx_stream.__anext__()
+        except StopAsyncIteration:
+            if not self._finished:
+                raise invalid_reasoning_stream("missing_finish_reason") from None
+            raise
         self._capture_extra_content(item)
-        return _sanitize_stream_item(item)
+        item = _sanitize_stream_item(item)
+        chunk = getattr(item, "chunk", item)
+        choices = getattr(chunk, "choices", None) or []
+        if not choices:
+            return item
+        choice = choices[0]
+        delta = getattr(choice, "delta", None)
+        finish = getattr(choice, "finish_reason", None)
+        if finish is not None and finish not in {"stop", "tool_calls", "function_call"}:
+            raise invalid_reasoning_stream("unsupported_finish_reason")
+        raw_text = getattr(delta, "content", None) or ""
+        raw_thinking = getattr(delta, "reasoning_content", None) or getattr(delta, "reasoning", None) or ""
+        if self._finished and (raw_text or raw_thinking or getattr(delta, "tool_calls", None)):
+            raise invalid_reasoning_stream("content_after_finish")
+        text, thinking = self._reasoning_text.feed(raw_text, structured_reasoning=bool(raw_thinking))
+        if finish:
+            tail, thought_tail = self._reasoning_text.finish()
+            text += tail
+            thinking += thought_tail
+            self._finished = True
+        if delta is None:
+            if not text and not thinking:
+                return item
+            delta = SimpleNamespace(tool_calls=None)
+        delta = _clone_with_overrides(delta, content=text or None, reasoning_content=(raw_thinking + thinking) or None)
+        choice = _clone_with_overrides(choice, delta=delta)
+        chunk = _clone_with_overrides(chunk, choices=[choice, *choices[1:]])
+        return _clone_with_overrides(item, chunk=chunk) if hasattr(item, "chunk") else chunk
 
     def _capture_extra_content(self, item: Any) -> None:
         """Store ``extra_content`` keyed by tool-call id."""
@@ -670,11 +710,18 @@ class OpenAIChatModelCompat(OpenAIChatModel):
         default_headers: dict[str, str] | None = None,
         extra_generate_kwargs: dict[str, Any] | None = None,
         output_token_param: str = "max_tokens",
+        buffer_unclassified_content: bool | None = None,
         **kwargs: Any,
     ) -> None:
         self._default_headers = default_headers
         self._extra_generate_kwargs = extra_generate_kwargs or {}
         self._output_token_param = output_token_param
+        # Guard the observed DeepSeek V4 omitted-opening-tag dialect. This is
+        # a compatibility policy, not an inference about a particular response.
+        self._buffer_unclassified_content = (
+            str(kwargs.get("model") or "").lower().rsplit("/", 1)[-1].startswith("deepseek-v4")
+            if buffer_unclassified_content is None else buffer_unclassified_content
+        )
         super().__init__(**kwargs)
         credential_id = str(getattr(self.credential, "id", "") or "")
         credential_provider_id = credential_id.removeprefix("qwenpaw-")
@@ -770,6 +817,10 @@ class OpenAIChatModelCompat(OpenAIChatModel):
         **generate_kwargs: Any,
     ) -> Any:
         merged = {**self._extra_generate_kwargs, **generate_kwargs}
+        # The SDK merges extra_body after formatter output. Reject structural
+        # overrides before they can undo role ordering or tool restrictions.
+        validate_extra_body(self.extra_body)
+        validate_extra_body(merged.get("extra_body"))
         self._consume_disable_thinking(merged)
         if self._output_token_param != "max_tokens":
             max_tokens = merged.pop("max_tokens", None)
@@ -778,7 +829,21 @@ class OpenAIChatModelCompat(OpenAIChatModel):
         if self._default_headers:
             existing = merged.get("extra_headers") or {}
             merged["extra_headers"] = {**self._default_headers, **existing}
-        return await super()._call_api(
+        # AgentScope accepts Msg objects here and formats them inside _call_api.
+        # Normalize that formatter's output, not its still-unformatted input.
+        # Never swap self.formatter while other calls may be using this model.
+        request_model = copy(self)
+        from .retry_scope import external_retry_owner
+        if external_retry_owner.get():
+            request_model.client_kwargs = {**self.client_kwargs, "max_retries": 0}
+        request_model.formatter = SystemMessageOrderFormatter(self.formatter)
+        extra_body = merged.get("extra_body") or self.extra_body or {}
+        thinking = extra_body.get("thinking")
+        if extra_body.get("enable_thinking") is False or (
+            isinstance(thinking, dict) and thinking.get("type") == "disabled"
+        ):
+            request_model._buffer_unclassified_content = False
+        return await super(OpenAIChatModelCompat, request_model)._call_api(
             model_name,
             messages,
             tools,
@@ -820,13 +885,18 @@ class OpenAIChatModelCompat(OpenAIChatModel):
             tools = _sanitize_tool_schemas(tools)
         return super()._format_tools(tools, tool_choice)
 
+    def _parse_completion_response(self, start_datetime: datetime, response: Any, audio_format: str = "wav") -> ChatResponse:
+        # Non-streaming requests must obey the same finish-reason guard.
+        _sanitize_chunk(response)
+        return super()._parse_completion_response(start_datetime, response, audio_format)
+
     # pylint: disable=too-many-branches, too-many-statements
     async def _parse_stream_response(
         self,
         start_datetime: datetime,
         response: Any,
     ) -> AsyncGenerator[ChatResponse, None]:
-        sanitized_response = _SanitizedStream(response)
+        sanitized_response = _SanitizedStream(response, buffer_unclassified=self._buffer_unclassified_content)
         next_think_tool_call_id = 0
         next_text_tool_call_id = 0
 

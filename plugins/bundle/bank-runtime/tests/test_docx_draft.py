@@ -36,8 +36,11 @@ def test_incomplete_official_or_unknown_draft_is_not_a_tool_call(value):
 
 
 @pytest.mark.asyncio
-async def test_provider_failure_recovers_once_without_executing_a_file_operation():
-    middleware=BankRuntimeGatewayMiddleware(None, artifact_intent=ArtifactDeliveryIntent('generate','docx'))
+@pytest.mark.parametrize('reliability_enabled', [False, True])
+async def test_provider_failure_recovers_once_without_executing_a_file_operation(reliability_enabled):
+    from bank_runtime.model_reliability import BankModelReliability
+    policy = BankModelReliability(10) if reliability_enabled else None
+    middleware=BankRuntimeGatewayMiddleware(None, model_reliability=policy, artifact_intent=ArtifactDeliveryIntent('generate','docx'))
     middleware._artifact_turn_state=SimpleNamespace(invoked=False, failed=False, replan_count=0)
     calls=[]
     async def model(**kwargs):

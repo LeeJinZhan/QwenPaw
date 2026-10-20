@@ -40,6 +40,7 @@ class ArtifactDeliveryIntent:
     source_refs: tuple[str, ...] = ()
     layout_kind: str = ""
     layout_resolution: str = ""
+    input_scope: str = ""
 
 
 def complete_artifact_tool_input(
@@ -117,7 +118,11 @@ class DocumentReadIncompleteError(FileOperationsIncompleteError):
     def __init__(self, code="DOCUMENT_READ_INCOMPLETE") -> None:
         AgentRuntimeErrorException.__init__(
             self, error_code=code,
-            message="文件内容尚未完整读取，不能提供全量统计或生成完整分析报告。", details={},
+            message={"DOCUMENT_ARGUMENT_INVALID":"文件分析参数校验未通过，暂时无法完成分析。",
+                "DOCUMENT_PLAN_INVALID":"文件需求尚未确认，暂时无法完成本次处理。",
+                "DOCUMENT_INVENTORY_INCOMPLETE":"文件目录尚未完整取得，暂时无法完成本次处理。",
+                "DOCUMENT_STATISTICS_INCOMPLETE":"本次所需统计尚未完成，暂时无法提供完整结果。"}.get(
+                    code,"文件内容尚未完整读取，不能提供全量统计或生成完整分析报告。"), details={},
         )
 
 
@@ -140,9 +145,18 @@ class ArtifactDeliveryErrorHook(LifecycleHook):
     priority = 90
 
     async def run(self, ctx: HookContext) -> HookResult:
-        if isinstance(ctx.error, ArtifactToolNotInvokedError):
+        from .sandbox.broker import AttachmentStorageError
+        if isinstance(ctx.error, (ArtifactToolNotInvokedError, AttachmentStorageError)):
             ctx.extras["_error_code"] = ctx.error.error_code
             ctx.extras["_error_text"] = ctx.error.message
+        else:
+            from .model_reliability import MODEL_FAILURE_MESSAGES, failure_code
+            from qwenpaw.exceptions import ModelExecutionException, ModelTimeoutException
+            code = getattr(ctx.error, "error_code", "")
+            if code in MODEL_FAILURE_MESSAGES or isinstance(ctx.error, (ModelExecutionException, ModelTimeoutException)):
+                code = failure_code(ctx.error)
+                ctx.extras["_error_code"] = code
+                ctx.extras["_error_text"] = MODEL_FAILURE_MESSAGES[code]
         return HookResult()
 
 
@@ -188,6 +202,7 @@ def parse_artifact_delivery_intent(value: Any) -> ArtifactDeliveryIntent | None:
         source_refs=refs,
         layout_kind=layout_kind,
         layout_resolution=layout_resolution,
+        input_scope="complete" if value.get("input_scope") == "complete" else "",
     )
 
 
@@ -234,10 +249,17 @@ async def artifact_generate(
             [{"heading": "标题", "heading_level": 1, "paragraphs": ["正文"]}]}``. Arrays must be
             JSON arrays; never wrap them in an ``{"item": ...}`` object. Pass
             structured content as an object; do not JSON-encode it as a string.
+            For PDF, plain prose is a string and sections/paragraphs are an
+            object. To reproduce literal JSON, place its exact source string
+            in the text field of a content object, even when the example's
+            keys are text, paragraphs or sections.
+            A complete JSON string with those keys is ambiguous and requires
+            explicit typing before rendering; never reinterpret the example
+            as document structure or omit its keys.
             For an official document draft, use ``{"kind": "official_document",
             "layout_version": "bank-official-docx-v1", "document": {"title":
             "标题", "recipients": [], "blocks": [{"type": "paragraph",
-            "text": "正文"}]}}``. Read bank-document-writing for heading/table
+            "text": "正文"}]}}``. Read bank-file-delivery for heading/table
             and optional fields. Keep document.title independent of filenames.
             A requested institution template still requires template_fill_docx
             and its published, authorized version. Never silently substitute
@@ -254,9 +276,14 @@ async def artifact_generate(
             ``{"formula": "=SUM(B2:B5)"}``; only internal workbook references
             and registered arithmetic/conditional functions are supported.
             Never supply cached values, external links or executable functions.
-            Read bank-assistant-zh for the function list. Plain strings remain
+            Read bank-file-delivery for the function list. Plain strings remain
             escaped text. Word/PDF wide tables and PPT dense content reflow
             automatically; preserve all data and verify actual page counts.
+            For CSV, use ``{"columns": ["项目", "数量"], "rows": [["合计", 1]]}``.
+            Do not pass CSV text or JSON-encoded text. title, output_name,
+            instructions, source_refs, delivery_plan and explicit_pdf_request
+            are top-level tool parameters outside content. Keep title at the
+            top level when correcting an invalid content object.
             For HTML, pass a static HTML string or ``{"text": "<h2>标题</h2><p>正文</p>"}``.
             Full html/head/body wrappers and static layout/CSS are supported.
             Do not include script, button, input, forms, event attributes,
@@ -340,13 +367,16 @@ async def artifact_convert(
 
     For uploaded .doc/.xls, set source_type=session_file, source_id to its file_id,
     target_format=docx/xlsx, and omit source_generated_file_id. For personal files
-    use workspace_file. Modern Office may use the same target format with
-    purpose=read to prepare a safe structural copy; PDF can provide a visual
-    reading copy for charts/Visio. Read the returned attachment before analysis.
+    use workspace_file. When native Python analysis is available, read supported
+    original tables directly; do not request a same-format copy for reading or
+    as recovery from a script error. PDF can provide a necessary visual reading
+    copy for charts/Visio. Read the returned attachment before analysis.
     A converted file alone is not a completed analysis or a revised deliverable.
     Use purpose=read for internal recognition, including a supported PDF visual
-    derivative. Read every returned chunk; conversion_report coverage=partial
-    requires a scoped answer that names omitted content, never a complete report.
+    derivative. Read the requested analysis scope and its pagination before
+    answering. Full-source conclusions require complete coverage;
+    conversion_report coverage=partial requires naming omitted content and
+    limiting conclusions to verified evidence, not abandoning independent help.
 
     Args:
         source_generated_file_id: Existing generated source; omit for uploaded files.

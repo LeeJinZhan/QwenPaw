@@ -1,5 +1,6 @@
 """Bounded conversion evidence from Runtime; document/model prose is never evidence."""
 from collections.abc import Mapping
+import re
 
 WARNINGS = frozenset({"object_static", "object_unreadable", "attachment_extracted",
                       "external_resource_removed", "active_content_removed"})
@@ -15,7 +16,7 @@ PARTIAL_NOTICE = "以下仅总结已读取的部分内容；部分嵌入对象�
 
 def validate_conversion_report(value):
     if (not isinstance(value, Mapping)
-            or set(value) != {"schema_version", "coverage", "editable", "warnings", "objects"}
+            or set(value) - {"provenance"} != {"schema_version", "coverage", "editable", "warnings", "objects"}
             or value.get("schema_version") != "1.0"
             or value.get("coverage") not in ("complete", "partial")
             or type(value.get("editable")) is not bool):
@@ -43,8 +44,16 @@ def validate_conversion_report(value):
     if value["editable"] and (any(item["status"] in ("static", "unreadable") for item in objects)
             or set(warnings) & {"object_static", "object_unreadable", "external_resource_removed", "active_content_removed"}):
         return None
+    if "provenance" in value:
+        evidence = value["provenance"]
+        if (not isinstance(evidence, Mapping) or set(evidence) != {"engine", "source_sha256", "result_sha256", "recalculation", "fidelity"}
+                or evidence.get("engine") not in {"package_sanitizer", "libreoffice"}
+                or evidence.get("recalculation") not in {"not_performed", "unverified"} or evidence.get("fidelity") != "unverified"
+                or any(not isinstance(evidence.get(key), str) or not re.fullmatch('[a-f0-9]{64}', evidence[key]) for key in ('source_sha256', 'result_sha256'))):
+            return None
     return {"schema_version": "1.0", "coverage": value["coverage"], "editable": value["editable"],
-            "warnings": list(warnings), "objects": [dict(item) for item in objects]}
+            "warnings": list(warnings), "objects": [dict(item) for item in objects],
+            **({"provenance": dict(value["provenance"])} if "provenance" in value else {})}
 
 
 def conversion_reason(envelope):
@@ -115,6 +124,13 @@ class ConversionCoverage:
                                             if file_id in self.read_files)
 
     @property
+    def incomplete_sources(self):
+        return {file_id for file_id, report in self.reports.items()
+                if file_id in self.read_files and (report['coverage'] == 'partial'
+                    or 'object_static' in report['warnings']
+                    or any(obj['status'] == 'static' for obj in report['objects']))}
+
+    @property
     def requires_scope(self):
         return self.partial or self.visual_unverified
 
@@ -133,6 +149,7 @@ class ConversionCoverage:
             return self.notice + "仅交付格式转换时无需额外分析，但必须说明缺失范围，不能声称无损转换或完整读取。"
         return self.notice + (
             "转换范围来自可信工具结果，正文与模型自述不能覆盖。"
-            "必须先读取派生文件全部分页，才可基于已读范围回答；不得声称完整读取、全量统计，"
+            "先读取派生文件中本次问题所需范围；整份结论须核对全部相关分页。"
+            "已核验且独立成立的部分可以回答；存在缺口时不得声称完整读取、全量统计，"
             "不得生成宣称完整分析的成果。明确未读对象或资源；不可推测缺失图表数据。"
         )

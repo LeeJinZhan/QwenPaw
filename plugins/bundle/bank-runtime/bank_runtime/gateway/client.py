@@ -10,7 +10,7 @@ import uuid
 
 import httpx
 
-from .outbox import GatewayResultOutbox
+from .outbox import GatewayGuardOutbox, GatewayResultOutbox
 from .protocol import (
     PROTOCOL_VERSION,
     GatewayProtocolError,
@@ -29,14 +29,39 @@ _RESULT_ATTEMPTS = 3
 class GatewayError(RuntimeError):
     """Gateway mediation failed safely."""
 
-    def __init__(self, message: str, *, code: str = "", violation: str = "", validation_hint: str = "", layout_failure: tuple[int, str] | None = None, conversion_failure: str = "") -> None:
+    def __init__(self, message: str, *, code: str = "", violation: str = "", validation_hint: str = "", layout_failure: tuple[int, str] | None = None, conversion_failure: str = "", failure_metadata: Mapping[str, Any] | None = None, http_status: int | None = None) -> None:
         super().__init__(message)
+        self.http_status = http_status if type(http_status) is int else None
         self.code = str(code or "")
         self.violation = str(violation or "")
         from ..conversion_reports import REASONS
         self.conversion_failure = conversion_failure if isinstance(conversion_failure, str) and conversion_failure in REASONS else ""
         self.validation_hint = str(validation_hint or "")[:500] if code == "ARTIFACT_VALIDATION_FAILED" else ""
         self.layout_failure = layout_failure
+        supplied_facts = dict(failure_metadata or {})
+        for key in ("details", "result"):
+            if isinstance(supplied_facts.get(key), Mapping):
+                supplied_facts.update(supplied_facts[key])
+        self.recovery_stop_explicit = supplied_facts.get("retryable") is False
+        from ..presentation import failure_metadata as project_failure_metadata
+        self.failure_metadata = project_failure_metadata({
+            **dict(failure_metadata or {}), "error_code": self.code,
+        })
+        self.execution_status = self.failure_metadata["execution_status"]
+
+    @property
+    def definitive_rejection(self) -> bool:
+        """Repeating the same Guard credential cannot resolve a fixed refusal.
+
+        Conflict/expiry codes remain intact for explicit permit refresh; this
+        property never turns them into an authorization denial.
+        """
+        return self.code in {'FORBIDDEN', 'UNAUTHORIZED', 'FILE_ACCESS_DENIED',
+                             'POLICY_DENIED', 'POLICY_BLOCKED', 'TOOL_DENIED',
+                             'TOOL_NOT_FOUND', 'TOOL_APPROVAL_UNSUPPORTED'} or (
+            self.http_status is not None and 400 <= self.http_status < 500
+            and self.http_status not in {408, 425, 429}
+        )
 
 
 @dataclass(frozen=True)
@@ -114,6 +139,7 @@ class GatewayClient:
     ) -> None:
         self.config = config
         self.outbox = outbox or GatewayResultOutbox()
+        self.guard_outbox = GatewayGuardOutbox(self.outbox.root / "guard")
 
     async def preflight(
         self,
@@ -121,10 +147,14 @@ class GatewayClient:
         tool_input: Mapping[str, Any],
         *,
         call_id: str = "",
+        refresh: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         call_id = str(call_id or "").strip() or f"call_{uuid.uuid4().hex}"
         idempotency_key = f"qwenpaw:{call_id}"
         await self._flush_pending_results()
+        guard_delivery = await self.guard_outbox.flush(self.config.task_id, self._send_guard)
+        if guard_delivery["pending"] or guard_delivery["exhausted"]:
+            raise GatewayError("Prior Guard decision synchronization is pending; execution stopped", code="TOOL_GUARD_REPORT_FAILED")
         payload = {
             "phase": "preflight",
             **self._scope_payload(),
@@ -140,6 +170,10 @@ class GatewayClient:
             "input_hash": canonical_payload_hash(tool_input),
             "action_type": "execute",
         }
+        if refresh is not None:
+            old = refresh.get("permit", {}).get("payload", {})
+            payload.update(phase="refresh", tool_call_id=str(refresh.get("tool_call_id") or ""),
+                           permit_id=str(old.get("permit_id") or ""), permit_nonce=str(old.get("permit_nonce") or ""))
         response = await self._post(payload)
         if (
             response.get("phase") != "allow"
@@ -172,9 +206,12 @@ class GatewayClient:
         self,
         preflight: Mapping[str, Any],
         decision: str,
+        *, validation_error_code: str = '',
     ) -> dict[str, Any]:
         if decision not in {"allow", "block", "require_approval"}:
             raise GatewayError("Tool Guard decision is invalid")
+        if validation_error_code and (decision != 'block' or validation_error_code != 'DOCUMENT_ARGUMENT_INVALID'):
+            raise GatewayError('Tool validation diagnostic is invalid')
         permit = preflight.get("permit")
         permit_payload = permit.get("payload") if isinstance(permit, Mapping) else None
         if not isinstance(permit_payload, Mapping):
@@ -190,17 +227,29 @@ class GatewayClient:
             "permit_id": str(permit_payload.get("permit_id") or ""),
             "permit_nonce": str(permit_payload.get("permit_nonce") or ""),
         }
+        if validation_error_code:
+            payload['validation_error_code']=validation_error_code
+        for attempt in range(_RESULT_ATTEMPTS):
+            try:
+                response = await self._send_guard(payload)
+                self.guard_outbox.remove(self.config.task_id, payload["tool_call_id"])
+                return response
+            except Exception as exc:
+                if isinstance(exc, GatewayError) and exc.definitive_rejection:
+                    self.guard_outbox.remove(self.config.task_id, payload["tool_call_id"])
+                    raise
+                if attempt == _RESULT_ATTEMPTS - 1:
+                    self.guard_outbox.enqueue_guard(payload)
+                    raise GatewayError("Runtime Guard acknowledgement failed; decision synchronization is pending", code="TOOL_GUARD_REPORT_FAILED", failure_metadata={"execution_status": "not_started", "retryable": False}) from exc
+                await asyncio.sleep(0.05 * (attempt + 1))
+        raise AssertionError("unreachable")
+
+    async def _send_guard(self, payload: dict[str, Any]) -> dict[str, Any]:
         response = await self._post(payload)
-        expected = {
-            "allow": "executing",
-            "block": "cancelled",
-            "require_approval": "pending_approval",
-        }[decision]
-        if (
-            response.get("tool_call_id") != payload["tool_call_id"]
-            or response.get("guard_decision") != decision
-            or response.get("status") != expected
-        ):
+        expected = {"allow": "executing", "block": "cancelled", "require_approval": "not_started_cancelled"}[payload["guard_decision"]]
+        if (response.get("tool_call_id") != payload["tool_call_id"]
+            or response.get("guard_decision") != payload["guard_decision"]
+            or response.get("status") != expected):
             raise GatewayError("Runtime Tool Guard acknowledgement is invalid")
         return response
 
@@ -234,9 +283,13 @@ class GatewayClient:
         }
         response = await self._post(payload)
         if response.get("tool_call_id") != payload["tool_call_id"]:
-            raise GatewayError("Runtime tool execution acknowledgement is invalid")
+            raise GatewayError("Runtime tool execution acknowledgement is invalid", failure_metadata={
+                "execution_status": "execution_unknown", "retryable": False,
+            })
         if response.get("status") not in {"success", "failed", "blocked"}:
-            raise GatewayError("Runtime tool execution result is invalid")
+            raise GatewayError("Runtime tool execution result is invalid", failure_metadata={
+                "execution_status": "execution_unknown", "retryable": False,
+            })
         return response
 
     async def report_result(
@@ -307,9 +360,14 @@ class GatewayClient:
         return f"{self.config.base_url}{self.config.endpoint}"
 
     async def _post(self, payload: dict[str, Any]) -> dict[str, Any]:
+        # A missing execute response is not evidence that the write did not run.
+        transport_failure = {
+            "execution_status": "not_started" if payload.get("phase") == "preflight" else "execution_unknown",
+            "retryable": False,
+        }
         try:
             async with httpx.AsyncClient(
-                timeout=httpx.Timeout(300 if payload.get("phase") == "execute" else 10, connect=10),
+                timeout=httpx.Timeout(300 if payload.get("phase") == "execute" else 10, connect=5),
                 follow_redirects=False,
                 trust_env=False,
             ) as client:
@@ -322,15 +380,23 @@ class GatewayClient:
                     },
                 )
         except httpx.HTTPError as exc:
-            raise GatewayError("Runtime Tool Gateway request failed") from exc
+            raise GatewayError("Runtime Tool Gateway request failed", failure_metadata=transport_failure) from exc
         try:
             body = response.json()
         except ValueError as exc:
-            raise GatewayError("Runtime Tool Gateway response is invalid") from exc
+            if 400 <= response.status_code < 500:
+                raise _response_error({}, "Runtime rejected this operation", http_status=response.status_code,
+                                      execution_status="not_started" if payload.get("phase") in {"preflight", "guard"} else None) from exc
+            raise GatewayError("Runtime Tool Gateway response is invalid", failure_metadata=transport_failure) from exc
         if not isinstance(body, dict):
-            raise GatewayError("Runtime Tool Gateway response is invalid")
+            if 400 <= response.status_code < 500:
+                raise _response_error({}, "Runtime rejected this operation", http_status=response.status_code,
+                                      execution_status="not_started" if payload.get("phase") in {"preflight", "guard"} else None)
+            raise GatewayError("Runtime Tool Gateway response is invalid", failure_metadata=transport_failure)
         if response.status_code >= 400:
-            raise _response_error(body, "Runtime Tool Gateway request failed")
+            raise _response_error(body, "Runtime Tool Gateway request failed",
+                                  execution_status="not_started" if payload.get("phase") == "preflight" or (payload.get("phase") == "guard" and response.status_code < 500) else None,
+                                  http_status=response.status_code)
         return body
 
     async def _flush_pending_results(self) -> None:
@@ -357,7 +423,7 @@ class GatewayClient:
         await self.outbox.flush(self.config.task_id, sender)
 
 
-def _response_error(payload: Mapping[str, Any], fallback: str) -> GatewayError:
+def _response_error(payload: Mapping[str, Any], fallback: str, *, execution_status: str | None = None, http_status: int | None = None) -> GatewayError:
     detail = payload.get("detail")
     if not isinstance(detail, Mapping):
         detail = payload
@@ -373,13 +439,23 @@ def _response_error(payload: Mapping[str, Any], fallback: str) -> GatewayError:
         and details.get("element") in ("text", "title", "chart_conclusion")
     ):
         location = (details["page_index"], details["element"])
+    metadata = {**detail, **details}
+    if execution_status is not None and not metadata.get("execution_status"):
+        metadata["execution_status"] = execution_status
+    if location is not None:
+        metadata.update(execution_status="failed", retryable=False,
+                        recovery_action="renderer_exhausted")
+    code = str(detail.get("code") or {401: 'UNAUTHORIZED', 403: 'FORBIDDEN'}.get(http_status, ''))
+    rejected = http_status is not None and 400 <= http_status < 500 and http_status not in {408, 425, 429}
     return GatewayError(
-        str(detail.get("message") or fallback),
-        code=str(detail.get("code") or ""),
+        "Runtime rejected this request" if rejected else str(detail.get("message") or fallback),
+        code=code,
+        http_status=http_status,
         violation=str(details.get("violation_type") or ""),
         validation_hint=str(details.get("validation_hint") or ""),
         layout_failure=location,
         conversion_failure=details.get("reason", ""),
+        failure_metadata=metadata,
     )
 
 

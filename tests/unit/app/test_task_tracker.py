@@ -213,6 +213,34 @@ async def test_request_stop_cancels_live_run():
 
 
 @pytest.mark.asyncio
+async def test_cancel_after_stream_yield_closes_producer_generator():
+    tracker = TaskTracker()
+    started = asyncio.Event()
+    release_yield = asyncio.Event()
+    closed = asyncio.Event()
+
+    async def stream(_payload):
+        try:
+            started.set()
+            await release_yield.wait()
+            yield "data: first\n\n"
+            await asyncio.sleep(60)
+        finally:
+            closed.set()
+
+    generator = stream(None)
+    await tracker.attach_or_start("run-close", None, lambda _payload: generator)
+    await asyncio.wait_for(started.wait(), timeout=1)
+    async with tracker.lock:
+        release_yield.set()
+        await asyncio.sleep(0.01)
+        tracker._runs["run-close"].task.cancel()
+
+    await asyncio.wait_for(closed.wait(), timeout=1)
+    assert await tracker.get_status("run-close") == "idle"
+
+
+@pytest.mark.asyncio
 async def test_request_stop_returns_false_when_no_run():
     tracker = TaskTracker()
 

@@ -8,14 +8,23 @@ import re
 from collections.abc import AsyncIterable, AsyncIterator
 from typing import Any
 from .public_thinking import PublicThinkingStream
+from .delivery_state import DeliveryState, delivery_scope, current_delivery_state
+
+_OPERATION_CODE = re.compile(r"[A-Za-z0-9_.:/-]{1,128}\Z")
 
 _TERMINAL_EVENTS = {"answer.completed", "answer.failed"}
+_CODE_EXAMPLE = re.compile(r"(`+).*?(?:\1|$)", re.DOTALL)
+_THINK_MARKUP = re.compile(r"(?<!\\)</?think>", re.IGNORECASE)
 _RECOVERABLE_SESSION_ERROR_CODES = {
     "RUNTIME_SESSION_NOT_FOUND",
     "RUNTIME_SESSION_SCOPE_MISMATCH",
 }
 _PUBLIC_ERROR_CODES = _RECOVERABLE_SESSION_ERROR_CODES | {
+    "WORKER_EMPTY_RESPONSE",
+    "FILE_ACCESS_DENIED",
+    'MODEL_TIMEOUT', 'MODEL_OUTPUT_TRUNCATED', 'MODEL_UPSTREAM_UNAVAILABLE', 'MODEL_REQUEST_REJECTED', 'MODEL_CONTENT_FILTERED', 'MODEL_EXECUTION_ERROR', "WORKER_FAILED",
     "DOCUMENT_ARGUMENT_INVALID", "DOCUMENT_FORMULA_CACHE_MISSING",
+    "DOCUMENT_PLAN_INVALID", "DOCUMENT_INVENTORY_INCOMPLETE", "DOCUMENT_STATISTICS_INCOMPLETE",
     "DOCUMENT_CONVERSION_PARTIAL",
     "MINERU_SUBMIT_AMBIGUOUS", "DOCUMENT_READ_INCOMPLETE", "DOCUMENT_READ_NO_PROGRESS", "DOCUMENT_PARSE_FAILED", "DOCUMENT_REF_EXPIRED", "DOCUMENT_RESULT_TOO_LARGE", "DOCUMENT_TEXT_TRUNCATED", "DOCUMENT_TEXT_ENCODING_UNSUPPORTED", "MINERU_TIMEOUT", "MINERU_UNAVAILABLE",
     "WORKER_UNAVAILABLE", "WORKER_TIMEOUT", "ARTIFACT_TOOL_NOT_INVOKED",
@@ -49,8 +58,9 @@ def _delta(previous: str, current: str) -> str:
 class CompactEventProjector:
     """Project native 2.1 events into the small Runtime-owned event set."""
 
-    def __init__(self, runtime_task_id: str) -> None:
+    def __init__(self, runtime_task_id: str, delivery_state=None) -> None:
         self.runtime_task_id = runtime_task_id
+        self.delivery_state = delivery_state
         self._snapshots: dict[tuple[str, str], str] = {}
         self._content_snapshots: dict[tuple[str, str], dict[str, str]] = {}
         self._message_stream_types: dict[str, str] = {}
@@ -58,6 +68,7 @@ class CompactEventProjector:
         self._active_message_id = ""
         self._classified_text_messages: set[str] = set()
         self._streamed_text_messages: set[str] = set()
+        self._retired_text_messages: set[str] = set()
 
     def project(self, raw_event: dict[str, Any]) -> list[dict[str, Any]]:
         phases = []
@@ -65,14 +76,29 @@ class CompactEventProjector:
             message_id = str(raw_event.get('msg_id') or raw_event.get('message_id') or raw_event.get('id') or '')
             kind = str(raw_event.get('type') or '').lower()
             previous = self._active_message_id
-            if previous and kind in {'reasoning', 'thinking'} and message_id == previous:
-                self._active_message_id = ''
-            elif previous and message_id != previous and kind in {'message', 'plugin_call', 'plugin_call_output', 'reasoning', 'thinking'}:
+            known_kind = self._message_stream_types.get(message_id)
+            reclassified = known_kind in {'message', 'text'} and kind in {'reasoning', 'thinking'}
+            if reclassified:
+                # Classification is control data. It must survive suppression of
+                # private thinking text and can also withdraw an earlier phase.
+                if self._snapshots.pop(('answer.chunk', message_id), ''):
+                    phases.append({'event': 'answer.retracted', 'message_id': message_id})
+                self._retired_text_messages.add(message_id)
+                if message_id == previous:
+                    self._active_message_id = ''
+            elif known_kind and previous and message_id != previous:
+                # Old block completion/snapshot is not a new ReAct iteration.
+                return []
+            elif previous and not known_kind and message_id != previous and kind in {'message', 'plugin_call', 'plugin_call_output', 'reasoning', 'thinking'}:
                 text = self._snapshots.get(('answer.chunk', previous), '')
                 if text:
                     phases.append({'event': 'answer.phase', 'message_id': previous, 'text': text})
+                    self._retired_text_messages.add(previous)
+                # Envelope rotates messages only after completed text. An
+                # empty TEXT_BLOCK header may be reused for the eventual final
+                # body; no earlier public answer exists to retire in this case.
                 self._active_message_id = ''
-            if kind == 'message' and message_id:
+            if kind == 'message' and message_id and message_id not in self._retired_text_messages:
                 self._active_message_id = message_id
         projected = self._project(raw_event)
         if any(item.get("event") == "answer.completed" for item in projected):
@@ -117,7 +143,14 @@ class CompactEventProjector:
             return []
         if event_name in {"answer.thinking", "answer.chunk"}:
             content = _text(raw_event)
-            return [{"event": event_name, "text": content}] if content else []
+            if not content:
+                return []
+            projected = {"event": event_name, "text": content}
+            if event_name == "answer.thinking" and raw_event.get("content_type") in {
+                "private_reasoning", "reasoning", "thinking",
+            }:
+                projected["content_type"] = "private_reasoning"
+            return [projected]
         if event_name in {"message", "message_delta", "delta"}:
             content = _text(raw_event.get("delta") or raw_event.get("text"))
             return [{"event": "answer.chunk", "text": content}] if content else []
@@ -168,6 +201,8 @@ class CompactEventProjector:
             if obj == "content"
             else declared_stream_type
         )
+        if message_id in self._retired_text_messages and stream_type in {"message", "text"}:
+            return []
         if stream_type not in {"message", "reasoning", "thinking", "text"}:
             return []
         is_thinking = stream_type in {"reasoning", "thinking"}
@@ -201,6 +236,12 @@ class CompactEventProjector:
             self._snapshots[key] = current
         if not chunk:
             return []
+        if not is_thinking and _THINK_MARKUP.search(previous[-8:] + chunk):
+            # Defence for providers/old workers which did not classify inline
+            # reasoning. Do not turn it into a public phase or a stored answer.
+            if _THINK_MARKUP.search(_CODE_EXAMPLE.sub("", self._snapshots[key])):
+                self._active_message_id = ""
+                return [self._terminal_event("answer.failed")]
         if not is_thinking and obj in {"message", "content"}:
             # Preserve classification for ambiguous native snapshots, but do not
             # hold explicitly typed TEXT_BLOCK streams until the response ends.
@@ -212,7 +253,9 @@ class CompactEventProjector:
                 return []
             self._streamed_text_messages.add(message_id)
         payload = {"event": event, "text": chunk}
-        if not is_thinking and self._active_message_id == message_id:
+        if is_thinking:
+            payload["content_type"] = "private_reasoning"
+        if is_thinking or self._active_message_id == message_id:
             payload["message_id"] = message_id
         return [payload]
 
@@ -233,7 +276,10 @@ class CompactEventProjector:
     ) -> dict[str, Any]:
         self._terminal = True
         if event == "answer.completed":
+            state = self.delivery_state or current_delivery_state()
+            evidence = state.analysis if state is not None and state.task_id == self.runtime_task_id else {}
             return {
+                **({'analysis_delivery': evidence} if evidence else {}),
                 "event": event,
                 "status": "completed",
                 "message": "回答完成",
@@ -252,8 +298,7 @@ class CompactEventProjector:
             error_code = "QWENPAW_TASK_CANCELLED"
         elif raw_status == "timeout":
             error_code = "WORKER_TIMEOUT"
-        if error_code in _PUBLIC_ERROR_CODES:
-            failed["error_code"] = error_code
+        failed["error_code"] = error_code if error_code in _PUBLIC_ERROR_CODES else "WORKER_FAILED"
         return failed
 
 
@@ -271,12 +316,46 @@ def _decode_sse_block(block: str) -> list[dict[str, Any]]:
     return events
 
 
+def _operation_code(value: Any) -> str:
+    """Only identifiers, never arguments, URLs with query strings, or bodies."""
+    candidate = value if isinstance(value, str) else ""
+    if "://" in candidate or "//" in candidate:
+        return ""
+    return candidate if _OPERATION_CODE.fullmatch(candidate) else ""
+
+
+def _record_mcp_request(state: DeliveryState, fact: dict[str, Any]) -> None:
+    event = {
+        "event_type": "mcp.request.completed",
+        "request_id": _operation_code(fact.get("request_id")),
+        "task_id": state.task_id,
+        "server_code": _operation_code(fact.get("server_code")),
+        "tool_code": _operation_code(fact.get("tool_code")),
+        "sent_at_utc": fact.get("sent_at_utc"),
+        "ended_at_utc": fact.get("ended_at_utc"),
+        "duration_ms": fact.get("duration_ms"),
+        "terminal_status": fact.get("terminal_status"),
+        "error_code": fact.get("error_code"),
+    }
+    if state.trace_id:
+        event["trace_id"] = _operation_code(state.trace_id)
+    state.operations_events.append(event)
+
+
+def _drain_operations_events(state: DeliveryState) -> list[str]:
+    events = state.operations_events[:]
+    state.operations_events.clear()
+    return [_encode({"metadata": {"runtime_event": event}}) for event in events]
+
+
 async def project_sse_stream(
     source: AsyncIterable[str],
     runtime_task_id: str,
+    trace_id: str = "",
 ) -> AsyncIterator[str]:
     """Project an upstream SSE stream while preserving disconnect semantics."""
-    projector = CompactEventProjector(runtime_task_id)
+    state = DeliveryState(runtime_task_id, trace_id=_operation_code(trace_id))
+    projector = CompactEventProjector(runtime_task_id, state)
     public_thinking = PublicThinkingStream()
     yield _encode(
         {
@@ -288,7 +367,25 @@ async def project_sse_stream(
     iterator = source.__aiter__()
     try:
         buffer = ""
-        async for item in iterator:
+        while True:
+            from qwenpaw.drivers.mcp_context import observe_mcp_requests
+
+            try:
+                with delivery_scope(state), observe_mcp_requests(
+                    lambda fact: _record_mcp_request(state, fact)
+                ):
+                    item = await anext(iterator)
+            except StopAsyncIteration:
+                break
+            except (Exception, asyncio.CancelledError):
+                # A completed MCP call can be followed by an upstream failure
+                # before the next native SSE item. Preserve its bounded fact
+                # before propagating the original failure/cancellation.
+                for operation in _drain_operations_events(state):
+                    yield operation
+                raise
+            for operation in _drain_operations_events(state):
+                yield operation
             # Native cleanup can swallow cancellation and yield a completed envelope.
             # Cancellation belongs to this producer task, not the SSE subscriber.
             task = asyncio.current_task()
@@ -307,13 +404,16 @@ async def project_sse_stream(
                 for event in projector.project(raw_event):
                     for public in public_thinking.project(event):
                         yield _encode(public)
+        for operation in _drain_operations_events(state):
+            yield operation
         for event in projector.finish():
             for public in public_thinking.project(event):
                 yield _encode(public)
     finally:
         close = getattr(iterator, "aclose", None)
         if close is not None:
-            await close()
+            with delivery_scope(state):
+                await close()
 
 
 def _encode(event: dict[str, Any]) -> str:

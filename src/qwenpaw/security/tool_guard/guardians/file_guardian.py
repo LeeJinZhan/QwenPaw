@@ -19,6 +19,7 @@ from ....config.context import (
 )
 from ....constant import SECRET_DIR, WORKING_DIR
 from ..models import GuardFinding, GuardSeverity, GuardThreatCategory
+from ..virtual_paths import current_container_paths
 from . import BaseToolGuardian
 
 # Tool -> parameter names that carry file paths.
@@ -142,6 +143,10 @@ def _normalize_path(raw_path: str) -> str:
     if not raw:
         return ""
 
+    scope=current_container_paths()
+    if scope is not None:
+        return str(scope.resolve(raw))
+
     if os.name == "nt" or _is_windows_style_path(raw):
         return _canonicalize_windows_path(raw)
 
@@ -257,7 +262,7 @@ def _extract_paths_from_shell_command(command: str) -> list[str]:
     backslashes in paths like ``C:\\Users\\foo`` are not interpreted as POSIX
     escape characters and dropped from the token stream.
     """
-    use_posix = os.name != "nt"
+    use_posix = current_container_paths() is not None or os.name != "nt"
     try:
         tokens = shlex.split(command, posix=use_posix)
     except ValueError:
@@ -331,6 +336,7 @@ class FilePathToolGuardian(BaseToolGuardian):
         """Replace sensitive-file set with *paths*."""
         normalized_files: set[str] = set()
         normalized_dirs: set[str] = set()
+        self._sensitive_sources={}
         for path in paths:
             if not path:
                 continue
@@ -338,7 +344,9 @@ class FilePathToolGuardian(BaseToolGuardian):
             p = Path(normalized)
             # Existing directories and explicit slash-terminated entries are
             # both treated as directory guards.
-            if p.is_dir() or path.endswith(("/", "\\")):
+            directory=path.endswith(("/", "\\")) or (current_container_paths() is None and p.is_dir())
+            self._sensitive_sources[path]=directory
+            if directory:
                 normalized_dirs.add(normalized)
             else:
                 normalized_files.add(normalized)
@@ -349,7 +357,9 @@ class FilePathToolGuardian(BaseToolGuardian):
         """Add one sensitive file path to block list."""
         normalized = _normalize_path(path)
         p = Path(normalized)
-        if p.is_dir() or path.endswith(("/", "\\")):
+        directory=path.endswith(("/", "\\")) or (current_container_paths() is None and p.is_dir())
+        self._sensitive_sources[path]=directory
+        if directory:
             self._sensitive_dirs.add(normalized)
             return
         self._sensitive_files.add(normalized)
@@ -357,6 +367,8 @@ class FilePathToolGuardian(BaseToolGuardian):
     def remove_sensitive_file(self, path: str) -> bool:
         """Remove one sensitive file path. Returns True if it existed."""
         normalized = _normalize_path(path)
+        for source in list(self._sensitive_sources):
+            if _normalize_path(source)==normalized:del self._sensitive_sources[source]
         if normalized in self._sensitive_files:
             self._sensitive_files.remove(normalized)
             return True
@@ -379,6 +391,21 @@ class FilePathToolGuardian(BaseToolGuardian):
         target's native separators).
         """
         if not abs_path:
+            return False
+        scope=current_container_paths()
+        if scope is not None:
+            # Keep the existing compatibility secret directories relative to
+            # the container HOME as well as all configured absolute entries.
+            for name in (_SECRET_DIR_CURRENT_NAME, _SECRET_DIR_LEGACY_NAME):
+                blocked = str(scope.resolve("~/" + name, expand=True))
+                if abs_path == blocked or abs_path.startswith(blocked + "/"):
+                    return True
+            for source,directory in self._sensitive_sources.items():
+                # Configuration is anchored to the project, while a model
+                # argument is interpreted against that invocation's cwd.
+                blocked=str(scope.resolve(source, base=scope.root, expand=True)).rstrip('/')
+                if abs_path==blocked or (directory and abs_path.startswith(blocked+'/')):
+                    return True
             return False
         if abs_path in self._sensitive_files:
             return True

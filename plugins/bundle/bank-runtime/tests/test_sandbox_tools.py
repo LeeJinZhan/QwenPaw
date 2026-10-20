@@ -89,6 +89,26 @@ async def test_search_exposes_only_public_metadata_and_select_rejects_forgery() 
     finally:
         reset_sandbox_tool_state(token)
 
+
+@pytest.mark.asyncio
+async def test_historical_search_only_prepares_the_selected_file():
+    from unittest.mock import AsyncMock
+    state = _state()
+    candidates = await state.broker.search()
+    candidates.append({**candidates[0], 'file_id': 'file_other', 'display_name': '另一份材料.pdf'})
+    state.broker.search = AsyncMock(return_value=candidates)
+    token = set_sandbox_tool_state(state)
+    try:
+        await runtime_sandbox_files_search(query='材料')
+        assert state.cache.calls == []
+        await runtime_sandbox_files_select(['file_history'])
+        assert len(state.cache.calls) == 1
+        args, kwargs = state.cache.calls[0]
+        assert args[1] == ['file_history']
+        assert 'file_other' not in state.scope.selected_file_ids
+    finally:
+        reset_sandbox_tool_state(token)
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("target", ["docx", "pdf"])
 async def test_converted_result_issues_parser_reference_after_authorization(tmp_path, monkeypatch, target):

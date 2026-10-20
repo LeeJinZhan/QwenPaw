@@ -145,7 +145,11 @@ def test_sanitize_tool_schemas_removes_nullable_builtin_tool_branches() -> (
     read_file_params = _schema_by_name(sanitized, "read_file")
     assert read_file_params["required"] == ["file_path"]
     start_line = read_file_params["properties"]["start_line"]
-    assert start_line == {
+    # JSON Schema anyOf is order-independent; Python union caching can reorder it.
+    assert sorted(start_line["anyOf"], key=lambda item: item["type"]) == [
+        {"type": "integer"}, {"type": "string"},
+    ]
+    assert {**start_line, "anyOf": sorted(start_line["anyOf"], key=lambda item: item["type"])} == {
         "anyOf": [
             {"type": "integer"},
             {"type": "string"},

@@ -31,6 +31,9 @@ def main():
         value = {'status':'completed','result':result}
     except (StructuredStoreError, ValueError) as exc:
         value = {'status':'failed','error_code':getattr(exc,'code','DOCUMENT_ARGUMENT_INVALID')}
+        detail = getattr(exc, 'argument_error', {})
+        if detail:
+            value['argument_reason'] = detail['reason']
     except MemoryError:
         value = {'status':'failed','error_code':'DOCUMENT_RESULT_TOO_LARGE'}
     temporary = response_path.with_suffix('.tmp')

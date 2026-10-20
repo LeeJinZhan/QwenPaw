@@ -30,8 +30,8 @@ class _Client:
     def __init__(self) -> None:
         self.events: list[tuple] = []
 
-    async def preflight(self, tool_name, tool_input, *, call_id):
-        self.events.append(("preflight", tool_name, dict(tool_input), call_id))
+    async def preflight(self, tool_name, tool_input, *, call_id, refresh=None):
+        self.events.append(("refresh" if refresh is not None else "preflight", tool_name, dict(tool_input), call_id))
         return {
             "tool_call_id": "runtime_call_001",
             "permit": {"payload": {"permit_id": "permit_001"}},
@@ -549,7 +549,7 @@ async def test_builtin_plugin_mcp_and_mode_tools_share_the_same_chain() -> None:
         assert [event[0] for event in client.events] == [
             "preflight",
             "tool_guard",
-            "guard",
+                "guard",
             "execute",
             "result",
         ]
@@ -680,9 +680,12 @@ async def test_pdf_confirmation_is_identical_for_preflight_guard_and_execution()
 
 
 @pytest.mark.asyncio
-async def test_repeated_artifact_input_rejections_stop_before_next_model_call():
+async def test_repeated_artifact_input_rejections_stop_only_same_operation():
+    from agentscope.model import ChatResponse
     class InvalidClient(_Client):
+        calls = 0
         async def preflight(self, *args, **kwargs):
+            self.calls += 1
             raise GatewayError("invalid", code="INVALID_REQUEST", violation="tool_input_field_not_allowed")
     client = InvalidClient()
     middleware = BankRuntimeGatewayMiddleware(client)
@@ -695,10 +698,13 @@ async def test_repeated_artifact_input_rejections_stop_before_next_model_call():
     async def model(**kwargs):
         nonlocal called
         called = True
+        return ChatResponse(content=[ToolCallBlock(id="independent", name="chart_export", input='{"chart_id":"chart-a"}')], is_last=True)
+    await middleware.on_model_call(None, {}, model)
+    assert called
+    assert client.calls == 2
     with pytest.raises(Exception) as caught:
-        await middleware.on_model_call(None, {}, model)
+        middleware._check_file_completion()
     assert getattr(caught.value, "error_code", "") == "ARTIFACT_VALIDATION_FAILED"
-    assert not called
 
 
 @pytest.mark.asyncio
@@ -728,9 +734,10 @@ async def test_permission_failure_is_not_misreported_as_invalid_artifact_input()
 
 @pytest.mark.asyncio
 async def test_execution_validation_failures_share_the_preflight_budget():
+    from agentscope.model import ChatResponse
     class Client(_Client):
         async def execute_runtime_tool(self, *args):
-            return {"status": "failed", "error_code": "ARTIFACT_VALIDATION_FAILED", "result": {"artifact_status": "failed"}}
+            return {"status": "failed", "execution_status": "not_started", "error_code": "ARTIFACT_VALIDATION_FAILED", "result": {"artifact_status": "failed"}}
     client = Client()
     middleware = BankRuntimeGatewayMiddleware(client)
     engine = GatewayPermissionEngine(_DelegateEngine(PermissionBehavior.ALLOW, client.events), middleware)
@@ -743,13 +750,19 @@ async def test_execution_validation_failures_share_the_preflight_budget():
         call = ToolCallBlock(id=f"call-{i}", name="artifact_generate", input=json.dumps(payload))
         _ = [item async for item in middleware.on_acting(SimpleNamespace(), {"tool_call": call}, forbidden)]
     assert middleware.artifact_input_failures == 2
+    assert (await engine.check_permission(SimpleNamespace(name="artifact_generate"), payload)).behavior == PermissionBehavior.DENY
+    assert (await engine.check_permission(SimpleNamespace(name="artifact_generate"), {"artifact_type": "pptx"})).behavior == PermissionBehavior.ALLOW
+    async def independent_model(**kwargs):
+        return ChatResponse(content=[ToolCallBlock(id="independent", name="artifact_generate", input='{"artifact_type":"pptx"}')], is_last=True)
+    await middleware.on_model_call(None, {}, independent_model)
     with pytest.raises(Exception) as error:
-        await middleware.on_model_call(None, {}, None)
+        middleware._check_file_completion()
     assert getattr(error.value, "error_code", "") == "ARTIFACT_VALIDATION_FAILED"
 
 
 @pytest.mark.asyncio
-async def test_exhausted_renderer_layout_stops_diagnostic_generation_in_same_turn():
+async def test_exhausted_renderer_layout_stops_same_operation_and_preserves_final_failure():
+    from agentscope.model import ChatResponse
     from bank_runtime.gateway.client import _response_error
     class Client(_Client):
         executions = 0
@@ -765,12 +778,126 @@ async def test_exhausted_renderer_layout_stops_diagnostic_generation_in_same_tur
         raise AssertionError("must not execute locally")
         yield
     for i in range(2):
-        payload = {"artifact_type": "pptx", "output_name": "报告.pptx" if i == 0 else "测试.pptx"}
+        payload = {"artifact_type": "pptx", "output_name": "报告.pptx"}
         middleware.prepare("artifact_generate", payload, {"tool_call_id": f"call-{i}"})
         call = ToolCallBlock(id=f"call-{i}", name="artifact_generate", input=json.dumps(payload))
         with pytest.raises(Exception):
             _ = [x async for x in middleware.on_acting(None, {"tool_call": call}, forbidden)]
     assert client.executions == 1
+    async def independent_model(**kwargs):
+        return ChatResponse(content=[ToolCallBlock(id="independent", name="artifact_generate", input='{"artifact_type":"docx"}')], is_last=True)
+    await middleware.on_model_call(None, {}, independent_model)
     with pytest.raises(Exception) as raised:
-        await middleware.on_model_call(None, {}, None)
+        middleware._raise_layout_failure()
     assert raised.value.message == "PPTX_LAYOUT_CAPACITY|5|chart_conclusion"
+
+
+def test_factory_captures_trusted_runtime_model_policy(monkeypatch):
+    from bank_runtime.sandbox.executor import RuntimeSandboxExecutor
+    monkeypatch.setattr(RuntimeSandboxExecutor, 'from_request', lambda **kwargs: None)
+    gateway = {'protocol':'preflight_guard_result_v2', 'base_url':'http://127.0.0.1:8765',
+        'endpoint':'/runtime/v1/tool-calls', 'token':'test-only', 'task_id':'task_001',
+        'session_id':'session_001', 'tool_session_id':'wts_001', 'policy_snapshot_id':'policy_001',
+        'task_scope_id':'scope_001', 'capability_snapshot_hash':'sha256:capability',
+        'worker_protocol_version':'runtime-worker/v1', 'trace_id':'trace_001', 'worker_agent_id':'bank-assistant'}
+    policy = {'idle_seconds':300, 'no_output_retry_attempts':0, 'truncation_recovery_attempts':0}
+    request = SimpleNamespace(channel='bank-runtime', runtime_tool_gateway=gateway,
+        request_context={'runtime_tool_gateway':gateway,'runtime_model_budget_seconds':900,'runtime_model_policy':policy})
+    middleware = bank_runtime_middleware_factory(SimpleNamespace(request=request, agent_id='bank-assistant'), SimpleNamespace())
+    assert not middleware.configuration_error
+    assert middleware.model_reliability.idle_seconds == 300
+    assert middleware.model_reliability.no_output_retry is False
+    assert middleware.model_reliability.truncation_recovery is False
+    policy['idle_seconds'] = 900
+    assert middleware.model_reliability.idle_seconds == 300
+
+
+@pytest.mark.asyncio
+async def test_core_guard_wait_rechecks_the_same_call_and_denies_revocation():
+    class RefreshDenied(_Client):
+        async def preflight(self, tool_name, tool_input, *, call_id, refresh=None):
+            if refresh is not None:
+                assert refresh["tool_call_id"] == "runtime_call_001"
+                raise GatewayError("Permission revoked")
+            result = await super().preflight(tool_name, tool_input, call_id=call_id)
+            result["permit"]["payload"]["expires_at"] = "2000-01-01T00:00:00+00:00"
+            return result
+    client = RefreshDenied()
+    middleware = BankRuntimeGatewayMiddleware(client)
+    engine = GatewayPermissionEngine(_DelegateEngine(PermissionBehavior.ALLOW, client.events), middleware)
+    decision = await engine.check_permission(SimpleNamespace(name="policy_search", is_external_tool=False), {"query":"example"})
+    assert decision.behavior == PermissionBehavior.DENY
+    assert not middleware._prepared
+
+@pytest.mark.asyncio
+async def test_guard_report_failure_is_observable_and_cannot_prepare_execution():
+    class ReportFailed(_Client):
+        async def report_guard(self, preflight, decision):
+            raise GatewayError("transport failed")
+    client = ReportFailed()
+    middleware = BankRuntimeGatewayMiddleware(client)
+    engine = GatewayPermissionEngine(_DelegateEngine(PermissionBehavior.DENY, client.events), middleware)
+    with pytest.raises(GatewayError, match="同步失败"):
+        await engine.check_permission(SimpleNamespace(name="policy_search", is_external_tool=False), {"query":"example"})
+    assert not middleware._prepared
+
+@pytest.mark.asyncio
+async def test_guard_wrapper_keeps_server_authorization_refusal():
+    denial = GatewayError('safe authorization refusal', code='FORBIDDEN', violation='user_authority_unverified', http_status=403)
+    async def report_guard(*args): raise denial
+    engine = object.__new__(GatewayPermissionEngine)
+    engine.middleware = SimpleNamespace(client=SimpleNamespace(report_guard=report_guard))
+    with pytest.raises(GatewayError) as caught:
+        await engine._report_guard_safely({'tool_call_id': 'runtime_call_001'}, 'allow')
+    assert caught.value is denial
+    assert caught.value.violation == 'user_authority_unverified'
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('fixed_rejection', [True, False])
+async def test_actual_allow_ack_path_preserves_denial_without_executing_handler(fixed_rejection):
+    client = _Client()
+    middleware = BankRuntimeGatewayMiddleware(client)
+    engine = GatewayPermissionEngine(_DelegateEngine(PermissionBehavior.ALLOW, client.events), middleware)
+    decision = await engine.check_permission(SimpleNamespace(name='policy_search', is_external_tool=False), {'query': 'public'})
+    assert decision.behavior == PermissionBehavior.ALLOW
+    async def refused_guard(*args):
+        if fixed_rejection:
+            raise GatewayError('private identity', code='FORBIDDEN', violation='user_authority_unverified', http_status=403,
+                               failure_metadata={'execution_status': 'not_started_cancelled', 'retryable': False})
+        raise OSError('private transport path')
+    client.report_guard = refused_guard
+    executed = []
+    async def next_handler(**kwargs):
+        executed.append(kwargs)
+        yield ToolResponse(id='model_call_001', content=[], state=ToolResultState.SUCCESS)
+    call = ToolCallBlock(id='model_call_001', name='policy_search', input=json.dumps({'query': 'public'}))
+    with pytest.raises(GatewayError) as caught:
+        _ = [item async for item in middleware.on_acting(SimpleNamespace(), {'tool_call': call}, next_handler)]
+    assert executed == []
+    assert caught.value.code == ('FORBIDDEN' if fixed_rejection else 'TOOL_GUARD_REPORT_FAILED')
+    assert caught.value.execution_status == ('not_started_cancelled' if fixed_rejection else 'not_started')
+    assert caught.value.failure_metadata['retryable'] is False
+    if fixed_rejection:
+        assert caught.value.violation == 'user_authority_unverified'
+        assert caught.value.http_status == 403
+        assert '服务端认证' in str(caught.value)
+    assert 'private' not in str(caught.value)
+
+@pytest.mark.asyncio
+async def test_permit_refresh_denial_preserves_unverified_identity_public_message():
+    class UnverifiedAfterWait(_Client):
+        async def preflight(self, tool_name, tool_input, *, call_id, refresh=None):
+            if refresh is not None:
+                raise GatewayError('private identity', code='FORBIDDEN', violation='user_authority_unverified', http_status=403)
+            result = await super().preflight(tool_name, tool_input, call_id=call_id)
+            result['permit']['payload']['expires_at'] = '2000-01-01T00:00:00+00:00'
+            return result
+    client = UnverifiedAfterWait()
+    middleware = BankRuntimeGatewayMiddleware(client)
+    engine = GatewayPermissionEngine(_DelegateEngine(PermissionBehavior.ALLOW, client.events), middleware)
+    decision = await engine.check_permission(SimpleNamespace(name='policy_search', is_external_tool=False), {'query': 'public'})
+    assert decision.behavior == PermissionBehavior.DENY
+    assert '服务端认证' in decision.message
+    assert '已配置' in decision.message
+    assert 'private' not in decision.message
+    assert not middleware._prepared

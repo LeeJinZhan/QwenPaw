@@ -15,6 +15,7 @@ if str(PLUGIN_ROOT) not in sys.path:
     sys.path.insert(0, str(PLUGIN_ROOT))
 
 from bank_runtime.events import CompactEventProjector, project_sse_stream
+from bank_runtime.delivery_state import current_delivery_state
 from bank_runtime.router import build_ingress_router
 from bank_runtime.channel import BankRuntimeChannel
 from qwenpaw.app.channels.console.channel import ConsoleChannel
@@ -62,6 +63,145 @@ class _FakeChannel:
         self.requests.append(request)
         for event in self.raw_events:
             yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+
+
+@pytest.mark.asyncio
+async def test_operations_facts_use_private_metadata_envelope_and_preserve_answer():
+    from qwenpaw.drivers.handlers.mcp_stateful_client import HttpStatefulClient
+
+    client = HttpStatefulClient("bank:mcp", "streamable_http", "http://local.invalid")
+    client.is_connected = True
+
+    class Session:
+        async def call_tool(self, name, arguments, **kwargs):
+            assert arguments == {"secret": "secret argument"}
+            return type("Result", (), {"isError": False})()
+
+    client.session = Session()
+
+    async def source():
+        state = current_delivery_state()
+        assert state is not None
+        state.operations_events.append({
+            "event_type": "personal_skill.activated",
+            "skill_id": "skill_001",
+            "version_no": 3,
+            "content_hash": "a" * 64,
+            "result": "activated",
+            "duration_bucket": "lt_100ms",
+        })
+        await client.call_tool("document/read_chunks", {"secret": "secret argument"})
+        yield 'data: {"object":"response","status":"completed"}\n\n'
+
+    output = [json.loads(item.removeprefix("data: ")) async for item in
+              project_sse_stream(source(), "task-001", "trace-001")]
+    facts = [item["metadata"]["runtime_event"] for item in output if "metadata" in item]
+    assert [item["event_type"] for item in facts] == [
+        "personal_skill.activated", "mcp.request.completed",
+    ]
+    assert facts[1]["task_id"] == "task-001"
+    assert facts[1]["trace_id"] == "trace-001"
+    assert facts[1]["server_code"] == "bank:mcp"
+    assert facts[1]["tool_code"] == "document/read_chunks"
+    assert facts[1]["terminal_status"] == "success"
+    assert "secret argument" not in str(output)
+    assert "secret result" not in str(output)
+    assert output[-1]["event"] == "answer.completed"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", [RuntimeError, asyncio.CancelledError])
+async def test_completed_mcp_fact_is_drained_before_upstream_interrupt(failure):
+    from qwenpaw.drivers.handlers.mcp_stateful_client import HttpStatefulClient
+
+    client = HttpStatefulClient("bank:mcp", "streamable_http", "http://local.invalid")
+    client.is_connected = True
+
+    class Session:
+        async def call_tool(self, name, arguments, **kwargs):
+            return type("Result", (), {"isError": False})()
+
+    client.session = Session()
+
+    async def source():
+        await client.call_tool("document/read_chunks", {"secret": "private-body"})
+        raise failure("private-upstream-error")
+        yield ""  # pragma: no cover - keeps the source an async generator
+
+    output = []
+    with pytest.raises(failure, match="private-upstream-error"):
+        async for item in project_sse_stream(source(), "task-001", "trace-001"):
+            output.append(json.loads(item.removeprefix("data: ")))
+    facts = [item["metadata"]["runtime_event"] for item in output if "metadata" in item]
+    assert len(facts) == 1
+    assert facts[0]["event_type"] == "mcp.request.completed"
+    assert facts[0]["server_code"] == "bank:mcp"
+    assert facts[0]["tool_code"] == "document/read_chunks"
+    assert "private-body" not in str(output)
+    assert "private-upstream-error" not in str(output)
+    assert not any(item.get("event") in {"answer.completed", "answer.failed"} for item in output)
+
+
+@pytest.mark.asyncio
+async def test_completed_mcp_fact_is_drained_when_producer_task_is_cancelled():
+    from qwenpaw.drivers.handlers.mcp_stateful_client import HttpStatefulClient
+
+    client = HttpStatefulClient("bank:mcp", "streamable_http", "http://local.invalid")
+    client.is_connected = True
+
+    class Session:
+        async def call_tool(self, name, arguments, **kwargs):
+            return type("Result", (), {"isError": False})()
+
+    client.session = Session()
+    dispatched = asyncio.Event()
+    output = []
+
+    async def source():
+        await client.call_tool("document/read_chunks", {})
+        dispatched.set()
+        await asyncio.Event().wait()
+        yield ""  # pragma: no cover
+
+    async def consume():
+        async for item in project_sse_stream(source(), "task-001"):
+            output.append(json.loads(item.removeprefix("data: ")))
+
+    task = asyncio.create_task(consume())
+    await asyncio.wait_for(dispatched.wait(), timeout=1)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    facts = [item["metadata"]["runtime_event"] for item in output if "metadata" in item]
+    assert len(facts) == 1
+    assert facts[0]["event_type"] == "mcp.request.completed"
+    assert facts[0]["server_code"] == "bank:mcp"
+
+
+def test_mcp_identifier_projection_rejects_query_and_raw_payload():
+    from bank_runtime.delivery_state import DeliveryState
+    from bank_runtime.events import _record_mcp_request
+
+    state = DeliveryState("task-001")
+    _record_mcp_request(state, {
+        "request_id": "request-001",
+        "server_code": "https://bank.example/mcp?token=private",
+        "tool_code": "document/read_chunks?args=private",
+        "terminal_status": "success",
+        "arguments": "private-body",
+    })
+    event = state.operations_events[0]
+    assert event["server_code"] == ""
+    assert event["tool_code"] == ""
+    assert "private" not in str(event)
+    _record_mcp_request(state, {
+        "request_id": "request-002",
+        "server_code": "https://bank.example/mcp",
+        "tool_code": "document/read_chunks",
+        "terminal_status": "success",
+    })
+    assert state.operations_events[1]["server_code"] == ""
+    assert state.operations_events[1]["tool_code"] == "document/read_chunks"
 
 
 class _FakeChatManager:
@@ -296,11 +436,11 @@ def test_stream_projects_incremental_thinking_and_answer_with_one_terminal(
     events = _response_events(response)
     assert [event["event"] for event in events] == [
         "status.changed",
-        "answer.thinking",
         "answer.chunk",
         "answer.completed",
     ]
-    assert [event.get("text") for event in events[1:3]] == ["思考", "答案"]
+    assert [event.get("text") for event in events if event['event'] == 'answer.chunk'] == ["答案"]
+    assert not any(event['event'] == 'answer.thinking' for event in events)
     assert (
         sum(event["event"] in {"answer.completed", "answer.failed"} for event in events)
         == 1
@@ -402,10 +542,9 @@ def test_stream_keeps_reasoning_content_deltas_out_of_answer_chunks(monkeypatch)
     events = _response_events(response)
     assert [event["event"] for event in events] == [
         "status.changed",
-        "answer.thinking",
         "answer.completed",
     ]
-    assert [event.get("text") for event in events[1:2]] == ["思考"]
+    assert not any(event['event'] == 'answer.thinking' for event in events)
     assert not any(event["event"] == "answer.chunk" for event in events)
 
 
@@ -561,6 +700,7 @@ async def test_projector_emits_one_sanitized_failure_on_stream_error():
             "event": "answer.failed",
             "status": "failed",
             "message": "回答生成失败",
+            "error_code": "WORKER_FAILED",
         }
     ]
 
@@ -610,6 +750,7 @@ def test_projector_preserves_only_recoverable_session_codes():
             "event": "answer.failed",
             "status": "failed",
             "message": "回答生成失败",
+            "error_code": "WORKER_FAILED",
         }
     ]
     assert scope_mismatch == [
@@ -620,6 +761,30 @@ def test_projector_preserves_only_recoverable_session_codes():
             "error_code": "RUNTIME_SESSION_SCOPE_MISMATCH",
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_thinking_only_recovery_failure_preserves_empty_response_code():
+    from agentscope.message import ThinkingBlock
+    from agentscope.model import ChatResponse
+    from bank_runtime.model_reliability import BankModelReliability
+
+    calls = []
+    async def model(**kwargs):
+        calls.append(kwargs)
+        return ChatResponse([ThinkingBlock(thinking='private provider reasoning')], True)
+
+    with pytest.raises(Exception) as failed:
+        async for _ in await BankModelReliability(10).call(model):
+            pass
+    assert len(calls) == 2
+    assert failed.value.error_code == 'WORKER_EMPTY_RESPONSE'
+    projector = CompactEventProjector('task-empty')
+    events = projector.project({'object': 'response', 'status': 'failed',
+        'error': {'code': failed.value.error_code, 'message': 'private provider detail'}})
+    assert events == [{'event': 'answer.failed', 'status': 'failed',
+        'message': '回答生成失败', 'error_code': 'WORKER_EMPTY_RESPONSE'}]
+    assert projector.finish() == []
 
 
 @pytest.mark.asyncio
@@ -655,3 +820,28 @@ def test_only_registered_layout_marker_survives_error_projection():
     ]:
         result = CompactEventProjector("t").project({"event": "error", "error": {"code": "ARTIFACT_VALIDATION_FAILED", "message": message}})
         assert result[0]["message"] == expected
+
+
+@pytest.mark.parametrize("user_text", ["", "   ", "请总结附件"])
+def test_real_channel_dispatches_each_attachment_request_without_text_debounce(monkeypatch, user_text):
+    received = []
+
+    async def process(request):
+        received.append(request)
+        if False:
+            yield request
+
+    channel = BankRuntimeChannel.from_config(process, SimpleNamespace(enabled=True, bot_prefix="", media_dir=""))
+    with _client(monkeypatch, _workspace(channel=channel)) as client:
+        for index in range(2):
+            response = client.post("/api/bank-runtime/agents/assistant-a/chat", headers=_headers(), json=_request_body(
+                runtime_task_id=f"task-attachment-{index}",
+                input=[{"role": "user", "content": [{"type": "text", "text": user_text}]}],
+                sandbox_context={"task_id": f"task-attachment-{index}"},
+                attachments_manifest=[{"file_id": f"file-{index}", "source": "current_task"}],
+            ))
+            assert response.status_code == 200
+            assert len(received) == index + 1
+            assert len(received[-1].input[0].content) == 1
+            assert received[-1].input[0].content[0].text == user_text
+    assert not channel._pending_content_by_session

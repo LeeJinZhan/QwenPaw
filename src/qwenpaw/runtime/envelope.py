@@ -118,7 +118,8 @@ class Envelope:
         self._completed_message.object = "message"
         self._message_started = False
 
-        self._text_blocks: Dict[str, Dict[str, Any]] = {}
+        self._text_blocks: Dict[tuple[str, str], Dict[str, Any]] = {}
+        self._retired_text_blocks: set[tuple[str, str]] = set()
         self._reasoning_blocks: Dict[str, Dict[str, Any]] = {}
         self._tool_calls: Dict[str, Dict[str, Any]] = {}
         self._data_blocks: Dict[str, Dict[str, Any]] = {}
@@ -159,13 +160,35 @@ class Envelope:
 
     def _should_finalize_text_message(self) -> bool:
         return (
-            self._message_started and len(self._completed_message.content) > 0
+            self._message_started
+            and (bool(self._completed_message.content)
+                 or any(state["text"] for state in self._text_blocks.values()))
         )
 
+    def _complete_pending_text_blocks(self) -> None:
+        """Preserve every emitted text block in the final snapshot, once."""
+        from ..schemas import ContentType, TextContent
+
+        completed_indexes = {
+            block.index for block in self._completed_message.content
+            if isinstance(block, TextContent)
+        }
+        for state in self._text_blocks.values():
+            if state["text"] and state["index"] not in completed_indexes:
+                self._completed_message.content.append(TextContent(
+                    type=ContentType.TEXT, text=state["text"],
+                    delta=False, index=state["index"],
+                ))
+        self._completed_message.content.sort(key=lambda block: block.index or 0)
+
     async def _finalize_text_message(self) -> AsyncGenerator[Any, None]:
-        """Finalize the current text message before a tool call starts."""
+        """Close accumulated text before a tool or reasoning boundary."""
         from ..schemas import RunStatus
 
+        self._complete_pending_text_blocks()
+        # Keep the original reply/block identity after rotation so delayed
+        # events cannot resurrect a process message in the final answer.
+        self._retired_text_blocks.update(self._text_blocks)
         self._completed_message.status = RunStatus.Completed
         self._response.output.append(self._completed_message)
         yield self._tag_seq(self._completed_message)
@@ -217,24 +240,33 @@ class Envelope:
         if hasattr(evt_type, "value"):
             evt_type = evt_type.value
 
+        if self._finalized:
+            return
+        text_key = (getattr(event, "reply_id", ""), getattr(event, "block_id", ""))
+
         # === TEXT BLOCK ===
         if evt_type == EventType.TEXT_BLOCK_START.value:
+            if text_key in self._retired_text_blocks or text_key in self._text_blocks:
+                return
             if not self._message_started:
                 yield self._tag_seq(self._completed_message)
                 self._message_started = True
-            block_id = event.block_id
             index = len(self._text_blocks)
-            self._text_blocks[block_id] = {"index": index, "text": ""}
+            self._text_blocks[text_key] = {"index": index, "text": "", "ended": False}
 
         elif evt_type == EventType.TEXT_BLOCK_DELTA.value:
+            if text_key in self._retired_text_blocks:
+                return
+            state = self._text_blocks.get(text_key)
+            if state is not None and state["ended"]:
+                return
             if not self._message_started:
                 yield self._tag_seq(self._completed_message)
                 self._message_started = True
-            block_id = event.block_id
             delta = event.delta or ""
             state = self._text_blocks.setdefault(
-                block_id,
-                {"index": len(self._text_blocks), "text": ""},
+                text_key,
+                {"index": len(self._text_blocks), "text": "", "ended": False},
             )
             state["text"] += delta
             chunk = TextContent(
@@ -247,10 +279,10 @@ class Envelope:
             yield self._tag_seq(chunk)
 
         elif evt_type == EventType.TEXT_BLOCK_END.value:
-            block_id = event.block_id
-            state = self._text_blocks.get(block_id)
-            if state is None:
+            state = self._text_blocks.get(text_key)
+            if state is None or state["ended"]:
                 return
+            state["ended"] = True
             final_chunk = TextContent(
                 type=ContentType.TEXT,
                 text=state["text"],
@@ -450,6 +482,10 @@ class Envelope:
 
         # === TOOL RESULT ===
         elif evt_type == EventType.TOOL_RESULT_START.value:
+            if self._should_finalize_text_message():
+                async for obj in self._finalize_text_message():
+                    yield _EventMetadataExcludedOutput(obj)
+
             call_id = event.tool_call_id
             state = self._tool_calls.get(call_id)
             if state is None:
@@ -841,20 +877,7 @@ class Envelope:
             return
 
         if self._message_started:
-            # Back-fill any partially accumulated text blocks that were
-            # not finalized (TEXT_BLOCK_END never fired, e.g. on cancel).
-            if not self._completed_message.content:
-                for state in self._text_blocks.values():
-                    text = state.get("text", "")
-                    if text:
-                        self._completed_message.content.append(
-                            TextContent(
-                                type=ContentType.TEXT,
-                                text=text,
-                                delta=False,
-                                index=state.get("index", 0),
-                            ),
-                        )
+            self._complete_pending_text_blocks()
 
             if self._completed_message.content:
                 self._completed_message.status = RunStatus.Completed

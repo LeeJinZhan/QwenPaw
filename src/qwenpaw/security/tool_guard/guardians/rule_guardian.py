@@ -35,6 +35,7 @@ from typing import Any
 import yaml
 
 from ..models import GuardFinding, GuardSeverity, GuardThreatCategory
+from ..virtual_paths import current_container_paths
 from ..safety_checks import (
     classify_destructive_command,
     is_path_outside_boundary,
@@ -91,6 +92,8 @@ _RM_DETECTION_ONLY_PATTERNS = [
 
 def _get_workspace_root() -> Path:
     """Return current workspace root for resolving relative paths."""
+    scope=current_container_paths()
+    if scope is not None:return scope.resolve(scope.root)
     try:
         from qwenpaw.config.context import (
             get_current_project_dir,
@@ -121,6 +124,8 @@ def _normalize_path(raw_path: str) -> Path:
     - Relative to absolute path conversion
     - Path resolution (symlinks, .., .)
     """
+    scope=current_container_paths()
+    if scope is not None:return scope.resolve(raw_path)
     try:
         # Expand environment variables (works for both $VAR and %VAR% syntax)
         expanded = os.path.expandvars(raw_path)
@@ -154,6 +159,9 @@ def _is_outside_workspace(
     :func:`_normalize_path` (which ``resolve()``-s) to avoid a second
     filesystem walk on the synchronous ToolGuard hot path.
     """
+    scope=current_container_paths()
+    if scope is not None:
+        return is_path_outside_boundary(abs_path,scope.root)
     try:
         workspace = _get_workspace_root().resolve()
         if path_is_resolved:
@@ -611,7 +619,7 @@ def _shared_safety_findings(
         # not the process cwd (which may differ from the shell cwd).
         kind = classify_destructive_command(
             value_str,
-            cwd=_get_workspace_root(),
+            cwd=(current_container_paths().cwd if current_container_paths() is not None else _get_workspace_root()),
         )
         if kind is None:
             continue

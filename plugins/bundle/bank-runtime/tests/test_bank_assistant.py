@@ -143,5 +143,5 @@ def test_bank_assistant_skill_keeps_authorization_out_of_prompt_guidance():
     )
 
     assert "身份只能由已认证的 Runtime" in skill
-    assert "Skill 和 Prompt 只提供使用指导" in skill
-    assert "不得使用 shell" in skill
+    assert "Skill 不授予权限" in skill
+    assert "不得改用 shell" in skill and "绕过拒绝" in skill

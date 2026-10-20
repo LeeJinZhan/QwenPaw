@@ -17,16 +17,14 @@ _TEXT_EXTENSIONS = {
     ".md",
     ".json",
     ".jsonl",
-    ".csv",
-    ".tsv",
     ".xml",
     ".yaml",
     ".yml",
     ".log",
 }
 _OOXML = {".docx", ".xlsx", ".pptx"}
-_TOOL_REQUIRED = {"pdf", "docx", "xlsx", "pptx", "doc", "xls"}
-_LEGACY_MIME = {".doc": "application/msword", ".xls": "application/vnd.ms-excel"}
+_TOOL_REQUIRED = {"pdf", "docx", "xlsx", "pptx", "doc", "xls", "ppt", "csv", "tsv"}
+_LEGACY_MIME = {".doc": "application/msword", ".xls": "application/vnd.ms-excel", ".ppt": "application/vnd.ms-powerpoint"}
 _OOXML_MIME = {
     ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -92,12 +90,11 @@ class AttachmentProcessor:
                     raise SandboxCacheError("Attachment file reference is required")
                 blocks.append(
                     self._reference_block(
-                        prepared, file_ref, processing="conversion_required" if kind in {"doc", "xls"} else "tool_required",
+                        prepared, file_ref, processing="tool_required",
                         message=(
-                            f"这是旧版 {kind} 文件，正文尚未读取。先通过已授权的 artifact_convert，"
-                            f"用 source_type=session_file、source_id=本文件 file_id 转换为 {dict(doc='docx', xls='xlsx')[kind]}，"
-                            "然后用返回的附件引用解析正文。个人资料来源使用 workspace_file。不要把转换成功当作分析完成。"
-                            if kind in {"doc", "xls"} else
+                            f"这是旧版 {kind} 文件，正文尚未读取。请使用已授权的原生文件解析工具读取原件。"
+                            "只有明确需要兼容、交付或重算时才进行受控转换；转换成功不能证明内容完整。"
+                            if kind in {"doc", "xls", "ppt"} else
                             "该文件正文尚未读取。如当前问题依赖其内容，请选择已授权且支持该类型的文件处理工具。"
                         ),
                     )
@@ -178,6 +175,10 @@ class AttachmentProcessor:
             return "audio"
         if mime.startswith("video/"):
             return "video"
+        if suffix in {".csv", ".tsv"}:
+            if b"\x00" in prefix and not prefix.startswith((b"\xff\xfe", b"\xfe\xff")):
+                raise SandboxCacheError("Attachment type mismatch")
+            return suffix.removeprefix(".")
         if (
             mime.startswith("text/")
             or mime in {"application/json", "application/xml", "application/yaml"}
