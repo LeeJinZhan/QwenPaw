@@ -31,6 +31,10 @@ class TrustedBankIdentity:
     org_id: str
     roles: frozenset[str]
     allowed_customer_ids: frozenset[str]
+    org_name: str = ""
+    role_names: tuple[str, ...] = ()
+    assistant_code: str = ""
+    assistant_name: str = ""
 
 
 @dataclass
@@ -61,7 +65,7 @@ class BankRuntimePersonalizationHook(LifecycleHook):
         if str(getattr(request, "channel", "") or "") != "bank-runtime":
             return HookResult()
 
-        identity, identity_error = _parse_identity(
+        identity, identity_error = parse_trusted_identity(
             getattr(request, "identity_json", None),
             request_user_id=str(getattr(request, "user_id", "") or ""),
         )
@@ -157,7 +161,7 @@ class BankRuntimePersonalizationCleanupHook(LifecycleHook):
         return HookResult()
 
 
-def _parse_identity(
+def parse_trusted_identity(
     raw: Any,
     *,
     request_user_id: str,
@@ -199,6 +203,26 @@ def _parse_identity(
     # entitlement source. Any non-empty scope is therefore forged.
     if customer_ids:
         return None, "客户范围未经授权，无法调用银行助手。"
+    # Optional descriptive fields preserve older Runtime requests. Validate
+    # supplied values without deriving permissions or pairing names with codes.
+    def label(value: Any, limit: int) -> str:
+        if (not isinstance(value, str) or len(value.strip()) > limit
+                or any(ord(char) < 32 or 127 <= ord(char) <= 159 for char in value)):
+            raise ValueError("Invalid caller context field")
+        return value.strip()
+
+    try:
+        org_name = label(raw.get("org_name", ""), 256)
+        assistant_code = label(raw.get("assistant_code", raw.get("scenario_code", "")), 128)
+        assistant_name = label(raw.get("assistant_name", ""), 128)
+        names = raw.get("role_names", [])
+        if not isinstance(names, list) or len(names) > 64:
+            raise ValueError("Invalid role names")
+        role_names = tuple(label(name, 128) for name in names)
+        if any(not name for name in role_names):
+            raise ValueError("Empty role name")
+    except ValueError:
+        return None, "员工或助手上下文字段无效，无法调用银行助手。"
     return (
         TrustedBankIdentity(
             user_id=user_id,
@@ -206,6 +230,10 @@ def _parse_identity(
             org_id=org_id,
             roles=roles,
             allowed_customer_ids=customer_ids,
+            org_name=org_name,
+            role_names=role_names,
+            assistant_code=assistant_code,
+            assistant_name=assistant_name,
         ),
         "",
     )
@@ -328,4 +356,5 @@ __all__ = [
     "BankRuntimePersonalizationRedactionHook",
     "TrustedBankIdentity",
     "current_personalization_context",
+    "parse_trusted_identity",
 ]

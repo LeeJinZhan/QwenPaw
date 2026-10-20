@@ -5,14 +5,17 @@ from __future__ import annotations
 from collections import defaultdict, deque
 from collections.abc import AsyncGenerator, Callable
 from dataclasses import dataclass
-from contextlib import aclosing
+from contextlib import aclosing, nullcontext
 from copy import copy
 import asyncio
 import json
 import logging
 import time
-from typing import Any, Mapping
+from typing import Any, Mapping, TYPE_CHECKING
 import uuid
+
+if TYPE_CHECKING:
+    from ..personalization import TrustedBankIdentity
 
 from agentscope.message import SystemMsg, TextBlock, ToolCallBlock, ToolResultState
 from agentscope.middleware import MiddlewareBase
@@ -118,8 +121,12 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
         artifact_intent: ArtifactDeliveryIntent | None = None,
         model_reliability: Any | None = None,
         native_analysis_enabled: bool = False,
+        caller_identity: TrustedBankIdentity | None = None,
+        caller_identity_error: str = "",
     ) -> None:
         self.client = client
+        self.caller_identity = caller_identity
+        self.caller_identity_error = caller_identity_error
         self.model_reliability = model_reliability
         self.sandbox_executor = sandbox_executor
         self.native_analysis_enabled = native_analysis_enabled is True
@@ -887,39 +894,36 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
 
     async def _authorized_native_call(self, tool_name, tool_input, next_handler, tool_call_id=""):
         from .document_access import DOCUMENT_TOOLS, DocumentAccessError, approved_document_grant
-        from qwenpaw.drivers.mcp_context import mcp_call_metadata, mcp_call_timeout
+        from qwenpaw.drivers.mcp_context import current_mcp_metadata
+        from ..mcp_context import caller_context, stream_with_mcp_metadata
 
+        if self.caller_identity_error:
+            raise GatewayError("可信调用身份无效，本次未执行。", code="UNAUTHORIZED",
+                               failure_metadata={"execution_status": "not_started", "retryable": False})
+        metadata = current_mcp_metadata() or {}
+        if self.caller_identity is not None:
+            metadata["bank_runtime_context"] = caller_context(self.caller_identity)
         raw_name = tool_name.removeprefix("MinerU__")
-        if tool_name != "MinerU__" + raw_name or raw_name not in DOCUMENT_TOOLS:
-            async for item in next_handler():
-                yield item
-            return
-        task_id = getattr(getattr(self.client, "config", None), "task_id", "")
-        file_diag.ledger(task_id, tool_name, tool_input, self.document_reads.documents)
-        if invalid_document_reference_argument(tool_name, tool_input):
-            raise DocumentReferenceArgumentError()
-        if raw_name != "parse_documents" and tool_input.get("document_ref") not in self.document_reads.documents:
-            raise DocumentAccessError()
-        from ..sandbox.executor import AuthorizedReadingExecution
-        execution = AuthorizedReadingExecution(self.sandbox_executor, tool_call_id, raw_name, tool_input) if self.sandbox_executor and tool_call_id else None
-        with approved_document_grant(task_id, raw_name, tool_input, execution=execution) as metadata:
-            with mcp_call_metadata(metadata), mcp_call_timeout(
-                        self.model_reliability.deadline - time.monotonic() if self.model_reliability else None):
-                stream = next_handler()
-            try:
-                while True:
-                    # Reset in the context that set the token BEFORE yielding.
-                    # Consumers may close this generator in a different task.
-                    with mcp_call_metadata(metadata), mcp_call_timeout(
-                        self.model_reliability.deadline - time.monotonic() if self.model_reliability else None):
-                        try:
-                            item = await anext(stream)
-                        except StopAsyncIteration:
-                            break
+        is_document = tool_name == "MinerU__" + raw_name and raw_name in DOCUMENT_TOOLS
+        grant = nullcontext({})
+        remaining = None
+        if is_document:
+            task_id = getattr(getattr(self.client, "config", None), "task_id", "")
+            file_diag.ledger(task_id, tool_name, tool_input, self.document_reads.documents)
+            if invalid_document_reference_argument(tool_name, tool_input):
+                raise DocumentReferenceArgumentError()
+            if raw_name != "parse_documents" and tool_input.get("document_ref") not in self.document_reads.documents:
+                raise DocumentAccessError()
+            from ..sandbox.executor import AuthorizedReadingExecution
+            execution = AuthorizedReadingExecution(self.sandbox_executor, tool_call_id, raw_name, tool_input) if self.sandbox_executor and tool_call_id else None
+            grant = approved_document_grant(task_id, raw_name, tool_input, execution=execution)
+            remaining = lambda: self.model_reliability.deadline - time.monotonic() if self.model_reliability else None
+        with grant as document_metadata:
+            async with aclosing(stream_with_mcp_metadata(
+                next_handler, {**metadata, **document_metadata}, remaining,
+            )) as stream:
+                async for item in stream:
                     yield item
-            finally:
-                with mcp_call_metadata(metadata):
-                    await stream.aclose()
 
     async def on_acting(
         self,
@@ -1567,8 +1571,15 @@ def bank_runtime_middleware_factory(
             no_output_retry_attempts=model_policy.get("no_output_retry_attempts", 1),
             truncation_recovery_attempts=model_policy.get("truncation_recovery_attempts", 1),
         )
+        from ..personalization import parse_trusted_identity
+        identity, identity_error = parse_trusted_identity(
+            getattr(request, "identity_json", None),
+            request_user_id=str(getattr(request, "user_id", "") or ""),
+        )
         return BankRuntimeGatewayMiddleware(
             GatewayClient(config),
+            caller_identity=identity,
+            caller_identity_error=identity_error,
             model_reliability=reliability,
             sandbox_executor=sandbox_executor,
             native_analysis_enabled=bool(sandbox_executor and sandbox_executor.sandbox_context.get('native_analysis_enabled') is True
