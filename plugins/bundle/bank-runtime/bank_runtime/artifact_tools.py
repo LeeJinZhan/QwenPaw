@@ -31,6 +31,17 @@ ARTIFACT_RUNTIME_ACTION_BY_TOOL = {
 ARTIFACT_WORKER_TOOL_NAMES = frozenset(ARTIFACT_RUNTIME_ACTION_BY_TOOL)
 
 
+def has_published_artifact(result: Any) -> bool:
+    """Check Runtime's publication envelope; Shell output is never evidence."""
+    if not isinstance(result, Mapping) or result.get("artifact_status") != "succeeded":
+        return False
+    ids = result.get("generated_file_ids")
+    return (isinstance(ids, list) and bool(ids)
+            and all(isinstance(value, str) and value and value == value.strip()
+                    and not any(ord(char) < 32 for char in value) for value in ids)
+            and len(set(ids)) == len(ids))
+
+
 @dataclass(frozen=True)
 class ArtifactDeliveryIntent:
     """Trusted, structured marker for one required artifact delivery."""
@@ -239,9 +250,16 @@ async def artifact_generate(
 ) -> str:
     """Generate one controlled office, text, or fixed-graphic artifact.
 
+    Use this tool for requested downloadable files, including HTML and SQL.
+    Shell/write_file create private task intermediates, not published files.
+    Only artifact_status=succeeded with valid generated_file_ids confirms delivery.
+    Report each requested file separately; a failed item remains unfinished.
+    Correct validation errors within the retry budget; preserve permission and storage
+    failures instead of switching to Shell or claiming a local path is a download.
+
     Args:
         artifact_type: One of ``docx``, ``xlsx``, ``pptx``, ``csv``,
-            ``markdown``, ``txt``, ``html``, ``png``, ``jpeg``, ``webp``,
+            ``markdown``, ``txt``, ``sql``, ``html``, ``png``, ``jpeg``, ``webp``,
             ``svg`` or explicitly requested ``pdf``.
         title: User-visible artifact title.
         content: Complete artifact body. For DOCX, use a non-empty plain string
@@ -284,6 +302,9 @@ async def artifact_generate(
             instructions, source_refs, delivery_plan and explicit_pdf_request
             are top-level tool parameters outside content. Keep title at the
             top level when correcting an invalid content object.
+            For SQL, pass the complete SQL source string or {"text": "SELECT 1;"}
+            with output_name ending in .sql. It is saved verbatim as UTF-8 text,
+            never executed against a database. Do not wrap the source in fences.
             For HTML, pass a static HTML string or ``{"text": "<h2>标题</h2><p>正文</p>"}``.
             Full html/head/body wrappers and static layout/CSS are supported.
             Do not include script, button, input, forms, event attributes,
@@ -337,7 +358,7 @@ async def artifact_revise(
     output_name: str = "",
     delivery_plan: dict[str, str] | None = None,
 ) -> str:
-    """Create a new version of an existing Runtime-generated Office file.
+    """Create a new version of an existing Runtime-generated artifact file.
 
     Args:
         source_generated_file_id: Runtime-generated source file identifier.

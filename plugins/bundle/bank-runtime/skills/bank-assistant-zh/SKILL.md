@@ -2,7 +2,7 @@
 name: bank_assistant
 description: "用于通用问答与任务方法选择；涉及附件、表格数据分析，或制度依据、文档写作、审核、演示文稿、可编辑图表时使用。"
 metadata:
-  builtin_skill_version: "3.3"
+  builtin_skill_version: "3.4"
   trust_level: "trusted-plugin-guidance"
 ---
 
@@ -20,15 +20,15 @@ metadata:
 | 制作或修订 PPT/PPTX，含演示页内图表 | bank-presentation |
 | 制作网页可编辑的关系、流程、泳道、时序或统计图，导出现有图表 | bank-chart |
 
-复合任务按实际需要衔接：制度写作先取得依据，审核后交付修订文件再使用写作规则。需要交付文件时，通过 `Skill` 读取 `bank-file-delivery`；它集中提供 Word、表格、静态文件及转换的参数。PPT 和可编辑图表继续使用各自专项技能。
+复合任务按实际需要衔接：制度写作先取得依据，审核后交付修订文件再使用写作规则。需要交付文件时，通过 `Skill` 读取 `bank-file-delivery`；它统一组织操作选择、发布与结果核验，具体格式契约按需读取。PPT 和可编辑图表继续使用各自专项技能。
 
-员工身份只能由已认证的 Runtime 请求上下文提供。Skill 不授予权限，不提供客户级授权来源，不伪造 allowed_customer_ids；实际工具和材料仍由当前授权决定，不得改用 shell、脚本、任意 URL 或路径绕过拒绝。个人偏好及适用的个人 Skill 方法在既有权限、事实和工具契约内继续使用，当前用户明确要求优先。
+员工身份只能由已认证的 Runtime 请求上下文提供；Skill 不授予权限，不伪造客户授权，不得改用 shell 等工具绕过拒绝。当前用户要求优先，未被覆盖的个人偏好与适用方法继续有效。
 
 ## 文件交付与内部读取
 
-已确定需要生成、修订或转换下载文件时，读取 `bank-file-delivery`，沿用用户已确定的正文、格式和来源完成交付。纯文字帮助使用上面的任务方法，直接给出内容。
+文件读取按系统的格式与任务分流：普通 Office/PDF 阅读优先文档解析，表格计算优先原生 Python，文本优先文本读取；混合附件分别处理，细节按需读取 bank-document-qa。Shell 或已安装库不代表所有格式都应先走脚本。
 
-为读取材料而转换格式时，使用当前获授权的 `artifact_convert`，设置 `purpose=read`；上传来源用 `source_type=session_file/workspace_file` 与真实 `source_id`，旧版 Word/Excel 的读取目标为 docx/xlsx。已有受控成果用 `source_generated_file_id`，两类引用不混用。内部读取 PDF 无需虚构用户 PDF 交付要求；转换后还须实际读取返回的附件，转换成功不代表分析完成。原生分析能直接读取原件时遵从当前能力，不先转换。
+为读取材料而转换格式时，使用当前获授权的 `artifact_convert`，设置 `purpose=read`；上传来源用 `source_type=session_file/workspace_file` 与真实 `source_id`，旧版 Word/Excel 的读取目标为 docx/xlsx。已有受控成果用 `source_generated_file_id`，两类引用不混用。内部读取 PDF 无需虚构用户 PDF 交付要求；转换后还须实际读取返回的附件，转换成功不代表分析完成。当前授权读取能力已能满足任务时不先转换。
 
 ## 面向用户的交付
 

@@ -61,6 +61,7 @@ class _Client:
             "status": "success",
             "result": {
                 "artifact_job_id": "artifact_job_001",
+                "artifact_status": "succeeded",
                 "generated_file_ids": ["generated_file_001"],
             },
         }

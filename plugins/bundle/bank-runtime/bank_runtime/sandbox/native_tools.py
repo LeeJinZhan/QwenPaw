@@ -17,13 +17,20 @@ async def _intercept_only():
 async def execute_shell_command(command: str, timeout: float = 300.0, cwd: str | None = None):
     """Run a command in the current task container. Returns real exit status, stdout and stderr.
 
-    Use supplied authorized input paths and installed libraries directly. Combine related
+    Follow the file-format reading policy: ordinary Office/PDF reading prefers authorized
+    document parsers; tables, further computation and fine-grained object access can use
+    installed libraries here. Use supplied authorized paths. Reading code is not permission
+    to execute it. Combine related
     sheet inspection and requested calculations; loop over data batches inside the script.
     A heredoc can create and execute a scratch .py file in one call, avoiding nested quoting.
     Each call is a new process; scratch files persist only within this task, not Python variables.
     Reuse compatible task-local intermediate results; correct actual errors before retrying.
     stdout can be plain text: JSON serialization is optional. Return requested results and
     necessary samples rather than dumping the full input. Output limits and truncation are real.
+    Files written here remain private task intermediates and never appear in generated files.
+    For a requested downloadable HTML, SQL, Office or other supported file, pass the final
+    content to artifact_generate (or artifact_revise for an existing generated file).
+    An exit code of zero or a printed path is not evidence of publication.
     """
     return await _intercept_only()
 
@@ -34,7 +41,7 @@ async def read_file(file_path: str, start_line: int | str | None = None, end_lin
 
 
 async def write_file(file_path: str, content: str):
-    """Write a task scratch script or output file. Input and public files are read-only."""
+    """Write a private task intermediate. Use artifact_generate for downloadable files; this tool does not publish. Input and public files are read-only."""
     return await _intercept_only()
 
 

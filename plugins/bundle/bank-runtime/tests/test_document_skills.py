@@ -38,7 +38,10 @@ def test_general_and_writing_native_entries_defer_file_parameters():
         assert 'bank-official-docx-v1' not in content
         assert 'bank-file-delivery' in content
     delivery = asyncio.run(_read_native_skill('bank-file-delivery'))
-    examples = [json.loads(block) for block in re.findall(r'```json\s*\n(.*?)\n```', delivery, re.S)]
+    assert '```json' not in delivery
+    contracts = '\n'.join(asyncio.run(_read_native_skill('bank-file-delivery', f'references/{name}.md'))
+                          for name in ('docx', 'spreadsheet', 'text-formats'))
+    examples = [json.loads(block) for block in re.findall(r'```json\s*\n(.*?)\n```', contracts, re.S)]
     assert {'docx', 'xlsx', 'pdf'} <= {x.get('artifact_type') for x in examples}
     official = next(x for x in examples if x.get('content', {}).get('kind') == 'official_document')
     assert official['content']['layout_version'] == 'bank-official-docx-v1'
@@ -79,14 +82,14 @@ def test_bank_entry_keeps_identity_rules_and_routes_to_document_skills():
     ).read_text()
     assert "artifact_generate" in writing and "artifact_revise" in writing
     assert "template_fill_docx" in writing
-    assert "bank-official-docx-v1" in writing
+    assert "bank-official-docx-v1" in (ROOT / "bank-file-delivery/references/docx.md").read_text()
     assert (
         "generate_official_document" not in writing
         and "send_file_to_user" not in writing
     )
 
 
-async def _read_native_skill(name):
+async def _read_native_skill(name, reference=None):
     import json
     from types import SimpleNamespace
     from agentscope.message import ToolCallBlock
@@ -119,13 +122,16 @@ async def _read_native_skill(name):
     middleware = BankRuntimeGatewayMiddleware(DenyingClient())
     middleware.bind_native_skills(agent)
     engine = GatewayPermissionEngine(Guard(), middleware)
+    payload = {"skill": name}
+    if reference is not None:
+        payload["reference"] = reference
     assert (
         await engine.check_permission(
-            agent.toolkit.builtin_skill_viewer.tool, {"skill": name}
+            agent.toolkit.builtin_skill_viewer.tool, payload
         )
     ).behavior == PermissionBehavior.ALLOW
     call = ToolCallBlock(
-        id="read-document", name="Skill", input=json.dumps({"skill": name})
+        id="read-document", name="Skill", input=json.dumps(payload)
     )
 
     async def execute():
@@ -144,15 +150,18 @@ def test_real_native_viewer_returns_writing_and_delivery_rules_by_skill_name():
     writing = asyncio.run(_read_native_skill("bank-document-writing"))
     assert "用户指定的篇幅" in writing and "bank-file-delivery" in writing
     delivery = asyncio.run(_read_native_skill("bank-file-delivery"))
-    assert "bank-official-docx-v1" in delivery and '"blocks"' in delivery
+    docx = asyncio.run(_read_native_skill("bank-file-delivery", "references/docx.md"))
+    sheets = asyncio.run(_read_native_skill("bank-file-delivery", "references/spreadsheet.md"))
+    assert "bank-official-docx-v1" not in delivery
+    assert "bank-official-docx-v1" in docx and '"blocks"' in docx
     assert "template_fill_docx" in delivery
-    assert "在已确定的公文 DOCX 任务中" in delivery
+    assert "在已确定的公文 DOCX 任务中" in docx
     for name in ("bank-document-review", "bank-document-qa"):
         assert "材料" in asyncio.run(_read_native_skill(name))
     general = asyncio.run(_read_native_skill("bank-assistant-zh"))
     assert "bank-official-docx-v1" not in general
     assert '"slides"' not in general
-    assert '"sheets"' not in general and '"sheets"' in delivery
+    assert '"sheets"' not in general and '"sheets"' in sheets
     qa = asyncio.run(_read_native_skill("bank-document-qa"))
     assert "conversion_report" in qa and "图形语义未核验" in qa
 
@@ -235,7 +244,7 @@ def test_official_document_maintenance_reference_matches_native_delivery_rules()
     links = re.findall(r'\]\(([^)]+)\)', reference)
     assert len(links) == 1
     target = (ROOT / 'bank-document-writing/references' / links[0].split('#')[0]).resolve()
-    assert target == (ROOT / 'bank-file-delivery/SKILL.md').resolve()
+    assert target == (ROOT / 'bank-file-delivery/references/docx.md').resolve()
     assert '## 公文 DOCX 交付' in target.read_text()
     assert '```json' not in reference  # One maintained source for the contract.
 
@@ -263,12 +272,25 @@ def test_native_office_skills_end_with_conditional_public_delivery_guidance():
         assert '未' in delivery
 
 
+def test_native_skills_keep_outcomes_without_canned_answer_templates():
+    import asyncio
+
+    for name in ('bank-assistant-zh', 'bank-file-delivery', 'bank-document-writing',
+                 'bank-document-review', 'bank-document-qa', 'bank-presentation'):
+        content = asyncio.run(_read_native_skill(name))
+        assert content.count('## 面向用户的交付') == 1
+        assert '可答“' not in content, name
+        assert '下文只维护专业方法、必需参数和质量核对' not in content, name
+        assert '不授予' in content
+
+
 def test_native_writing_scope_covers_arbitrary_length_and_document_type():
     import asyncio
     content = asyncio.run(_read_native_skill('bank-document-writing'))
     assert '用户指定的篇幅' in content and '15000' not in content
     assert '关键缺项使任务无法继续' in content
     delivery = asyncio.run(_read_native_skill('bank-file-delivery'))
+    delivery = asyncio.run(_read_native_skill('bank-file-delivery', 'references/docx.md'))
     assert '按实际文种选择 document_type' in delivery
     assert '例如【待填写】或【待核实】' in delivery
     assert '该文件的请示初稿' not in content

@@ -1,12 +1,13 @@
 """Request-local admission for the framework's read-only Skill viewer.
 
 This is context retrieval, not an execution capability or a name-based exemption.
-The installed AgentScope viewer remains responsible for reading registered skills.
+The native viewer retains main reads; its bound extension reads declared references.
 """
 from typing import Any
 
 from agentscope.tool import Toolkit
 from agentscope.tool._builtin._skill import SkillViewer
+from .skill_references import BankSkillViewer, read_reference
 
 
 class NativeSkillReader:
@@ -14,11 +15,17 @@ class NativeSkillReader:
         self.agent = agent
         self.toolkit = agent.toolkit
         self.viewer = getattr(getattr(self.toolkit, "builtin_skill_viewer", None), "tool", None)
+        # Upgrade only the genuine native viewer bound to this exact toolkit.
+        if (type(self.toolkit) is Toolkit and type(self.viewer) is SkillViewer
+                and getattr(self.viewer._get_skills_method, '__self__', None) is self.toolkit
+                and getattr(self.viewer._get_skills_method, '__func__', None) is Toolkit._get_available_skills):
+            self.viewer = BankSkillViewer(self.toolkit._get_available_skills)
+            self.toolkit.builtin_skill_viewer.tool = self.viewer
 
     def recognizes(self, tool: Any) -> bool:
         return (
             type(self.toolkit) is Toolkit
-            and type(tool) is SkillViewer
+            and type(tool) is BankSkillViewer
             and tool.name == "Skill"
             and tool.is_read_only is True
             and tool.is_external_tool is False
@@ -30,7 +37,7 @@ class NativeSkillReader:
         )
 
     async def available(self, payload: dict[str, Any]) -> bool:
-        if not self.recognizes(self.viewer) or set(payload) != {"skill"}:
+        if not self.recognizes(self.viewer) or set(payload) not in ({"skill"}, {"skill", "reference"}):
             return False
         name = payload["skill"]
         if not isinstance(name, str) or not name or len(name) > 256:
@@ -41,7 +48,14 @@ class NativeSkillReader:
             skills = await self.viewer._get_skills_method(groups)
         except Exception:
             return False
-        return resolved is self.viewer and name in skills
+        if resolved is not self.viewer or name not in skills:
+            return False
+        if 'reference' in payload:
+            try:
+                read_reference(skills[name], payload['reference'])
+            except (OSError, ValueError):
+                return False
+        return True
 
     async def visible(self) -> bool:
         if not self.recognizes(self.viewer):
