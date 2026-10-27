@@ -35,6 +35,7 @@ class TrustedBankIdentity:
     role_names: tuple[str, ...] = ()
     assistant_code: str = ""
     assistant_name: str = ""
+    use_data_role_id: int | None = None
 
 
 @dataclass
@@ -203,8 +204,8 @@ def parse_trusted_identity(
     # entitlement source. Any non-empty scope is therefore forged.
     if customer_ids:
         return None, "客户范围未经授权，无法调用银行助手。"
-    # Optional descriptive fields preserve older Runtime requests. Validate
-    # supplied values without deriving permissions or pairing names with codes.
+    # Optional caller fields preserve older Runtime requests. Validate supplied
+    # values without deriving permissions or pairing names with codes.
     def label(value: Any, limit: int) -> str:
         if (not isinstance(value, str) or len(value.strip()) > limit
                 or any(ord(char) < 32 or 127 <= ord(char) <= 159 for char in value)):
@@ -212,6 +213,9 @@ def parse_trusted_identity(
         return value.strip()
 
     try:
+        use_data_role_id = raw.get("useDataRoleId")
+        if "useDataRoleId" in raw and type(use_data_role_id) is not int:
+            raise ValueError("Invalid data role ID")
         org_name = label(raw.get("org_name", ""), 256)
         assistant_code = label(raw.get("assistant_code", raw.get("scenario_code", "")), 128)
         assistant_name = label(raw.get("assistant_name", ""), 128)
@@ -234,6 +238,7 @@ def parse_trusted_identity(
             role_names=role_names,
             assistant_code=assistant_code,
             assistant_name=assistant_name,
+            use_data_role_id=use_data_role_id,
         ),
         "",
     )

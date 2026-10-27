@@ -176,6 +176,7 @@ async def test_denied_tool_never_reaches_execution(monkeypatch):
 @pytest.mark.parametrize("changes", [
     {"user_id": "forged"}, {"role_names": "管理员"}, {"role_names": [False]},
     {"role_names": ["x"] * 65}, {"role_names": ["x\n"]},
+    *({"useDataRoleId": value} for value in (None, True, False, "123", 1.0, 1.5, [], {})),
     {"assistant_name": {}}, {"org_name": "x" * 257},
     {"roles": ["admin"]}, {"allowed_customer_ids": ["customer-1"]},
 ])
@@ -200,6 +201,7 @@ async def test_old_optional_fields_have_empty_defaults(monkeypatch):
         assert context["role_names"] == []
         assert context["assistant_code"] == "assistant-user-a"
         assert context["assistant_name"] == ""
+        assert "useDataRoleId" not in context
         yield ToolResponse(id=call.id, content=[], state=ToolResultState.SUCCESS)
     async for _ in middleware.on_acting(None, {"tool_call": call}, execute):
         pass
@@ -221,4 +223,23 @@ async def test_missing_required_identity_cannot_fall_back_to_outer_metadata(monk
 def test_non_bank_requests_do_not_install_metadata(monkeypatch):
     request = SimpleNamespace(channel="console", identity_json={"user_id": "forged"})
     assert bank_runtime_middleware_factory(SimpleNamespace(request=request), None) is None
+    assert current_mcp_metadata() is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("value", [0, 123, -1])
+async def test_data_role_is_trusted_optional_integer_not_model_argument(monkeypatch, value):
+    middleware, source = make_middleware(monkeypatch, useDataRoleId=value)
+    arguments = {"keyword": "制度", "useDataRoleId": 999}
+    _, call = await admit(middleware, arguments=arguments)
+    source["useDataRoleId"] = 888
+    async def execute():
+        caller = current_mcp_metadata()["bank_runtime_context"]
+        assert caller["useDataRoleId"] == value
+        assert type(caller["useDataRoleId"]) is int
+        assert json.loads(call.input) == arguments
+        yield ToolResponse(id=call.id, content=[], state=ToolResultState.SUCCESS)
+    with mcp_call_metadata({"bank_runtime_context": {"useDataRoleId": 777}}):
+        async for _ in middleware.on_acting(None, {"tool_call": call}, execute):
+            pass
     assert current_mcp_metadata() is None

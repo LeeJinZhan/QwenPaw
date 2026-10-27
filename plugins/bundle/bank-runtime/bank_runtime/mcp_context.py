@@ -21,6 +21,8 @@ def caller_context(identity: TrustedBankIdentity) -> dict[str, Any]:
         "org_name": identity.org_name,
         "assistant_code": identity.assistant_code,
         "assistant_name": identity.assistant_name,
+        **({"useDataRoleId": identity.use_data_role_id}
+           if identity.use_data_role_id is not None else {}),
     }
 
 
