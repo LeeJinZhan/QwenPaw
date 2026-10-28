@@ -348,6 +348,22 @@ def _drain_operations_events(state: DeliveryState) -> list[str]:
     return [_encode({"metadata": {"runtime_event": event}}) for event in events]
 
 
+def _record_model_request(state: DeliveryState, fact: dict[str, Any]) -> None:
+    provider = _operation_code(fact.get("provider_id"))
+    model = _operation_code(fact.get("model_id"))
+    if not provider or not model or not state.trace_id:
+        return
+    state.operations_events.append({
+        "event_type": "model.request.completed", "task_id": state.task_id,
+        "trace_id": state.trace_id, "request_id": fact["request_id"],
+        "provider_id": provider, "model_id": model,
+        **{key: fact[key] for key in (
+            "started_at_utc", "ended_at_utc", "terminal_status", "usage_state",
+            "input_tokens", "output_tokens",
+        )},
+    })
+
+
 async def project_sse_stream(
     source: AsyncIterable[str],
     runtime_task_id: str,
@@ -369,10 +385,13 @@ async def project_sse_stream(
         buffer = ""
         while True:
             from qwenpaw.drivers.mcp_context import observe_mcp_requests
+            from qwenpaw.token_usage.observations import observe_model_requests
 
             try:
                 with delivery_scope(state), observe_mcp_requests(
                     lambda fact: _record_mcp_request(state, fact)
+                ), observe_model_requests(
+                    lambda fact: _record_model_request(state, fact)
                 ):
                     item = await anext(iterator)
             except StopAsyncIteration:

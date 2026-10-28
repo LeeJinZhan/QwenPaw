@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """Model wrapper that records token usage from LLM responses."""
 
+import asyncio
 from datetime import date, datetime, timezone
 from typing import Any, AsyncGenerator, Literal
 
@@ -10,6 +11,7 @@ from agentscope.model._model_usage import ChatUsage
 
 from .buffer import _UsageEvent
 from .manager import get_token_usage_manager
+from .observations import ModelRequestObservation, observe_model_requests
 
 
 class TokenRecordingModelWrapper(ChatModelBase):
@@ -127,7 +129,13 @@ class TokenRecordingModelWrapper(ChatModelBase):
         *args: Any,
         **kwargs: Any,
     ) -> Any:
-        result = await self._model.generate_structured_output(*args, **kwargs)
+        observation = ModelRequestObservation(self._provider_id, self._model.model)
+        try:
+            result = await self._model.generate_structured_output(*args, **kwargs)
+        except BaseException as error:
+            observation.finish(None, "cancelled" if isinstance(error, asyncio.CancelledError) else "error")
+            raise
+        observation.finish(getattr(result, "usage", None), "success")
         self._record_usage(getattr(result, "usage", None))
         return result
 
@@ -152,25 +160,41 @@ class TokenRecordingModelWrapper(ChatModelBase):
         if tool_choice == "auto":
             tool_choice = None
 
-        result = await self._model(
-            messages=messages,
-            tools=tools,
-            tool_choice=tool_choice,
-            **kwargs,
-        )
+        observation = ModelRequestObservation(self._provider_id, self._model.model)
+        try:
+            result = await self._model(
+                messages=messages,
+                tools=tools,
+                tool_choice=tool_choice,
+                **kwargs,
+            )
+        except BaseException as error:
+            observation.finish(None, "cancelled" if isinstance(error, asyncio.CancelledError) else "error")
+            raise
 
         if isinstance(result, AsyncGenerator):
-            return self._wrap_stream(result)
+            return self._wrap_stream(result, observation)
+        observation.finish(getattr(result, "usage", None), "success")
         self._record_usage(getattr(result, "usage", None))
         return result
 
     async def _wrap_stream(
         self,
         stream: AsyncGenerator[ChatResponse, None],
+        observation: ModelRequestObservation | None = None,
     ) -> AsyncGenerator[ChatResponse, None]:
         last_usage: ChatUsage | None = None
-        async for chunk in stream:
-            if getattr(chunk, "usage", None) is not None:
-                last_usage = chunk.usage
-            yield chunk
-        self._record_usage(last_usage)
+        status = "error"
+        try:
+            async for chunk in stream:
+                if getattr(chunk, "usage", None) is not None:
+                    last_usage = chunk.usage
+                yield chunk
+            status = "success"
+            self._record_usage(last_usage)
+        except (asyncio.CancelledError, GeneratorExit):
+            status = "cancelled"
+            raise
+        finally:
+            if observation is not None:
+                observation.finish(last_usage, status)
