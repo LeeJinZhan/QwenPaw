@@ -65,7 +65,7 @@ def test_ordinary_question_and_visible_artifact_tool_do_not_load_delivery_or_rec
                'tools': [{'type': 'function', 'function': {'name': 'artifact_generate'}}]}
     before = deepcopy(request)
     prepared = prepare_public_model_context(request)
-    assert '文件已生成，可在文件卡片中打开或下载。' not in rules(prepared)
+    assert '本轮文件交付：' not in rules(prepared)
     assert 'retryable=false' not in rules(prepared)
     assert '未约定文件或图表交付时，在对话中直接给出实质内容' in rules(prepared)
     assert '仅选择内容、措辞或结构时，调整相应内容' in rules(prepared)
@@ -107,7 +107,7 @@ def test_current_execution_is_not_a_delivery_requirement_and_keeps_recovery(stat
 def test_old_artifact_error_does_not_reactivate_delivery_context():
     history = [UserMsg('user', '制作文件'), operation(ToolResultState.ERROR), UserMsg('user', '先解释术语')]
     prepared = prepare_public_model_context({'messages': history, 'tools': []})
-    assert '文件已生成，可在文件卡片中打开或下载。' not in rules(prepared)
+    assert '本轮文件交付：' not in rules(prepared)
     assert 'retryable=false' not in rules(prepared)
     assert prepared['messages'][2].content == history[1].content
 
@@ -181,5 +181,6 @@ async def test_trusted_delivery_intent_activates_delivery_before_first_call():
     async def capture(**kwargs):
         return kwargs
     prepared = await middleware.on_model_call(None, {'messages': [UserMsg('user', '开始')], 'tools': []}, capture)
-    assert '文件已生成，可在文件卡片中打开或下载。' in rules(prepared)
+    assert '本轮文件交付：' in rules(prepared)
+    assert '未确认时不宣称成功' in rules(prepared)
     assert 'retryable=false' not in rules(prepared)

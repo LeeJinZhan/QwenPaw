@@ -590,6 +590,7 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
             from .native_analysis import model_file_context
             input_kwargs = prepare_public_model_context(
                 input_kwargs,
+                caller_identity=self.caller_identity if not self.caller_identity_error else None,
                 delivery_required=self.artifact_intent is not None,
                 recovering=bool(read_error or self.artifact_recovery.pending_count),
                 project_file_history=self.native_analysis_enabled,
@@ -1119,6 +1120,12 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
                     tool_name,
                     tool_input,
                 )
+                if tool_name in ARTIFACT_WORKER_TOOL_NAMES and result.get("status") == "success":
+                    from ..artifact_tools import has_published_artifact
+                    if not has_published_artifact(result.get("result")):
+                        result = {"status": "failed", "error_code": "ARTIFACT_PUBLISH_INCOMPLETE",
+                                  "retryable": False, "result": {"artifact_status": "failed",
+                                  "message": "未取得有效的文件发布结果，不能确认交付；请核对文件列表后再处理。"}}
                 if result.get("status") != "success":
                     self._remember_conversion_failure(tool_name, tool_input, conversion_reason(result))
                 code = str(result.get("error_code") or "")
@@ -1350,8 +1357,11 @@ class GatewayPermissionEngine:
         if reader is not None and reader.recognizes(tool):
             if not await reader.available(tool_input):
                 return _deny("当前技能说明不可用。")
+            input_hash = canonical_payload_hash(tool_input)
             decision = await self.delegate.check_permission(tool, tool_input)
-            if decision.behavior != PermissionBehavior.ALLOW:
+            if (decision.behavior != PermissionBehavior.ALLOW
+                    or canonical_payload_hash(tool_input) != input_hash
+                    or not await reader.available(tool_input)):
                 return _deny("当前技能说明不可用。")
             self.middleware.prepare("Skill", tool_input, {}, native_skill=True)
             return decision

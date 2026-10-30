@@ -57,8 +57,9 @@ async def test_document_schema_guidance_precedes_user_facing_answer_guidance():
     assert request == before
     texts = [msg.get_text_content() for msg in prepared["messages"]]
     assert "本轮回答约定" in texts[-1]
-    assert "参数说明" in texts[-1]
-    assert "文件已生成，可在文件卡片中打开或下载。" in texts[-1]
+    assert "本轮文件交付：" in texts[-1]
+    assert "未确认时不宣称成功" in texts[-1]
+    assert "Saving a temporary file is not publication." in texts[0]
     assert any("bank-official-docx-v1" in text for text in texts[:-1])
     assert any("delivery_plan" in text for text in texts[:-1])
 
@@ -232,10 +233,12 @@ async def test_followup_contract_reaches_current_model_request_after_history(mod
     normalized = normalize_system_messages(wire)
     assert [m['role'] for m in normalized] == ['system', 'user', 'assistant', 'user']
     assert '<bank_followups>' in str(normalized[0]['content'])
-    assert '用户点击后原样作为下一轮消息发送' in str(normalized[0]['content'])
-    assert '短动作式选项' in str(normalized[0]['content'])
-    assert '每条直接说明要执行的动作和对象' in str(normalized[0]['content'])
-    assert '动作＋明确对象或范围' in str(normalized[0]['content'])
-    assert '点击后能直接发起下一步' in str(normalized[0]['content'])
+    assert '点击后作为下一轮用户请求' in str(normalized[0]['content'])
+    assert '用户视角的短请求' in str(normalized[0]['content'])
+    assert '每条写明确动作和对象' in str(normalized[0]['content'])
+    assert '每条2至80字' in str(normalized[0]['content'])
+    assert '不含问号、征询意愿' in str(normalized[0]['content'])
+    assert '它不是工具调用或已授权的新任务' in str(normalized[0]['content'])
+    assert '不重复已完成内容' in str(normalized[0]['content'])
     assert '业务问题本身可以是是非问句' not in str(normalized[0]['content'])
     assert normalized[-1]['content'] == wire[-2]['content']

@@ -370,7 +370,9 @@ def test_skill_requires_structured_runtime_tools_and_no_shell_fallback() -> None
     ):
         assert tool_name in skill
     assert "不得改用 shell" in skill
-    assert "仅明确要求交付 PDF" in skill and "explicit_pdf_request=true" in skill
+    assert "references/text-formats.md" in skill
+    text_formats = (PLUGIN_ROOT / "skills/bank-file-delivery/references/text-formats.md").read_text()
+    assert "仅明确要求交付 PDF" in text_formats and "explicit_pdf_request=true" in text_formats
 
 
 def test_request_security_overlay_does_not_assign_file_delivery() -> None:

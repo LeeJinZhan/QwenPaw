@@ -60,7 +60,7 @@ async def test_streamable_http_sdk_receives_per_call_context_with_shared_connect
             assert set(tools[0].inputSchema["properties"]) == {"keyword"}
 
             async def invoke(user):
-                middleware, _ = make_middleware(monkeypatch, user)
+                middleware, _ = make_middleware(monkeypatch, user, **({"useDataRoleId": 0} if user == "a" else {}))
                 _, call = await admit(middleware, name="Business__inspect_caller", arguments={"keyword": user})
                 async def execute():
                     response = await client.call_tool("inspect_caller", {"keyword": user})
@@ -78,6 +78,9 @@ async def test_streamable_http_sdk_receives_per_call_context_with_shared_connect
                 assert by_keyword[user]["assistant_code"] == "assistant-" + user
                 assert by_keyword[user]["org_name"] == "测试机构"
                 assert by_keyword[user]["role_names"] == ["客户经理", "业务主管"]
+            assert by_keyword["a"]["useDataRoleId"] == 0
+            assert type(by_keyword["a"]["useDataRoleId"]) is int
+            assert "useDataRoleId" not in by_keyword["b"]
             assert by_keyword["ordinary"] == {}
             calls = [body for body in bodies if body.get("method") == "tools/call"]
             assert len(calls) == 3

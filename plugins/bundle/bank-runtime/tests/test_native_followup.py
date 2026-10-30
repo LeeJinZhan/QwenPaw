@@ -119,8 +119,10 @@ async def test_sdk_formatted_followup_has_final_history_without_execution_narrat
     assert '先读取原件，再修正脚本。' not in str(after)
     assert '最终分析结果：当前仅确认两个工作表。' in str(after)
     assert '其余工作表尚未读取。' in str(after)
-    assert '内部临时数据' in str(after)
-    assert '最终正文只给当前要求的结果' in str(after)
+    assert 'private temporary work, not user' in str(after)
+    assert 'Saving a temporary file is not publication.' in str(after)
+    assert 'Give current results, relevant evidence and' in str(after)
+    assert 'Do not replay earlier stage messages' in str(after)
     assert history[1].content[0].text == '先读取原件，再修正脚本。'
 
 
