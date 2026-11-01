@@ -9,6 +9,33 @@ from bank_runtime.personalization import preferred_method_prompt
 from qwenpaw.agents.skill_system.store import build_skill_metadata
 
 
+def test_purchase_skill_declares_comparison_in_versioned_source(tmp_path):
+    key = "bank-procurement-review"
+    source = Path(__file__).resolve().parents[1] / "skills" / key / "SKILL.md"
+    folder = tmp_path / "skills" / key
+    folder.mkdir(parents=True)
+    doc = folder / "SKILL.md"
+    markdown = source.read_text(encoding="utf-8")
+    doc.write_text(markdown, encoding="utf-8")
+    entry = dict(enabled=True, channels=["bank-runtime"], metadata=build_skill_metadata(key, folder, source="customized"))
+    (tmp_path / "skill.json").write_text(json.dumps({"skills": {key: entry}}), encoding="utf-8")
+    assert method_catalog.native_catalog(tmp_path)[0]["display_name"] == "采购评审"
+    sections = method_catalog.native_catalog(tmp_path)[0]["background_material_sections"]
+    assert {"商务文件", "技术标"} <= set(sections)
+    # Catalog metadata is projected without following references. An edit takes
+    # effect even before a manifest refresh.
+    doc.write_text(markdown.replace("background_material_sections:", "previous_sections:") +
+                   "\n[missing](references/not-installed.md)", encoding="utf-8")
+    assert "background_material_sections" not in method_catalog.native_catalog(tmp_path)[0]
+    doc.write_text(markdown, encoding="utf-8")
+    active = method_catalog.native_document(tmp_path, key)
+    assert active["background_group_comparison"] is True
+    doc.write_text(markdown.replace("background_group_comparison: true", 'background_group_comparison: "false"'), encoding="utf-8")
+    edited = method_catalog.native_document(tmp_path, key)
+    assert edited["background_group_comparison"] is False
+    assert active["version"] != edited["version"]
+
+
 def test_catalog_projects_declared_names_and_official_titles_without_changing_ids(tmp_path):
     titles = {
         "bank-assistant-zh": "通用助手", "bank-chart": "图表与关系可视化",
