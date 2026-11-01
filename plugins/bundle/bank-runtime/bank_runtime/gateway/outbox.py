@@ -1,4 +1,4 @@
-"""Bounded, content-free outbox for Runtime result callbacks."""
+"""Bounded result callbacks, including optional short-lived knowledge snapshots."""
 
 from __future__ import annotations
 
@@ -22,7 +22,7 @@ OUTBOX_STATUSES = frozenset(
 
 
 class GatewayResultOutbox:
-    """Persist callback metadata only; never retry tool execution."""
+    """Persist callback receipts; never retry tool execution or store raw MCP output."""
 
     def __init__(
         self,
@@ -52,6 +52,7 @@ class GatewayResultOutbox:
         duration_ms: int,
         error_code: str = "",
         protocol: dict[str, str] | None = None,
+        knowledge_sources: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         normalized_status = str(status or "").strip()
         if normalized_status not in OUTBOX_STATUSES:
@@ -72,6 +73,13 @@ class GatewayResultOutbox:
             "created_at_epoch": timestamp,
             "updated_at_epoch": timestamp,
         }
+        if knowledge_sources is not None:
+            if normalized_status != "completed" or not isinstance(knowledge_sources, list) or len(knowledge_sources) > 20:
+                raise ValueError("invalid knowledge snapshot")
+            if len(json.dumps(knowledge_sources, ensure_ascii=False).encode()) > 65536:
+                raise ValueError("knowledge snapshot too large")
+            record["knowledge_sources"] = knowledge_sources
+            record["knowledge_expires_at_epoch"] = timestamp + 300
         self._atomic_write(self._path(safe_task, safe_call), record)
         return record
 
@@ -80,6 +88,10 @@ class GatewayResultOutbox:
         records: list[dict[str, Any]] = []
         for path in sorted(self.root.glob(f"{safe_task}--*.json")):
             record = self._read(path)
+            if record and "knowledge_sources" in record and record.get("knowledge_expires_at_epoch", 0) <= time.time():
+                record.pop("knowledge_sources", None)
+                record.pop("knowledge_expires_at_epoch", None)
+                self._atomic_write(path, record)
             if record and record.get("task_id") == safe_task:
                 records.append(record)
         return records
@@ -133,11 +145,8 @@ class GatewayResultOutbox:
     @staticmethod
     def _atomic_write(path: Path, record: dict[str, Any]) -> None:
         temporary = path.with_suffix(f".tmp-{os.getpid()}-{id(record)}")
-        temporary.write_text(
-            json.dumps(record, ensure_ascii=False, sort_keys=True),
-            encoding="utf-8",
-        )
-        os.chmod(temporary, 0o600)
+        with os.fdopen(os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w", encoding="utf-8") as handle:
+            json.dump(record, handle, ensure_ascii=False, sort_keys=True)
         os.replace(temporary, path)
 
 

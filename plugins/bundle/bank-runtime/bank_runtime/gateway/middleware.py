@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from .knowledge_sources import is_knowledge_tool, extract_knowledge_sources, citation_result
+
 from collections import defaultdict, deque
 from collections.abc import AsyncGenerator, Callable
 from dataclasses import dataclass
@@ -949,6 +951,10 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
                             if item.state == ToolResultState.INTERRUPTED
                             else failure_message()
                         )
+                        if is_knowledge_tool(name) and item.state == ToolResultState.ERROR:
+                            _, knowledge_error = extract_knowledge_sources(item.content)
+                            message = ("缺少有效可读范围，知识库检索未执行，请联系管理员检查授权。"
+                                       if knowledge_error == "MISSING_SCOPE" else "知识库检索未完成，请稍后重试。")
                         item.content = [TextBlock(type="text", text=message)]
                     yield item
         except asyncio.CancelledError:
@@ -1236,12 +1242,26 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
                             reason = result_error(item.content)
                             if reason:
                                 status, error_code = "failed", reason
-                        await self.client.report_result(
+                        knowledge_sources = None
+                        if is_knowledge_tool(tool_name) and status == "completed":
+                            knowledge_sources, knowledge_error = extract_knowledge_sources(item.content)
+                            if knowledge_error:
+                                status, error_code = "failed", knowledge_error
+                                knowledge_sources = None
+                                item.state = ToolResultState.ERROR
+                                item.content = [TextBlock(text=json.dumps({"code": 1, "error_code": error_code,
+                                    "hint": "缺少有效可读范围，请联系管理员检查授权。" if error_code == "MISSING_SCOPE" else "知识库检索未完成，请稍后重试。"}, ensure_ascii=False))]
+                        acknowledgement = await self.client.report_result(
                             tool_call_id,
                             status,
                             _duration_ms(started_at),
                             error_code,
+                            **({"knowledge_sources": knowledge_sources} if knowledge_sources is not None else {}),
                         )
+                        if knowledge_sources is not None:
+                            registered = acknowledgement.get("knowledge_sources")
+                            if isinstance(registered, list) and acknowledgement.get("status") == "completed":
+                                item.content = [TextBlock(text=citation_result(registered))]
                         result_reported = True
                     elif (
                         isinstance(item, ToolChunk)

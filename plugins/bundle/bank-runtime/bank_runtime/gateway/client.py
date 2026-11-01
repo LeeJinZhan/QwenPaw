@@ -298,6 +298,8 @@ class GatewayClient:
         status: str,
         duration_ms: int,
         error_code: str = "",
+        *,
+        knowledge_sources: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         protocol = {
             "protocol_version": PROTOCOL_VERSION,
@@ -316,6 +318,7 @@ class GatewayClient:
             "duration_ms": max(int(duration_ms), 0),
             "error_code": str(error_code or "")[:128],
             **protocol,
+            **({"knowledge_sources": knowledge_sources} if knowledge_sources is not None else {}),
         }
         last_error: Exception | None = None
         for attempt in range(_RESULT_ATTEMPTS):
@@ -338,6 +341,7 @@ class GatewayClient:
             duration_ms=duration_ms,
             error_code=error_code,
             protocol=protocol,
+            knowledge_sources=knowledge_sources,
         )
         return {
             "tool_call_id": str(tool_call_id),
@@ -413,6 +417,7 @@ class GatewayClient:
                     "duration_ms": max(int(record.get("duration_ms") or 0), 0),
                     "error_code": str(record.get("error_code") or "")[:128],
                     **dict(protocol),
+                    **({"knowledge_sources": record["knowledge_sources"]} if "knowledge_sources" in record else {}),
                 }
             )
             if response.get("tool_call_id") != record.get("tool_call_id"):
