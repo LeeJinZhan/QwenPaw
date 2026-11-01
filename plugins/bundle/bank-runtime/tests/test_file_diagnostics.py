@@ -59,7 +59,7 @@ def test_source_wrapper_preserves_result_and_exception(tmp_path, monkeypatch):
     assert 'PRIVATE BODY' not in (tmp_path/'events.jsonl').read_text()
 
 
-def test_grants_expose_comparison_without_changing_authorization(tmp_path,monkeypatch):
+def test_release_grants_preserve_authorization_without_diagnostic_recording(tmp_path,monkeypatch):
     from bank_runtime.gateway.document_access import approved_document_grant,consume_document_call,DocumentAccessError
     monkeypatch.setattr(diag,'ROOT',tmp_path); arm(tmp_path)
     args={'document_ref':'dr1_private'}
@@ -69,12 +69,9 @@ def test_grants_expose_comparison_without_changing_authorization(tmp_path,monkey
         # Original single-use rejection behavior is retained.
         with pytest.raises(DocumentAccessError):
             with consume_document_call(metadata,'read_document_chunks',args): pass
-    events=[json.loads(s) for s in (tmp_path/'events.jsonl').read_text().splitlines()]
-    consumes=[e for e in events if e['stage']=='grant.consume']
-    assert consumes[0]['checks']['grant_found'] is True
-    assert consumes[0]['checks']['arguments_match'] is False
-    assert consumes[1]['checks']['grant_found'] is False
-    assert 'dr1_private' not in json.dumps(events)
+    # The sealed release retires these hooks even if an old control file exists.
+    # The permission and single-use rejection assertions above remain required.
+    assert not (tmp_path/'events.jsonl').exists()
 
 
 @pytest.mark.asyncio

@@ -177,3 +177,16 @@ def prepare_public_model_context(
                               ('\n' + file_context if file_context else '') +
                               "\n本轮可调用入口：" + json.dumps(names, ensure_ascii=False) + "\n\n" + FOLLOWUP_GUIDANCE))
     return {**request, "messages": messages}
+
+
+def with_system_guidance(messages, guidance):
+    """Keep trusted per-call guidance in the initial system message."""
+    messages = list(messages)
+    if messages and messages[0].role == "system":
+        first = copy(messages[0])
+        first.content = [TextBlock(text=first.get_text_content() + "\n\n" + guidance),
+                         *(block for block in first.content if not isinstance(block, TextBlock))]
+        messages[0] = first
+    else:
+        messages.insert(0, SystemMsg(name="system", content=guidance))
+    return messages

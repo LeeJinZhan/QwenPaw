@@ -36,7 +36,6 @@ from .personal_skills import PersonalSkillReader
 from .history_recall import CurrentSessionHistoryReader, RECALL_GUIDANCE
 from .completion import operation_keys, parse_outcomes
 from .document_reads import DocumentReadLedger, result_error, is_read_recovery_tool
-from . import file_diagnostics as file_diag
 from .document_inputs import normalize_document_input, document_call_argument_hint
 from .document_preparation import DocumentSourcePreparation
 from .document_access import DocumentAccessError, DocumentReferenceArgumentError, invalid_document_reference_argument
@@ -676,17 +675,13 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
             for schema in visible_tools
         ]
         retry["tool_choice"] = ToolChoice(mode="required", tools=allowed_names)
-        retry["messages"] = [
-            *list(input_kwargs.get("messages") or []),
-            SystemMsg(
-                name="system",
-                content=(
-                    "This request requires an actual governed artifact delivery. "
-                    "Call exactly one available artifact tool now. Do not claim a "
-                    "file was created in text and do not emit scripts or tutorials."
-                ),
-            ),
-        ]
+        from ..model_context import with_system_guidance
+        retry["messages"] = with_system_guidance(
+            input_kwargs.get("messages") or [],
+            "This request requires an actual governed artifact delivery. "
+            "Call exactly one available artifact tool now. Do not claim a "
+            "file was created in text and do not emit scripts or tutorials.",
+        )
         replacement = await self._capture_artifact_proposal(
             retry, next_handler, original_handler, state,
         )
@@ -806,15 +801,12 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
                          for gap in self.document_reads.unfinished_scopes()]}
 
     def document_input(self, tool_name, tool_input):
-        task_id = getattr(getattr(self.client, "config", None), "task_id", "")
-        file_diag.emit(task_id, 'gateway.raw', tool=tool_name, arguments=tool_input)
         partial = self._partial_report(tool_name, tool_input)
         if partial is not None:
             return partial
-        normalized = normalize_document_input(tool_name, tool_input,
-            task_id=task_id, ledger=self.document_reads)
-        file_diag.emit(task_id, 'gateway.normalized', tool=tool_name, arguments=normalized)
-        return normalized
+        return normalize_document_input(tool_name, tool_input,
+            task_id=getattr(getattr(self.client, "config", None), "task_id", ""),
+            ledger=self.document_reads)
 
     def reject_document_preflight(self, name, payload, code):
         from .document_access import DOCUMENT_TOOLS
@@ -910,7 +902,6 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
         remaining = None
         if is_document:
             task_id = getattr(getattr(self.client, "config", None), "task_id", "")
-            file_diag.ledger(task_id, tool_name, tool_input, self.document_reads.documents)
             if invalid_document_reference_argument(tool_name, tool_input):
                 raise DocumentReferenceArgumentError()
             if raw_name != "parse_documents" and tool_input.get("document_ref") not in self.document_reads.documents:
