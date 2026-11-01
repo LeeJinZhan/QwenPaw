@@ -3,6 +3,7 @@
 References are instruction resources, never a general filesystem capability.
 The Skill directory comes from the native registry, not a model-supplied path.
 """
+import hashlib
 import os
 import re
 import stat
@@ -63,7 +64,18 @@ class BankSkillViewer(SkillViewer):
 
     async def call(self, skill, _agent_state, reference=None):
         if reference is None:
-            return await super().call(skill, _agent_state)
+            result = await super().call(skill, _agent_state)
+            if result.state != ToolResultState.ERROR and result.content:
+                from ..delivery_state import current_delivery_state
+
+                state = current_delivery_state()
+                if state is not None:
+                    state.operations_events.append({
+                        "event_type": "native_skill.activated", "task_id": state.task_id,
+                        "skill_id": skill, "result": "activated",
+                        "content_hash": hashlib.sha256(result.content[0].text.encode()).hexdigest(),
+                    })
+            return result
         skills = await self._get_skills_method(_agent_state.tool_context.activated_groups)
         target = skills.get(skill)
         try:

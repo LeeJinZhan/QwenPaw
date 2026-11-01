@@ -90,6 +90,8 @@ def build_ingress_router() -> APIRouter:
     router.include_router(build_classification_router())
     from .content_review import build_content_review_router
     router.include_router(build_content_review_router())
+    from .method_catalog import catalog_router
+    router.include_router(catalog_router())
 
     @router.get("/health")
     @router.get("/agents/{agent_id}/health")
