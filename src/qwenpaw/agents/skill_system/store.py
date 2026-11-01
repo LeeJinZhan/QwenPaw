@@ -773,8 +773,17 @@ def _build_skill_metadata_from_post(
     protected: bool = False,
 ) -> dict[str, Any]:
     requirements = _extract_requirements(post)
+    display_name = post.get("display_name")
+    if not display_name:
+        # Older workspace skills sometimes use a human-readable frontmatter
+        # name alongside a separate, stable ASCII directory identifier.
+        declared = post.get("name")
+        if isinstance(declared, str) and not re.fullmatch(r"[A-Za-z0-9_.-]+", declared):
+            display_name = declared
+    label = display_name.strip() if isinstance(display_name, str) else ""
     return {
         "name": skill_name,
+        **({"display_name": label} if 0 < len(label) <= 128 and label.isprintable() else {}),
         "description": str(post.get("description", "") or ""),
         "version_text": extract_version(post),
         "emoji": _extract_emoji_from_metadata(post.get("metadata", {})),
