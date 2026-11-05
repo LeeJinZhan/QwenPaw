@@ -14,6 +14,22 @@ DELIVERY_PARTIAL_NOTICE = "转换结果仅保留原文件的部分内容，部�
 PARTIAL_NOTICE = "以下仅总结已读取的部分内容；部分嵌入对象、附件或外部资源未读取，不代表原文件完整内容，也不能用于全量统计。"
 
 
+def validate_revision_report(value):
+    """Project only the bounded calculation facts emitted by the patch worker."""
+    if not isinstance(value, Mapping) or set(value) != {
+        'changed_cells', 'appended_rows', 'calculation', 'refresh_required'
+    }:
+        return None
+    from .office_assets import execution_budget
+    maximum = execution_budget('patch')['max_cells']
+    if (type(value['changed_cells']) is not int or not 1 <= value['changed_cells'] <= maximum
+            or type(value['appended_rows']) is not int or not 0 <= value['appended_rows'] <= maximum
+            or value['calculation'] not in ('on_open', 'not_needed')
+            or type(value['refresh_required']) is not bool):
+        return None
+    return dict(value)
+
+
 def validate_conversion_report(value):
     if (not isinstance(value, Mapping)
             or set(value) - {"provenance"} != {"schema_version", "coverage", "editable", "warnings", "objects"}
@@ -138,6 +154,11 @@ class ConversionCoverage:
     def notice(self):
         if self.visual_unverified and not self.partial:
             return VISUAL_NOTICE
+        uncertain = [report for report in self.reports.values() if report['coverage'] == 'partial']
+        if uncertain and not self.visual_unverified and all(
+                report.get('provenance', {}).get('engine') == 'libreoffice'
+                and not report['warnings'] and not report['objects'] for report in uncertain):
+            return '转换副本已生成，原件保留；转换前后的内容、版式、公式及复杂对象一致性尚未核验，不能宣称无损转换或完整读取，请核对关键数据。'
         notice = PARTIAL_NOTICE if self.partial_read else DELIVERY_PARTIAL_NOTICE
         if self.visual_unverified:
             notice += "已保留的静态图形语义仍未核验。"

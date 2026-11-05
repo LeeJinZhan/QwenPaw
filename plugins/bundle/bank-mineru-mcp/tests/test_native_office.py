@@ -6,6 +6,43 @@ from docx import Document
 from pptx import Presentation
 
 
+@pytest.mark.parametrize('flags,encrypted,obfuscated', [(0x8000, False, False),
+    (0x8100, True, True), (0x0100, True, False)])
+def test_doc_fib_ignores_obfuscation_only_for_unencrypted_document(tmp_path, monkeypatch, flags, encrypted, obfuscated):
+    import struct
+    import docvortex
+    from docvortex.analyzers.native.office.doc import doc_converter
+    from bank_mineru_mcp.native_office import extract_native_office
+    source = tmp_path / 'flags.doc'
+    source.write_bytes(b'test parser boundary')
+    fib = bytearray(160)
+    struct.pack_into('<HH', fib, 0, 0xA5EC, 0xC1)
+    struct.pack_into('<H', fib, 10, flags)
+    original = doc_converter.parse_fib
+    def parse(*args, **kwargs):
+        base = doc_converter.parse_fib(bytes(fib)).base
+        assert base.encrypted is encrypted
+        assert base.obfuscated is obfuscated
+        raise RuntimeError('stop after FIB check')
+    monkeypatch.setattr(docvortex, 'parse', parse)
+    with pytest.raises(RuntimeError, match='stop after FIB check'):
+        extract_native_office(source, tmp_path / 'work', max_bytes=1024**2)
+    assert doc_converter.parse_fib is original
+
+
+def test_rtf_content_in_doc_keeps_original_and_uses_native_reader(tmp_path):
+    from bank_mineru_mcp.native_office import extract_native_office
+    source = tmp_path / 'word.doc'
+    content = br'{\rtf1\ansi\deff0 {\fonttbl {\f0 Arial;}}\f0 RTF document 123.45\par Second paragraph.}'
+    source.write_bytes(content)
+    result = extract_native_office(source, tmp_path / 'work', max_bytes=1024**2)
+    assert 'RTF document 123.45' in result['markdown']
+    assert 'Second paragraph.' in result['markdown']
+    assert source.read_bytes() == content
+    assert result['source_inventory']['format'] == '.doc'
+    assert result['coverage']['embedded_objects'] == 'unknown'
+
+
 @pytest.mark.parametrize('max_images,exported,limited', [(200,200,True), (250,201,False)])
 def test_image_export_count_limit_preserves_native_text_and_reports_gap(tmp_path, monkeypatch, max_images, exported, limited):
     import io

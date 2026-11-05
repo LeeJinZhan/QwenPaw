@@ -13,6 +13,7 @@ import json
 from datetime import date, datetime, time
 from pathlib import Path
 from typing import Any, Iterable
+from .office_formats import office_parser_format
 
 BLOCK_ROWS = 200
 CHUNK_SIM_ROWS = 25
@@ -34,6 +35,19 @@ class SourceRow(list):
 def extract_workbook(path: Path, target_dir: Path, *, stem: str,
                      max_bytes: int = 2 * 1024**3, allow_partial: bool = False,
                      header_row: int = 1) -> dict[str, Any]:
+    from .office_read_copy import passive_office_copy
+    if path.suffix.lower() in {'.xls', '.xlsx'}:
+        with passive_office_copy(path) as (reading_path, external_count):
+            result = _extract_workbook(reading_path, target_dir, stem=stem,
+                max_bytes=max_bytes, allow_partial=allow_partial, header_row=header_row)
+            if external_count:
+                result['excluded'].append('external_resources')
+            return result
+    return _extract_workbook(path, target_dir, stem=stem, max_bytes=max_bytes,
+        allow_partial=allow_partial, header_row=header_row)
+
+
+def _extract_workbook(path, target_dir, *, stem, max_bytes, allow_partial, header_row):
     """Spool one sheet at a time; neither rows nor column values accumulate."""
     target_dir.mkdir(parents=True, exist_ok=True)
     headers = header_row if isinstance(header_row, dict) else {"*": header_row}
@@ -41,6 +55,10 @@ def extract_workbook(path: Path, target_dir: Path, *, stem: str,
             type(value) is not int or not 0 <= value <= 1_048_576 for name, value in headers.items())):
         raise SpreadsheetExtractError("DOCUMENT_ARGUMENT_INVALID", "Invalid header row")
     suffix = path.suffix.lower()
+    if suffix in {'.xls', '.xlsx'}:
+        suffix = office_parser_format(path)
+        if suffix not in {'.xls', '.xlsx'}:
+            raise SpreadsheetExtractError('FILE_TYPE_UNSUPPORTED', 'Office content is not a workbook')
     csv.field_size_limit(max_bytes)
     if suffix in {".csv", ".tsv"}:
         sheets = _stream_delimited(path, suffix)

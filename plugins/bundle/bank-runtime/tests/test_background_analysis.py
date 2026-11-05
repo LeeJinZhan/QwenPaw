@@ -143,6 +143,34 @@ def test_background_rejects_cross_agent_and_masks_provider_errors(monkeypatch):
     assert client.post(path, json=request_body(), headers=headers).status_code == 413
 
 
+@pytest.mark.parametrize("status", [400, 401, 403, 404, 422, 429, 500, 503])
+def test_background_failure_logs_upstream_status_and_correlation(monkeypatch, caplog, status):
+    from bank_runtime import background_analysis as batch
+    import httpx
+    import openai
+
+    monkeypatch.setenv("QWENPAW_SERVICE_TOKEN", "batch-test")
+    monkeypatch.setattr(batch, "require_production_readiness", lambda: None)
+
+    async def unavailable(*_):
+        response = httpx.Response(status, request=httpx.Request("POST", "http://private-host/?key=secret"))
+        raise openai.APIStatusError("private-provider-message", response=response,
+                                    body={"error": "private-material"})
+
+    monkeypatch.setattr(batch, "analyze", unavailable)
+    app = FastAPI()
+    app.include_router(batch.build_background_analysis_router())
+    with caplog.at_level("WARNING", logger=batch.__name__):
+        response = TestClient(app).post("/agents/a/background-analysis", json=request_body(),
+            headers={"Authorization": "Bearer batch-test", "X-Agent-Id": "a"})
+    assert response.status_code == 503
+    assert response.json() == {"detail": "Background model unavailable"}
+    assert f"http_status={status}" in caplog.text
+    assert "job=job" in caplog.text and "batch=batch" in caplog.text and "agent=a" in caplog.text
+    assert "stage=analysis" in caplog.text and "unavailable:" in caplog.text
+    assert "private-" not in caplog.text and "batch-test" not in caplog.text
+
+
 @pytest.mark.asyncio
 async def test_background_accepts_text_and_rejects_tool_blocks(monkeypatch):
     from bank_runtime import background_analysis as batch
@@ -160,3 +188,41 @@ async def test_background_accepts_text_and_rejects_tool_blocks(monkeypatch):
     blocks.append({"type": "tool_use", "name": "shell"})
     with pytest.raises(ValueError, match="Unexpected tool request"):
         await batch.analyze("agent", request)
+
+
+@pytest.mark.parametrize("stage", ["analysis", "workbook_plan"])
+def test_background_timeout_logs_without_changing_response(monkeypatch, caplog, stage):
+    from bank_runtime import background_analysis as batch
+
+    monkeypatch.setenv("QWENPAW_SERVICE_TOKEN", "batch-test")
+    monkeypatch.setattr(batch, "require_production_readiness", lambda: None)
+
+    async def timeout(*_):
+        raise TimeoutError("private-timeout-message")
+
+    monkeypatch.setattr(batch, "analyze" if stage == "analysis" else "_reply", timeout)
+    app = FastAPI()
+    app.include_router(batch.build_background_analysis_router())
+    route = "background-analysis" if stage == "analysis" else "background-workbook-plan"
+    payload = request_body() if stage == "analysis" else {"goal": "核对", "workbook": "{}"}
+    with caplog.at_level("WARNING", logger=batch.__name__):
+        response = TestClient(app).post(f"/agents/a/{route}", json=payload,
+            headers={"Authorization": "Bearer batch-test", "X-Agent-Id": "a"})
+    assert response.status_code == 503
+    assert f"stage={stage}" in caplog.text
+    assert "code=MODEL_TIMEOUT" in caplog.text and "http_status=-" in caplog.text
+    assert "private-timeout-message" not in caplog.text
+
+
+def test_background_diagnostics_reject_log_injection_and_non_numeric_status(caplog):
+    from bank_runtime import background_analysis as batch
+
+    error = ValueError("private-message")
+    error.status_code = "private-status\nforged_line"
+    with caplog.at_level("WARNING", logger=batch.__name__):
+        batch._log_failure(error, stage="analysis", agent_id="a\nforged_line",
+                           job_id="j\rforged_line", batch_key="b\nforged_line")
+    assert "http_status=-" in caplog.text
+    assert "private-" not in caplog.text
+    assert len(caplog.records) == 1
+    assert "\n" not in caplog.records[0].message and "\r" not in caplog.records[0].message

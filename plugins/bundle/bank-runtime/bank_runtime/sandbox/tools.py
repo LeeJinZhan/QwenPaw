@@ -58,6 +58,13 @@ def attachment_read_error() -> str:
     return next(iter(state.processor.read_failures.values()), "")
 
 
+def attachment_read_state():
+    state = _STATE.get()
+    if state is None:
+        return {}, set()
+    return dict(state.processor.read_failures), set(getattr(state.processor, 'read_successes', ()))
+
+
 async def runtime_sandbox_files_search(
     query: str = "",
     content_types: list[str] | None = None,
@@ -162,9 +169,11 @@ async def _prepared_blocks(state, prepared, *, originals=True):
         state.scope.prepared_originals.update({item['file_id']: item for item in metadata})
         # Media continues through native model data blocks. Ordinary documents
         # carry authorized container metadata rather than forced inline text.
-        media = [item for item in prepared if state.processor._kind(item) in {'image', 'audio', 'video'}]
+        classified = [(item, state.processor.classify(item)) for item in prepared]
+        media = [item for item, kind in classified if kind in {'image', 'audio', 'video'}]
         return [TextBlock(type='text', text='<runtime_attachment trusted="false" mode="native-original">'
                           + json.dumps({'files': metadata}, ensure_ascii=False) + '</runtime_attachment>'),
+                *(state.processor.failure_block(item) for item, kind in classified if kind == 'unreadable'),
                 *state.processor.process(media, file_refs=refs)]
     return state.processor.process(prepared, file_refs=refs)
 

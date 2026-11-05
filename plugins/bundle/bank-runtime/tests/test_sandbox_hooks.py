@@ -404,3 +404,91 @@ async def test_attachment_metadata_survives_session_sanitization_for_followup(tm
         assert not followup.extras[sandbox_hooks._STATE].scope.current_attachment_ids
     finally:
         await BankRuntimeSandboxCleanupHook().run(followup)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('native', [False, True])
+async def test_pre_execute_mixed_legacy_labels_reaches_model_in_both_modes(tmp_path, monkeypatch, native):
+    from PIL import Image
+    from pypdf import PdfWriter
+    paths=[tmp_path/'file.pdf', tmp_path/'file.csv', tmp_path/'file.doc', tmp_path/'file.png']
+    writer=PdfWriter();writer.add_blank_page(width=72,height=72);writer.write(paths[0])
+    paths[1].write_text('name,amount\none,100\n')
+    paths[2].write_bytes(br'{\rtf1\ansi body\par}')
+    Image.new('RGB',(10,10),'white').save(paths[3])
+    mimes=['text/plain','application/vnd.ms-excel','application/rtf','image/x-png']
+    files=[PreparedSandboxFile(file_id=f'file_{i}',local_path=path,content_type=mime,
+        size_bytes=path.stat().st_size,original_name=path.name,task_id='task_001',
+        expires_at='2099-08-19T12:00:00+08:00') for i,(path,mime) in enumerate(zip(paths,mimes))]
+    before=[path.read_bytes() for path in paths]
+    cache=_Cache(tmp_path/'unused')
+    async def prepare(*args,**kwargs):return files
+    cache.prepare_files=prepare
+    refs=_FileRefs([])
+    monkeypatch.setenv('QWENPAW_SERVICE_TOKEN','service-secret')
+    monkeypatch.setattr(sandbox_hooks,'_CACHE',cache)
+    monkeypatch.setattr(sandbox_hooks,'_FILE_REFS',refs)
+    monkeypatch.setattr(sandbox_tools,'get_file_ref_registry',lambda:refs)
+    ctx=_ctx(tmp_path)
+    ctx.request.attachments_manifest=[{'file_id':f.file_id,'source':'current_task',
+        'content_hash':'sha256:'+hashlib.sha256(f.local_path.read_bytes()).hexdigest()} for f in files]
+    await BankRuntimeSandboxInstallHook().run(ctx)
+    state=ctx.extras['bank_runtime_sandbox_state']
+    calls=[]
+    if native:
+        state.scope.sandbox_context.update(native_analysis_enabled=True,isolation_level='container')
+        async def originals(scope, prepared):
+            calls.append([f.file_id for f in prepared])
+            return [{'file_id':f.file_id,'display_name':f.original_name,'size_bytes':f.size_bytes} for f in prepared]
+        monkeypatch.setattr(state.broker,'prepare_originals',originals)
+    try:
+        await BankRuntimeAttachmentPrepareHook().run(ctx)
+        blocks=ctx.input_msgs[-1].content
+        assert blocks[0].text=='总结附件'
+        assert any(getattr(getattr(block,'source',None),'media_type',None)=='image/png' for block in blocks)
+        assert [r['file_id'] for r in ctx.input_msgs[-1].metadata['runtime_attachment_metadata']]==[f.file_id for f in files]
+        if native:assert calls==[[f.file_id for f in files]]
+        else:assert sum('tool_required' in getattr(b,'text','') for b in blocks)==3
+        assert [path.read_bytes() for path in paths]==before
+    finally:
+        await BankRuntimeSandboxCleanupHook().run(ctx)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('native', [False, True])
+async def test_office_type_uncertainty_does_not_abort_real_attachment_hook(tmp_path, monkeypatch, native):
+    files = []
+    for extension in ['doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx']:
+        path = tmp_path / ('material.' + extension)
+        path.write_bytes(b'unrecognized private source')
+        files.append(PreparedSandboxFile(file_id='file_' + extension, local_path=path,
+            content_type='image/png', original_name=path.name, size_bytes=path.stat().st_size,
+            task_id='task_001', expires_at='2099-08-19T12:00:00+08:00'))
+    cache = _Cache(tmp_path / 'unused')
+    async def prepare(*args, **kwargs):
+        return files
+    cache.prepare_files = prepare
+    refs = _FileRefs([])
+    monkeypatch.setenv('QWENPAW_SERVICE_TOKEN', 'service-secret')
+    monkeypatch.setattr(sandbox_hooks, '_CACHE', cache)
+    monkeypatch.setattr(sandbox_hooks, '_FILE_REFS', refs)
+    monkeypatch.setattr(sandbox_tools, 'get_file_ref_registry', lambda: refs)
+    ctx = _ctx(tmp_path)
+    ctx.request.attachments_manifest = [{'file_id': f.file_id, 'source': 'current_task',
+        'content_hash': 'sha256:' + hashlib.sha256(f.local_path.read_bytes()).hexdigest()} for f in files]
+    await BankRuntimeSandboxInstallHook().run(ctx)
+    state = ctx.extras['bank_runtime_sandbox_state']
+    if native:
+        state.scope.sandbox_context.update(native_analysis_enabled=True, isolation_level='container')
+        async def originals(scope, prepared):
+            return [{'file_id': f.file_id, 'display_name': f.original_name} for f in prepared]
+        monkeypatch.setattr(state.broker, 'prepare_originals', originals)
+    try:
+        await BankRuntimeAttachmentPrepareHook().run(ctx)
+        blocks = ctx.input_msgs[-1].content
+        assert all(block.type == 'text' for block in blocks)
+        assert 'unrecognized private source' not in str(blocks)
+        assert len(ctx.input_msgs[-1].metadata['runtime_attachment_metadata']) == 6
+        assert not state.processor.read_failures
+    finally:
+        await BankRuntimeSandboxCleanupHook().run(ctx)

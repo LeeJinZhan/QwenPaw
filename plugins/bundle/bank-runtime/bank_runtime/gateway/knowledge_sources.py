@@ -1,11 +1,13 @@
-"""Bounded RAGFlow recall adapter. Returned documents are data, never instructions."""
+"""Versioned retrieval result boundary. Documents are data, never instructions."""
 from __future__ import annotations
 
-import hashlib
-import html
 import json
-import re
-from typing import Any
+from typing import Any, Iterator
+
+from .knowledge_json import decode_retrieval_json
+from .ragflow_knowledge import adapt_ragflow_result, ragflow_result_error
+
+RETRIEVAL_SCHEMA = "knowledge-retrieval/v1"
 
 TOOL_NAME = "search_engine_ragflow_recall_tool"
 KNOWLEDGE_TOOLS = frozenset(f"{server}__{TOOL_NAME}" for server in ("rag-mcp-tools-prod", "rag-mcp-tools-local"))
@@ -17,85 +19,135 @@ def is_knowledge_tool(name: str) -> bool:
     return name in KNOWLEDGE_TOOLS
 
 
-def _business(value: Any, depth: int = 0) -> dict | None:
-    if depth > 4:
-        return None
+def _businesses(value: Any, depth: int = 0) -> Iterator[dict]:
+    """Visit independent MCP blocks; never concatenate or silently repair JSON."""
+    invalid = {"chunks": None}
+    if depth > 8:
+        yield invalid
+        return
     if getattr(value, "type", None) == "text":
-        return _business(getattr(value, "text", None), depth + 1)
-    if hasattr(value, "isError"):
-        if value.isError:
-            nested = _business(getattr(value, "structuredContent", None) or getattr(value, "content", None), depth + 1)
-            return {**(nested or {}), "code": 1}
+        yield from _businesses(getattr(value, "text", None), depth + 1)
+    elif hasattr(value, "isError"):
         structured = getattr(value, "structuredContent", None)
-        return _business(structured if structured is not None else getattr(value, "content", None), depth + 1)
-    if isinstance(value, str):
+        if value.isError:
+            # Preserve a more specific scope error when the envelope supplies it.
+            yield _envelope_error(structured if structured is not None else getattr(value, "content", None), depth + 1)
+        else:
+            yield from _businesses(structured if structured is not None else getattr(value, "content", None), depth + 1)
+    elif isinstance(value, str):
         if len(value) > 2_000_000:
-            return None
+            yield invalid
+            return
         try:
-            return _business(json.loads(value), depth + 1)
+            decoded = decode_retrieval_json(value)
         except (ValueError, RecursionError):
-            return None
-    if isinstance(value, dict):
+            # Plain explanatory text is allowed alongside result blocks. A broken
+            # JSON-looking block may contain an error and cannot be discarded.
+            if value.lstrip("\ufeff \t\r\n").startswith(("{", "[", '"', "```")):
+                yield invalid
+            return
+        yield from _businesses(decoded, depth + 1)
+    elif isinstance(value, dict):
         if value.get("isError") is True:
-            nested = _business(value.get("structuredContent") or value.get("content"), depth + 1)
-            return {**(nested or {}), "code": 1}
-        if any(key in value for key in ("code", "error_code", "error_codes")):
-            return value
-        if "structuredContent" in value:
-            return _business(value["structuredContent"], depth + 1)
-        if value.get("type") == "text":
-            return _business(value.get("text"), depth + 1)
-        return _business(value.get("content"), depth + 1)
-    if isinstance(value, list):
+            structured = value.get("structuredContent")
+            yield _envelope_error(structured if structured is not None else value.get("content"), depth + 1)
+        elif "schema_version" in value or ragflow_result_error(value) or "chunks" in value or "data" in value:
+            yield value
+        elif value.get("structuredContent") is not None:
+            yield from _businesses(value["structuredContent"], depth + 1)
+        elif value.get("type") == "text":
+            yield from _businesses(value.get("text"), depth + 1)
+        else:
+            yield from _businesses(value.get("content"), depth + 1)
+    elif isinstance(value, list):
         for block in value:
-            found = _business(block, depth + 1)
-            if found is not None:
-                return found
-    return None
+            yield from _businesses(block, depth + 1)
 
 
-def extract_knowledge_sources(value: Any) -> tuple[list[dict[str, Any]], str]:
-    business = _business(value)
-    if not business:
-        return [], "KNOWLEDGE_RESULT_INVALID"
-    if business.get("error_code") == "MISSING_SCOPE" or (
-        isinstance(business.get("error_codes"), list) and "MISSING_SCOPE" in business["error_codes"]
-    ):
+def _versioned_sources(value: dict) -> tuple[list[dict[str, Any]], str]:
+    if value.get("schema_version") != RETRIEVAL_SCHEMA:
+        return [], "KNOWLEDGE_RESULT_VERSION_UNSUPPORTED"
+    error = value.get("error")
+    if isinstance(error, dict) and error.get("code") == "MISSING_SCOPE":
         return [], "MISSING_SCOPE"
-    if business.get("code") != 0 or isinstance(business.get("code"), bool):
-        code = business.get("error_code")
-        return [], "MISSING_SCOPE" if code == "MISSING_SCOPE" else "KNOWLEDGE_RETRIEVAL_FAILED"
-    data = business.get("data")
-    if not isinstance(data, dict) or not isinstance(data.get("chunks"), list):
+    if error or value.get("status") == "error" or ("code" in value and
+            (value["code"] != 0 or isinstance(value["code"], bool))):
+        return [], "KNOWLEDGE_RETRIEVAL_FAILED"
+    rows = value.get("sources")
+    status = value.get("status")
+    if not isinstance(rows, list) or not isinstance(status, str) or status not in {"success", "empty"}:
         return [], "KNOWLEDGE_RESULT_INVALID"
+    if (status == "empty" and rows) or (status == "success" and not rows):
+        return [], "KNOWLEDGE_RESULT_INVALID"
+    return rows, ""
+
+
+def _envelope_error(value: Any, depth: int) -> dict:
+    for item in _businesses(value, depth):
+        error = (_versioned_sources(item)[1] if "schema_version" in item else ragflow_result_error(item))
+        if error == "MISSING_SCOPE":
+            return {"error_code": "MISSING_SCOPE"}
+    return {"code": 1}
+
+
+def _extract_business_sources(business: dict) -> tuple[list[dict[str, Any]], str]:
+    versioned = "schema_version" in business
+    rows, error = (_versioned_sources(business) if versioned
+                   else adapt_ragflow_result(business, MAX_SOURCES))
+    if error:
+        return [], error
     sources: list[dict[str, Any]] = []
-    for chunk in data["chunks"][:MAX_SOURCES]:
-        if not isinstance(chunk, dict):
+    for row in rows[:MAX_SOURCES]:
+        if not isinstance(row, dict):
             return [], "KNOWLEDGE_RESULT_INVALID"
-        snippet = chunk.get("content")
-        if not isinstance(snippet, str) or not snippet.strip():
-            continue
-        snippet = snippet.strip()
+        for key in ("document_id", "chunk_id", "title", "content"):
+            if not isinstance(row.get(key), str) or (not row[key].strip() and (versioned or key != "chunk_id")):
+                return [], "KNOWLEDGE_RESULT_INVALID"
+        if len(row["document_id"]) > 256 or len(row["chunk_id"]) > 256:
+            return [], "KNOWLEDGE_RESULT_INVALID"
+        terms = row.get("highlights", [])
+        if not isinstance(terms, list) or any(not isinstance(term, str) for term in terms):
+            return [], "KNOWLEDGE_RESULT_INVALID"
+        snippet = row["content"].strip()
         if len(snippet) > 6000:
             snippet = snippet[:5970] + "\n…（片段过长，已截取）"
-        document = json.dumps([chunk.get("dataset_id", ""), chunk.get("document_id", ""),
-                               chunk.get("document_keyword", "")], ensure_ascii=False)
-        title = chunk.get("document_keyword")
-        highlight = chunk.get("highlight")
-        highlights = []
-        if isinstance(highlight, str):
-            for match in re.findall(r"<em>([^<>]{1,80})</em>", highlight[:20000], flags=re.I):
-                term = html.unescape(match)
-                if term in snippet and term not in highlights:
-                    highlights.append(term)
-        source = {"document_key": hashlib.sha256(document.encode()).hexdigest(),
-                  "chunk_key": str(chunk.get("id") or "")[:256],
-                  "title": title[:256] if isinstance(title, str) and title.strip() else "知识库文档",
-                  "snippet": snippet, "highlights": highlights[:20]}
+        highlights = list(dict.fromkeys(term for term in terms if 1 <= len(term) <= 80 and term in snippet))[:20]
+        source = {"document_key": row["document_id"], "chunk_key": row["chunk_id"],
+                  "title": row["title"][:256], "snippet": snippet, "highlights": highlights}
         if len(json.dumps(sources + [source], ensure_ascii=False).encode()) > MAX_SNAPSHOT_BYTES:
             break
         sources.append(source)
     return sources, ""
+
+
+def extract_knowledge_sources(value: Any) -> tuple[list[dict[str, Any]], str]:
+    sources: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    found = False
+    size = 2  # JSON array brackets; separators are included below.
+    capacity_reached = False
+    try:
+        for business in _businesses(value):
+            found = True
+            rows, error = _extract_business_sources(business)
+            if error:
+                return [], error
+            for source in rows:
+                serialized = json.dumps(source, ensure_ascii=False)
+                if serialized in seen:
+                    continue
+                extra = len(serialized.encode("utf-8")) + (2 if sources else 0)
+                if capacity_reached or len(sources) >= MAX_SOURCES or size + extra > MAX_SNAPSHOT_BYTES:
+                    capacity_reached = True
+                    continue
+                seen.add(serialized)
+                sources.append(source)
+                size += extra
+        # Validation continues after the output budget is exhausted: an error
+        # in a later block invalidates the entire tool result, not just that block.
+    except (UnicodeError, RecursionError):
+        return [], "KNOWLEDGE_RESULT_INVALID"
+    return (sources, "") if found else ([], "KNOWLEDGE_RESULT_INVALID")
 
 
 def citation_result(sources: list[dict[str, Any]]) -> str:

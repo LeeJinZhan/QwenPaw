@@ -3,7 +3,7 @@
 Uses the pinned openpyxl reader extension point, isolated here and covered by
 OOXML shared-string tests. Neither formulas nor external links are evaluated.
 """
-from contextlib import contextmanager
+from contextlib import contextmanager, ExitStack
 from functools import lru_cache
 import sqlite3
 import tempfile
@@ -57,7 +57,7 @@ class DiskStrings:
 @contextmanager
 def open_workbooks(path, temporary_root):
     readers = []
-    with tempfile.TemporaryDirectory(prefix='.strings-', dir=temporary_root) as directory:
+    with ExitStack() as sources, tempfile.TemporaryDirectory(prefix='.strings-', dir=temporary_root) as directory:
         strings = DiskStrings(Path(directory) / 'strings.sqlite')
         loaded = False
         class Reader(ExcelReader):
@@ -72,7 +72,10 @@ def open_workbooks(path, temporary_root):
                     self.shared_strings = strings
         try:
             for data_only in (True, False):
-                reader = Reader(path, read_only=True, data_only=data_only, keep_links=False)
+                # A verified OOXML workbook may have an old .xls filename.
+                # Binary streams avoid openpyxl's filename-only format rejection.
+                source = sources.enter_context(Path(path).open('rb'))
+                reader = Reader(source, read_only=True, data_only=data_only, keep_links=False)
                 readers.append(reader)
                 reader.read()
             yield tuple(reader.wb for reader in readers)

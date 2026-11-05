@@ -4,6 +4,35 @@ import re
 ROOT = Path(__file__).resolve().parents[1] / "skills"
 
 
+def test_word_branches_are_independently_readable_without_other_layout_examples():
+    import asyncio
+    import json
+
+    router = asyncio.run(_read_native_skill('bank-file-delivery', 'references/docx.md'))
+    assert 'template_fill_docx' in router and 'document_type' in router
+    assert '"blocks"' not in router and '"sections"' not in router
+    for branch, layout in (('standard', 'standard_document'), ('official', 'official_document')):
+        content = asyncio.run(_read_native_skill('bank-file-delivery', f'references/docx-{branch}.md'))
+        examples = [json.loads(block) for block in re.findall(r'```json\s*\n(.*?)\n```', content, re.S)]
+        assert examples
+        assert {value['delivery_plan']['layout_kind'] for value in examples} == {layout}
+    standard = asyncio.run(_read_native_skill('bank-file-delivery', 'references/docx-standard.md'))
+    assert 'bank-official-docx-v1' not in standard
+
+
+def test_official_writing_method_can_be_read_for_text_only_without_file_contracts():
+    import asyncio
+
+    main = asyncio.run(_read_native_skill('bank-document-writing'))
+    method = asyncio.run(_read_native_skill('bank-document-writing', 'references/official-writing.md'))
+    assert '用户指定的篇幅' in main and '润色保持事实' in main
+    assert '通知说明事项' not in main
+    assert '通知说明事项' in method and '请示提出具体待批事项' in method
+    assert '仅交付正文' in method
+    for file_contract in ('```json', 'bank-official-docx-v1', 'artifact_generate', 'delivery_plan'):
+        assert file_contract not in method
+
+
 def test_common_native_skills_do_not_select_case_specific_business_methods():
     import asyncio
 
@@ -40,7 +69,7 @@ def test_general_and_writing_native_entries_defer_file_parameters():
     delivery = asyncio.run(_read_native_skill('bank-file-delivery'))
     assert '```json' not in delivery
     contracts = '\n'.join(asyncio.run(_read_native_skill('bank-file-delivery', f'references/{name}.md'))
-                          for name in ('docx', 'spreadsheet', 'text-formats'))
+                          for name in ('docx', 'docx-standard', 'docx-official', 'spreadsheet', 'text-formats'))
     examples = [json.loads(block) for block in re.findall(r'```json\s*\n(.*?)\n```', contracts, re.S)]
     assert {'docx', 'xlsx', 'pdf'} <= {x.get('artifact_type') for x in examples}
     official = next(x for x in examples if x.get('content', {}).get('kind') == 'official_document')
@@ -82,7 +111,7 @@ def test_bank_entry_keeps_identity_rules_and_routes_to_document_skills():
     ).read_text()
     assert "artifact_generate" in writing and "artifact_revise" in writing
     assert "template_fill_docx" in writing
-    assert "bank-official-docx-v1" in (ROOT / "bank-file-delivery/references/docx.md").read_text()
+    assert "bank-official-docx-v1" in (ROOT / "bank-file-delivery/references/docx-official.md").read_text()
     assert (
         "generate_official_document" not in writing
         and "send_file_to_user" not in writing
@@ -150,7 +179,7 @@ def test_real_native_viewer_returns_writing_and_delivery_rules_by_skill_name():
     writing = asyncio.run(_read_native_skill("bank-document-writing"))
     assert "用户指定的篇幅" in writing and "bank-file-delivery" in writing
     delivery = asyncio.run(_read_native_skill("bank-file-delivery"))
-    docx = asyncio.run(_read_native_skill("bank-file-delivery", "references/docx.md"))
+    docx = asyncio.run(_read_native_skill("bank-file-delivery", "references/docx-official.md"))
     sheets = asyncio.run(_read_native_skill("bank-file-delivery", "references/spreadsheet.md"))
     assert "bank-official-docx-v1" not in delivery
     assert "bank-official-docx-v1" in docx and '"blocks"' in docx
@@ -244,8 +273,8 @@ def test_official_document_maintenance_reference_matches_native_delivery_rules()
     links = re.findall(r'\]\(([^)]+)\)', reference)
     assert len(links) == 1
     target = (ROOT / 'bank-document-writing/references' / links[0].split('#')[0]).resolve()
-    assert target == (ROOT / 'bank-file-delivery/references/docx.md').resolve()
-    assert '## 公文 DOCX 交付' in target.read_text()
+    assert target == (ROOT / 'bank-file-delivery/references/docx-official.md').resolve()
+    assert '# 公文 DOCX 交付' in target.read_text()
     assert '```json' not in reference  # One maintained source for the contract.
 
 
@@ -289,8 +318,7 @@ def test_native_writing_scope_covers_arbitrary_length_and_document_type():
     content = asyncio.run(_read_native_skill('bank-document-writing'))
     assert '用户指定的篇幅' in content and '15000' not in content
     assert '关键缺项使任务无法继续' in content
-    delivery = asyncio.run(_read_native_skill('bank-file-delivery'))
-    delivery = asyncio.run(_read_native_skill('bank-file-delivery', 'references/docx.md'))
+    delivery = asyncio.run(_read_native_skill('bank-file-delivery', 'references/docx-official.md'))
     assert '按实际文种选择 document_type' in delivery
     assert '例如【待填写】或【待核实】' in delivery
     assert '该文件的请示初稿' not in content

@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import resource
 import sys
+from .processing_errors import processing_error_code
 from .spreadsheet import extract_workbook, SpreadsheetExtractError
 
 
@@ -20,8 +21,8 @@ def main():
         result = {'status': 'ready', 'inventory': extract_workbook(Path(source), target, stem='document', max_bytes=int(quota), allow_partial=True, header_row=json.loads(header_row))}
     except SpreadsheetExtractError as exc:
         result = {'status': 'failed', 'error_code': exc.code}
-    except MemoryError:
-        result = {'status': 'failed', 'error_code': 'DOCUMENT_RESULT_TOO_LARGE'}
+    except (MemoryError, OSError) as exc:
+        result = {'status': 'failed', 'error_code': processing_error_code(exc)}
     except Exception:
         result = {'status': 'failed', 'error_code': 'DOCUMENT_PARSE_FAILED'}
     temporary = Path(state + '.tmp')

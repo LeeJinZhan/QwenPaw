@@ -1,0 +1,61 @@
+{
+  "version": 1,
+  "font": "Noto Sans CJK SC",
+  "page_mm": [
+    210,
+    297
+  ],
+  "margins_mm": {
+    "left": 22,
+    "right": 22,
+    "top": 23,
+    "bottom": 21,
+    "footer_distance": 10
+  },
+  "normal": {
+    "size": 11,
+    "color": "243240",
+    "line_spacing": 1.4,
+    "space_after": 7
+  },
+  "title": {
+    "size": 22,
+    "color": "17212B",
+    "line_spacing": 1.15,
+    "space_after": 16
+  },
+  "headings": {
+    "sizes": [
+      17,
+      15,
+      13,
+      12,
+      11.5,
+      11
+    ],
+    "color": "243240",
+    "space_before_first": 15,
+    "space_before_other": 10,
+    "space_after": 6,
+    "line_spacing": 1.2
+  },
+  "footer": {
+    "size": 9,
+    "color": "66727E"
+  },
+  "table": {
+    "size": 10.5,
+    "color": "243240",
+    "border": "CBD5DF",
+    "header_fill": "EAF0F6",
+    "stripe_fill": "F6F8FA",
+    "line_spacing": 1.15,
+    "space_after": 2,
+    "margins": {
+      "top": 90,
+      "bottom": 90,
+      "left": 110,
+      "right": 110
+    }
+  }
+}

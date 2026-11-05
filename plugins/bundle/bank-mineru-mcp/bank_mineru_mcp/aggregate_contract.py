@@ -9,7 +9,7 @@ FILTERS = ['eq', 'ne', 'gt', 'gte', 'lt', 'lte', 'contains', 'in']
 _DETAILS = {
     'CHUNK_CURSOR': ('cursor', '正文分块第一页使用 cursor=null；后续只原样复制正文结果的 next_cursor。next_inventory_cursor 是清单页码，请使用 read_range(format="inventory", row_cursor=next_inventory_cursor)，不能放入正文 cursor。'),
     'CHUNK_LIMIT': ('limit', '正文分块 limit 必须为 1–10 的整数，默认 5；保留有效 document_ref 和正文 next_cursor，修正 limit 后重试。'),
-    'PARSE_DOCUMENTS': ('documents', 'documents 为 1–5 个对象，每项使用当前附件的 file_id；银行 Gateway 可补全省略的 file_ref。不要增加路径或 URL 字段。'),
+    'PARSE_DOCUMENTS': ('documents', 'documents 为 1–50 个对象，每项使用当前附件的 file_id；银行 Gateway 可补全省略的 file_ref。不要增加路径或 URL 字段。'),
     'PARSE_METHOD': ('parse_method', 'parse_method 仅支持 auto、ocr、txt；一般保留默认 auto。'),
     'PARSE_LANGUAGE': ('language', 'language 仅支持 auto、zh、en；一般保留默认 auto。'),
     'PARSE_OPTIONS': ('options', 'options 使用 tables、formulas、image_text 布尔值，header_row 为头行整数或工作表名到头行的映射（* 为默认）；0 表示无头行。'),
@@ -30,7 +30,7 @@ _DETAILS = {
     'UNION_COLUMNS': ('ops[].cross_sheet_union', '参与跨表统计的每张表都必须包含所需指标、分组、筛选列；先读取各表 inventory 核对，不猜测列映射。'),
 }
 _MESSAGES = {
-    'documents must contain 1-5 files':'PARSE_DOCUMENTS',
+    'documents must contain 1-50 files':'PARSE_DOCUMENTS',
     'document fields are invalid':'PARSE_DOCUMENTS',
     'parse_method is invalid':'PARSE_METHOD',
     'language is invalid':'PARSE_LANGUAGE',
