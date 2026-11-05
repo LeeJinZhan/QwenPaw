@@ -10,12 +10,15 @@ description: 用户当前或有效历史目标要求生成、修订、转换可�
 
 本技能负责文件操作和发布，专业方法由对应Skill提供；技能不授予权限，示例不是用户事实。
 
+首先提高稳定交付和成功率，其次提升质量。选择满足用户要求的简单可靠结构，排版交给生成器；已成功发布且满足需求的文件，不因装饰不足或一般样式反复生成。用户明确要求的内容与格式仍须满足，数据缺失、真实计算错误或权限失败不能被美观降级规则掩盖。
+
 ## 选择操作
 
 | 已确定的操作 | 使用当前获授权的能力 |
 | --- | --- |
 | 新建文件、依据上传材料形成新稿 | artifact_generate；必要材料先实际读取 |
-| 修订平台已生成的成果 | artifact_revise；使用真实source_generated_file_id，提交完整修订内容 |
+| 修订平台已生成的成果 | artifact_revise；使用真实source_generated_file_id，按格式契约选择局部修改或完整重建 |
+| 保留上传原件的样式局部修改 | artifact_revise；XLSX单元格按表格契约，DOCX段落/单元格文字按docx.md，PPTX文本框/单元格文字按bank-presentation；真实source_type/source_id，revision_mode=patch |
 | 转换已有文件格式 | artifact_convert；核对来源类型及目标格式，不把重新生成冒充转换 |
 | 使用机构模板 | template_fill_docx；仅使用真实、已发布且获授权的模板 |
 | 制作演示文稿、可编辑图表或导出现有图表 | 按bank-presentation、bank-chart的专业契约执行 |
@@ -35,6 +38,8 @@ description: 用户当前或有效历史目标要求生成、修订、转换可�
 
 只报告所需结果与必要限制，已发布文件使用真实文件卡片，不编造链接。未发布时说明未完成，可提供已有正文但不能冒充文件；多个成果分别说明。执行规则、示例和内部字段不写入正文。
 
+区分提交的排版要求与实际交付效果。只有结果回执或实际检查提供依据时，才描述具体颜色、字体、加粗、布局和保真效果；不能把请求中的设置或主题示例当作已实现的事实。通常说明文件及已确认的内容即可，不为写样式说明额外渲染、重试或重新生成。
+
 ## 缺口与恢复
 
 按实际诊断、执行确认度及剩余预算处理。参数校验失败时修正对应参数；结果未知先核对状态，不盲目重复创建；权限拒绝、不可重试或预算耗尽时停止该操作。独立可完成的部分继续，保留已成功成果并明确未完成项。格式、内容或范围的变化须符合用户要求，不能为通过校验静默降低目标。
@@ -45,9 +50,13 @@ description: 用户当前或有效历史目标要求生成、修订、转换可�
 
 | 格式 | 契约 |
 | --- | --- |
-| 普通Word、公文、模板及DOCX修订 | [Word与公文](references/docx.md) |
+| Word类型、来源、模板及转换 | [Word 类型、来源与模板选择](references/docx.md) |
+| 普通Word生成与修订 | [普通 Word 生成与修订](references/docx-standard.md) |
+| 公文Word生成与修订 | [公文 DOCX 交付](references/docx-official.md) |
 | XLSX、CSV | [表格](references/spreadsheet.md) |
 | TXT、Markdown、SQL、静态HTML、PDF | [文本与静态页面](references/text-formats.md) |
 | PNG、JPEG、WEBP、SVG固定图形 | [固定图形](references/fixed-graphics.md) |
+
+DOCX任务先读取类型、来源与模板规则，再只读取已选版式的契约；已读且仍适用时不重复加载。只转换现有文件时无需加载生成参数。正文写作方法由bank-document-writing维护，文件格式不决定正文文种。
 
 如果当前Skill工具没有reference参数，则该环境尚不支持此拆分版本；使用已核验的管理端单文件兼容版，不通过Shell或文件工具读取插件目录。

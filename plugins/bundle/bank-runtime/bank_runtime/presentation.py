@@ -1,6 +1,6 @@
 """Model-facing presentation guidance and bounded execution outcomes."""
 from typing import Any, Mapping
-from .conversion_reports import validate_conversion_report, conversion_reason, REASONS
+from .conversion_reports import validate_conversion_report, validate_revision_report, conversion_reason, REASONS
 
 
 PUBLIC_RESPONSE_GUIDANCE = """USER-FACING RESPONSE CONTRACT
@@ -70,6 +70,9 @@ def failure_message(code: str = "", violation: str = "") -> str:
         return "指定格式的文件尚未确认生成完成；请先核对处理状态，再依据执行结果决定是否恢复。"
     if code in {"TOOL_DENIED", "TOOL_NOT_FOUND"}:
         return "当前助手无法执行此操作，本次未执行。"
+    from .spreadsheet_messages import office_failure_hint
+    if hint := office_failure_hint(code):
+        return hint
     return "本次操作暂时无法完成。请根据已确认的结果说明情况，不要重复提交结果未知的操作。"
 
 
@@ -110,10 +113,27 @@ def failure_metadata(envelope: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def artifact_model_result(envelope: Mapping[str, Any]) -> dict[str, Any]:
+    from .spreadsheet_messages import spreadsheet_envelope_failure, converted_copy_hint, revision_copy_hint
     raw = envelope.get("result")
     raw = raw if isinstance(raw, Mapping) else {}
     result = {key: raw[key] for key in ("artifact_status", "artifact_type", "operation", "generated_file_ids", "page_count") if key in raw}
     report = validate_conversion_report(raw.get("conversion_report"))
+    revision = (validate_revision_report(raw.get('revision_report'))
+                if raw.get('artifact_type') == 'xlsx' and raw.get('operation') == 'revise' else None)
+    if raw.get('artifact_type') in ('docx', 'pptx') and raw.get('operation') == 'revise' and raw.get('revision_mode') == 'patch':
+        from .text_patch_contract import validate_text_revision_report
+        try:
+            candidate = validate_text_revision_report(raw.get('revision_report'))
+            revision = candidate if candidate['artifact_type'] == raw['artifact_type'] else None
+        except ValueError:
+            revision = None
+    if revision is not None:
+        result['revision_report'] = revision
+    if raw.get('revision_mode') in ('patch', 'rebuild'):
+        result['revision_mode'] = raw['revision_mode']
+    if 'quality_warnings' in raw:
+        from .office_assets import quality_warnings
+        result['quality_warnings'] = quality_warnings(raw['quality_warnings'])
     if report is not None:
         result["conversion_report"] = report
     if raw.get("purpose") in ("read", "delivery"):
@@ -123,17 +143,36 @@ def artifact_model_result(envelope: Mapping[str, Any]) -> dict[str, Any]:
         result.update(failure_metadata(envelope))
         reason = conversion_reason(envelope)
         message = REASONS.get(reason) or failure_message(str(envelope.get("error_code") or ""))
+        spreadsheet_reason, spreadsheet_hint = spreadsheet_envelope_failure(envelope)
+        if spreadsheet_hint:
+            reason, message = spreadsheet_reason, spreadsheet_hint
         if reason:
-            result.update(reason=reason, retryable=False, recovery_action="stop")
+            from .spreadsheet_messages import recoverable_patch_failure
+            if recoverable_patch_failure(reason):
+                result["reason"] = reason
+            else:
+                result.update(reason=reason, retryable=False, recovery_action="stop")
         elif envelope.get("error_code"):
             result["reason"] = str(envelope["error_code"])
         outcome = "unknown" if result["execution_status"] == "execution_unknown" else "failed"
     elif status == "succeeded" and result.get("generated_file_ids"):
         message, outcome = "文件已生成，可通过文件卡片打开或下载。", "completed"
+        if revision is not None:
+            message += revision_copy_hint(revision)
+        if result.get('quality_warnings'):
+            from .office_assets import office_asset
+            message += ''.join(office_asset('messages')['quality'][code] for code in result['quality_warnings'])
+        if result.get('revision_mode') == 'rebuild':
+            from .spreadsheet_messages import rebuilt_copy_hint
+            message += rebuilt_copy_hint(raw.get('artifact_type'))
         if raw.get("purpose") == "read":
             message = "内部读取副本已准备，仍须读取其内容及全部分页后才能分析。此副本仅用于识别。"
         if report is not None:
-            if report["coverage"] == "partial":
+            notice = converted_copy_hint(report, artifact_type=raw.get('artifact_type', ''))
+            if notice:
+                result['conversion_notice'] = notice
+                message += notice
+            if report["coverage"] == "partial" and (not notice or report['warnings'] or report['objects']):
                 message += "转换仅保留部分内容，部分对象或资源未读取；后续回答必须说明范围。"
             if not report["editable"]:
                 message += "部分内容已静态化，不再支持原对象的双击编辑。"

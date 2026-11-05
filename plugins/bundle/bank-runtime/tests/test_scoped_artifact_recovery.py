@@ -135,3 +135,39 @@ async def test_unknown_execution_never_repeats_when_model_changes_input():
     assert (await engine.check_permission(SimpleNamespace(name="artifact_generate"), changed)).behavior == PermissionBehavior.DENY
     assert middleware.client.executions == 1
     assert middleware.unresolved_file_operations
+
+
+@pytest.mark.asyncio
+async def test_sdk_defaulted_repair_and_corrected_json_resolve_same_operation():
+    # The SDK fills optional defaults while repairing malformed JSON, but does
+    # not fill them when the model later supplies valid JSON. Both name the
+    # same output and no input sources; the failed preflight never executed.
+    from agentscope._utils._common import _json_loads_with_repair
+    from agentscope.tool import FunctionTool
+    from bank_runtime.artifact_tools import artifact_generate
+
+    fixed = {"artifact_type": "xlsx", "title": "Costs", "output_name": "costs.xlsx",
+             "content": {"sheets": [{"name": "Costs", "rows": [["Budget"], [1000]]}]}}
+    raw = json.dumps(fixed)[:-1]
+    repaired = _json_loads_with_repair(raw, FunctionTool(artifact_generate).input_schema)
+    assert repaired["source_refs"] is None
+    assert "source_refs" not in fixed
+
+    class Client(_Client):
+        async def preflight(self, name, payload, **kwargs):
+            if "source_refs" in payload:
+                raise GatewayError("input rejected", code="ARTIFACT_VALIDATION_FAILED")
+            return await super().preflight(name, payload, **kwargs)
+        async def execute_runtime_tool(self, preflight, name, payload):
+            return {"status": "success", "result": {"artifact_status": "succeeded",
+                                                      "generated_file_ids": ["file-done"]}}
+
+    middleware = BankRuntimeGatewayMiddleware(Client())
+    middleware._record_malformed_artifact_arguments(ChatResponse(content=[
+        ToolCallBlock(id="bad-json", name="artifact_generate", input=raw)], is_last=True))
+    engine = engine_for(middleware)
+    assert (await engine.check_permission(SimpleNamespace(name="artifact_generate"), repaired)).behavior == PermissionBehavior.DENY
+    assert (await engine.check_permission(SimpleNamespace(name="artifact_generate"), fixed)).behavior == PermissionBehavior.ALLOW
+    await execute(middleware, "artifact_generate", fixed)
+    assert not middleware.artifact_input_failures
+    middleware._check_file_completion()

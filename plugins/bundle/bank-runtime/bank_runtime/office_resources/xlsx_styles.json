@@ -1,0 +1,78 @@
+{
+  "version": 1,
+  "default": "office",
+  "font": "Noto Sans CJK SC",
+  "header_size": 11,
+  "body_size": 10.5,
+  "header_height": 36,
+  "body_ink": "26343F",
+  "line_color": "E0E6E9",
+  "total_labels": [
+    "合计",
+    "总计",
+    "小计",
+    "本期合计"
+  ],
+  "profiles": {
+    "office": {
+      "colors": [
+        "244D55",
+        "278A89",
+        "F1F7F6",
+        "E1EFED"
+      ],
+      "row_height": 28,
+      "bold_first_column": false,
+      "emphasize_formula": false,
+      "total_border": "thin"
+    },
+    "finance": {
+      "colors": [
+        "20334A",
+        "B7985A",
+        "F6F5F1",
+        "EDE8DA"
+      ],
+      "row_height": 26,
+      "bold_first_column": true,
+      "emphasize_formula": false,
+      "total_border": "double"
+    },
+    "budget": {
+      "colors": [
+        "414671",
+        "8C83C2",
+        "F4F3F9",
+        "E8E5F4"
+      ],
+      "row_height": 26,
+      "bold_first_column": false,
+      "emphasize_formula": false,
+      "total_border": "thin"
+    },
+    "analysis": {
+      "colors": [
+        "23506D",
+        "389EA6",
+        "F1F6FA",
+        "DDEDF4"
+      ],
+      "row_height": 26,
+      "bold_first_column": false,
+      "emphasize_formula": true,
+      "total_border": "thin"
+    },
+    "tracker": {
+      "colors": [
+        "4D535B",
+        "B98238",
+        "F8F6F2",
+        "F0E6D7"
+      ],
+      "row_height": 34,
+      "bold_first_column": false,
+      "emphasize_formula": false,
+      "total_border": "thin"
+    }
+  }
+}

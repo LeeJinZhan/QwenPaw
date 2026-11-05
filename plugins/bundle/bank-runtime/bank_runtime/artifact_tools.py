@@ -125,6 +125,17 @@ class OfficeConversionFailureError(FileOperationsIncompleteError):
         )
 
 
+class SpreadsheetOperationFailureError(FileOperationsIncompleteError):
+    def __init__(self, reason: str) -> None:
+        from .spreadsheet_messages import SPREADSHEET_FAILURES
+        if reason not in SPREADSHEET_FAILURES:
+            raise ValueError('unknown spreadsheet failure')
+        AgentRuntimeErrorException.__init__(
+            self, error_code='ARTIFACT_VALIDATION_FAILED',
+            message='SPREADSHEET_OPERATION|' + reason, details={},
+        )
+
+
 class DocumentReadIncompleteError(FileOperationsIncompleteError):
     def __init__(self, code="DOCUMENT_READ_INCOMPLETE") -> None:
         AgentRuntimeErrorException.__init__(
@@ -298,6 +309,8 @@ async def artifact_generate(
             escaped text. Word/PDF wide tables and PPT dense content reflow
             automatically; preserve all data and verify actual page counts.
             For CSV, use ``{"columns": ["项目", "数量"], "rows": [["合计", 1]]}``.
+            Optional content.options selects encoding (utf-8/utf-8-sig),
+            delimiter (comma/semicolon/tab) and line_ending (CRLF/LF).
             Do not pass CSV text or JSON-encoded text. title, output_name,
             instructions, source_refs, delivery_plan and explicit_pdf_request
             are top-level tool parameters outside content. Keep title at the
@@ -352,26 +365,49 @@ async def artifact_generate(
 
 
 async def artifact_revise(
-    source_generated_file_id: str,
-    instructions: str,
-    content: dict[str, Any] | list[Any] | str,
+    source_generated_file_id: str = "",
+    instructions: str = "",
+    content: dict[str, Any] | list[Any] | str | None = None,
     output_name: str = "",
     delivery_plan: dict[str, str] | None = None,
+    source_type: str = "",
+    source_id: str = "",
+    revision_mode: str = "",
 ) -> str:
-    """Create a new version of an existing Runtime-generated artifact file.
+    """Revise a generated artifact, or patch an authorized XLSX preserving styles.
 
     Args:
         source_generated_file_id: Runtime-generated source file identifier.
         instructions: Requested changes.
-        content: Complete structured content for the new version. Official
+        content: For XLSX local edits use {"kind":"xlsx_patch","edits":[
+            {"sheet":"Data","cell":"B2","value":120}]} against the actual
+            source workbook. Optional append_rows contains sheet, start_row,
+            rows, style_from_row and table (extend only when requested).
+            Formula results require recalculation on opening; do not claim
+            calculated values were verified. DOCX/PPTX local text edits use kind=docx_patch/pptx_patch and edits
+            with target, old_text, new_text. Word targets: paragraph (1-based body
+            paragraph), or table/row/column; empty target requires unique body text.
+            PPTX targets: slide (1-based), optional shape_id from the original
+            file, and row/column for table cells. Do not guess locators.
+            Other revisions use complete structured content. Official
             documents retain kind, layout_version and document.title, including
             every unchanged block; do not pass only a patch or revised section.
         output_name: Optional safe output filename.
-        delivery_plan: DOCX semantic decision using the same strict three fields
+        source_type: For uploaded XLSX/DOCX/PPTX use session_file or workspace_file;
+            generated_file is also accepted with source_id. Omit when using
+            source_generated_file_id. Source remains unchanged.
+        source_id: Real authorized file identifier; never a local path.
+        revision_mode: patch for original-preserving local edits, rebuild for
+            full-content regeneration. Omit only for legacy compatibility.
+            Word/PPTX text patches retain original object formatting; text growth may
+            affect layout. Never switch to rebuild without the user's acceptance.
+            XLSX patch requires
+            xlsx_patch content. Explain the chosen operation before execution.
+        delivery_plan: Omit for local text patches. For DOCX regeneration, semantic decision using the same strict three fields
             and enums as artifact_generate. Preserve the original purpose/layout
             unless the user requests a change; send complete revised content.
     """
-    del source_generated_file_id, instructions, content, output_name, delivery_plan
+    del source_generated_file_id, instructions, content, output_name, delivery_plan, source_type, source_id, revision_mode
     return _UNMEDIATED
 
 

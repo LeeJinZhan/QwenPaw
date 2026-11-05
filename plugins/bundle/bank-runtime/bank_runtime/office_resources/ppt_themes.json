@@ -1,0 +1,151 @@
+{
+  "version": 1,
+  "default": "steady_business",
+  "themes": {
+    "steady_business": {
+      "name": "稳健商务",
+      "primary": "163B69",
+      "accent": "C5923E",
+      "canvas": "F7F8FA",
+      "ink": "182C42",
+      "muted": "586575",
+      "soft": "E8EDF3",
+      "cover": "split",
+      "heading": "rule",
+      "font": "Noto Sans CJK SC",
+      "title_size": 36
+    },
+    "modern_operations": {
+      "name": "现代经营",
+      "primary": "344DD0",
+      "accent": "008FAD",
+      "canvas": "F5F7FC",
+      "ink": "202B48",
+      "muted": "5B6580",
+      "soft": "E6EAF8",
+      "cover": "type",
+      "heading": "number",
+      "font": "Noto Sans CJK SC",
+      "title_size": 36
+    },
+    "inclusive_local": {
+      "name": "普惠乡土",
+      "primary": "247449",
+      "accent": "BE8A27",
+      "canvas": "F5F1E7",
+      "ink": "263F32",
+      "muted": "606959",
+      "soft": "E4E8DA",
+      "cover": "landscape",
+      "heading": "editorial",
+      "font": "Noto Sans CJK SC",
+      "title_size": 36
+    },
+    "customer_value": {
+      "name": "客户价值",
+      "primary": "087D86",
+      "accent": "DB7036",
+      "canvas": "F4F8F8",
+      "ink": "183D44",
+      "muted": "576F73",
+      "soft": "E0EFF0",
+      "cover": "window",
+      "heading": "bar",
+      "font": "Noto Sans CJK SC",
+      "title_size": 36
+    },
+    "wealth_elegance": {
+      "name": "财富雅致",
+      "primary": "52355F",
+      "accent": "B18C49",
+      "canvas": "F8F4EC",
+      "ink": "393341",
+      "muted": "726778",
+      "soft": "EAE3D9",
+      "cover": "center",
+      "heading": "center",
+      "font": "Noto Serif CJK SC",
+      "title_size": 36
+    },
+    "digital_technology": {
+      "name": "数字科技",
+      "primary": "123154",
+      "accent": "00A6C2",
+      "canvas": "F3F7FB",
+      "ink": "172B43",
+      "muted": "526B81",
+      "soft": "E0EAF4",
+      "cover": "blueprint",
+      "heading": "rail",
+      "font": "Noto Sans CJK SC",
+      "title_size": 36
+    },
+    "clear_classroom": {
+      "name": "清晰课堂",
+      "primary": "203850",
+      "accent": "246BD6",
+      "canvas": "FFFFFF",
+      "ink": "263443",
+      "muted": "5C6875",
+      "soft": "EDF2F7",
+      "cover": "lesson",
+      "heading": "label",
+      "font": "Noto Sans CJK SC",
+      "title_size": 36
+    },
+    "red_culture": {
+      "name": "红色文化",
+      "primary": "AD282F",
+      "accent": "BE8A2E",
+      "canvas": "F6F0E2",
+      "ink": "3E302B",
+      "muted": "746355",
+      "soft": "EAE0CC",
+      "cover": "ceremony",
+      "heading": "editorial",
+      "font": "Noto Serif CJK SC",
+      "title_size": 36
+    },
+    "bank_standard": {
+      "name": "行内标准",
+      "primary": "235EA8",
+      "accent": "ADC7E8",
+      "canvas": "FFFFFF",
+      "ink": "262626",
+      "muted": "595959",
+      "soft": "E6EFF8",
+      "cover": "split",
+      "heading": "bank",
+      "font": "方正兰亭圆简体",
+      "title_size": 28
+    },
+    "bank_classic": {
+      "name": "行内经典",
+      "primary": "2E75B6",
+      "accent": "BDD7EE",
+      "canvas": "FFFFFF",
+      "ink": "262626",
+      "muted": "595959",
+      "soft": "E8F1F7",
+      "cover": "split",
+      "heading": "bank",
+      "font": "方正兰亭圆简体",
+      "title_size": 32
+    }
+  },
+  "series_colors": {
+    "split": "167C91",
+    "type": "E27536",
+    "landscape": "A64E32",
+    "window": "4264CA",
+    "center": "367F7B",
+    "blueprint": "7455D7",
+    "lesson": "C46128",
+    "ceremony": "246B69"
+  },
+  "outline_covers": [
+    "blueprint",
+    "center",
+    "lesson"
+  ]
+}

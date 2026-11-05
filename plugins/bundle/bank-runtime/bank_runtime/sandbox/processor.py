@@ -4,13 +4,14 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 import codecs
-import zipfile
+from dataclasses import replace
 from xml.sax.saxutils import quoteattr
 
 from agentscope.message import DataBlock, TextBlock
 from agentscope.message._block import URLSource
 
 from .cache import PreparedSandboxFile, SandboxCacheError
+from .file_types import canonical_attachment_mime
 
 _TEXT_EXTENSIONS = {
     ".txt",
@@ -22,14 +23,8 @@ _TEXT_EXTENSIONS = {
     ".yml",
     ".log",
 }
-_OOXML = {".docx", ".xlsx", ".pptx"}
+_OFFICE = {".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx"}
 _TOOL_REQUIRED = {"pdf", "docx", "xlsx", "pptx", "doc", "xls", "ppt", "csv", "tsv"}
-_LEGACY_MIME = {".doc": "application/msword", ".xls": "application/vnd.ms-excel", ".ppt": "application/vnd.ms-powerpoint"}
-_OOXML_MIME = {
-    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-}
 _IMAGE_MIME = {
     ".png": "image/png",
     ".jpg": "image/jpeg",
@@ -49,6 +44,7 @@ class AttachmentProcessor:
         self.per_file_chars = max(1, int(per_file_chars))
         self.task_chars = max(self.per_file_chars, int(task_chars))
         self.read_failures: dict[str, str] = {}
+        self.read_successes: set[str] = set()
 
     def process(
         self,
@@ -59,7 +55,12 @@ class AttachmentProcessor:
         blocks: list[TextBlock | DataBlock] = []
         remaining = self.task_chars
         for prepared in files:
-            kind = self._kind(prepared)
+            self.read_successes.discard(prepared.file_id)
+            prepared = replace(prepared, content_type=canonical_attachment_mime(prepared.local_path, prepared.content_type))
+            kind = self.classify(prepared)
+            if kind == 'unreadable':
+                blocks.append(self.failure_block(prepared))
+                continue
             if kind in {"image", "audio", "video"}:
                 blocks.append(
                     DataBlock(
@@ -92,7 +93,7 @@ class AttachmentProcessor:
                     self._reference_block(
                         prepared, file_ref, processing="tool_required",
                         message=(
-                            f"这是旧版 {kind} 文件，正文尚未读取。请使用已授权的原生文件解析工具读取原件。"
+                            "这是 Office 附件，正文尚未读取，标注格式不代表实际格式。请使用已授权的原生文件解析工具读取原件。"
                             "只有明确需要兼容、交付或重算时才进行受控转换；转换成功不能证明内容完整。"
                             if kind in {"doc", "xls", "ppt"} else
                             "该文件正文尚未读取。如当前问题依赖其内容，请选择已授权且支持该类型的文件处理工具。"
@@ -101,6 +102,7 @@ class AttachmentProcessor:
                 )
                 continue
             if kind == "binary":
+                self.read_failures[prepared.file_id] = 'FILE_TYPE_UNSUPPORTED'
                 blocks.append(
                     self._status(
                         prepared,
@@ -121,6 +123,7 @@ class AttachmentProcessor:
                 self.read_failures[prepared.file_id] = "DOCUMENT_TEXT_TRUNCATED"
             else:
                 self.read_failures.pop(prepared.file_id, None)
+                self.read_successes.add(prepared.file_id)
             remaining = max(remaining - len(rendered), 0)
             blocks.append(
                 TextBlock(
@@ -134,12 +137,31 @@ class AttachmentProcessor:
             )
         return blocks
 
+    def classify(self, prepared: PreparedSandboxFile) -> str:
+        try:
+            kind = self._kind(prepared)
+        except SandboxCacheError:
+            self.read_failures[prepared.file_id] = 'FILE_TYPE_UNSUPPORTED'
+            return 'unreadable'
+        if self.read_failures.get(prepared.file_id) == 'FILE_TYPE_UNSUPPORTED':
+            self.read_failures.pop(prepared.file_id, None)
+        return kind
+
+    def failure_block(self, prepared):
+        return self._status(prepared, '文件格式暂时无法识别，正文未读取；其他附件可继续处理。')
+
     def _kind(self, prepared: PreparedSandboxFile) -> str:
         path = prepared.local_path
+        suffix = path.suffix.lower()
+        if suffix in _OFFICE:
+            # The cache has already authorized and integrity-checked these bytes.
+            # This is routing, not parsing: even unrecognized Office containers
+            # must reach the isolated reader for a per-file result. In particular,
+            # native-analysis media selection must not abort on document metadata.
+            return suffix.removeprefix(".")
         with path.open("rb") as handle:
             prefix = handle.read(512)
-        mime = prepared.content_type.split(";", 1)[0].lower()
-        suffix = path.suffix.lower()
+        mime = canonical_attachment_mime(path, prepared.content_type)
         if suffix == ".pdf" or mime == "application/pdf" or prefix.startswith(b"%PDF-"):
             if (
                 not prefix.startswith(b"%PDF-")
@@ -148,20 +170,10 @@ class AttachmentProcessor:
             ):
                 raise SandboxCacheError("Attachment type mismatch")
             return "pdf"
-        if suffix in _LEGACY_MIME or mime in _LEGACY_MIME.values():
-            if (suffix not in _LEGACY_MIME or mime not in {_LEGACY_MIME[suffix], "application/octet-stream"}
-                    or not prefix.startswith(bytes.fromhex("d0cf11e0a1b11ae1"))):
-                raise SandboxCacheError("Attachment type mismatch")
-            return suffix.removeprefix(".")
-        if suffix in _OOXML or mime.startswith("application/vnd.openxmlformats"):
-            expected_mime = _OOXML_MIME.get(suffix)
-            if (
-                expected_mime is None
-                or mime not in {expected_mime, "application/octet-stream"}
-                or not zipfile.is_zipfile(path)
-            ):
-                raise SandboxCacheError("Attachment type mismatch")
-            return suffix.removeprefix(".")
+        if mime in {'application/msword', 'application/vnd.ms-excel', 'application/vnd.ms-powerpoint'} or mime.startswith('application/vnd.openxmlformats'):
+            # Office routing only applies to an admitted Office filename.
+            # Preserve rejection of unrelated files with contradictory labels.
+            raise SandboxCacheError("Attachment type mismatch")
         if mime.startswith("image/") or suffix in _IMAGE_MIME:
             expected_mime = _IMAGE_MIME.get(suffix)
             if (

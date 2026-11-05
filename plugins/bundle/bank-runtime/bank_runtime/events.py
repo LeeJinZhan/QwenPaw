@@ -24,6 +24,8 @@ _PUBLIC_ERROR_CODES = _RECOVERABLE_SESSION_ERROR_CODES | {
     "FILE_ACCESS_DENIED",
     'MODEL_TIMEOUT', 'MODEL_OUTPUT_TRUNCATED', 'MODEL_UPSTREAM_UNAVAILABLE', 'MODEL_REQUEST_REJECTED', 'MODEL_CONTENT_FILTERED', 'MODEL_EXECUTION_ERROR', "WORKER_FAILED",
     "DOCUMENT_ARGUMENT_INVALID", "DOCUMENT_FORMULA_CACHE_MISSING",
+    "DOCUMENT_SOURCE_UNAVAILABLE", "DOCUMENT_ANALYSIS_FAILED",
+    "DOCUMENT_RESOURCE_EXHAUSTED", "DOCUMENT_QUEUE_TIMEOUT", "DOCUMENT_EXECUTION_TIMEOUT", "DOCUMENT_ENGINE_UNAVAILABLE",
     "DOCUMENT_PLAN_INVALID", "DOCUMENT_INVENTORY_INCOMPLETE", "DOCUMENT_STATISTICS_INCOMPLETE",
     "DOCUMENT_CONVERSION_PARTIAL",
     "MINERU_SUBMIT_AMBIGUOUS", "DOCUMENT_READ_INCOMPLETE", "DOCUMENT_READ_NO_PROGRESS", "DOCUMENT_PARSE_FAILED", "DOCUMENT_REF_EXPIRED", "DOCUMENT_RESULT_TOO_LARGE", "DOCUMENT_TEXT_TRUNCATED", "DOCUMENT_TEXT_ENCODING_UNSUPPORTED", "MINERU_TIMEOUT", "MINERU_UNAVAILABLE",
@@ -285,6 +287,10 @@ class CompactEventProjector:
                 "message": "回答完成",
             }
         message = "已停止生成" if raw_status == "cancelled" else "回答生成失败"
+        if not raw_status and error_code == 'ARTIFACT_VALIDATION_FAILED':
+            from .spreadsheet_messages import spreadsheet_terminal_hint
+            if spreadsheet_terminal_hint(diagnostic):
+                message = diagnostic
         if not raw_status and error_code == "ARTIFACT_VALIDATION_FAILED" and re.fullmatch(
             r"PPTX_LAYOUT_CAPACITY\|([1-9][0-9]?|100)\|(text|title|chart_conclusion)", diagnostic
         ):

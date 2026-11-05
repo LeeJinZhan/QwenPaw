@@ -37,6 +37,12 @@ class GatewayError(RuntimeError):
         from ..conversion_reports import REASONS
         self.conversion_failure = conversion_failure if isinstance(conversion_failure, str) and conversion_failure in REASONS else ""
         self.validation_hint = str(validation_hint or "")[:500] if code == "ARTIFACT_VALIDATION_FAILED" else ""
+        from ..spreadsheet_messages import spreadsheet_failure_hint, office_failure_hint
+        # Other error codes may carry only our fixed format guidance, never
+        # arbitrary server prose, paths or credentials.
+        fixed_hint = spreadsheet_failure_hint(self.code, message=validation_hint) or office_failure_hint(self.code)
+        if fixed_hint:
+            self.validation_hint = fixed_hint
         self.layout_failure = layout_failure
         supplied_facts = dict(failure_metadata or {})
         for key in ("details", "result"):
@@ -451,13 +457,15 @@ def _response_error(payload: Mapping[str, Any], fallback: str, *, execution_stat
         metadata.update(execution_status="failed", retryable=False,
                         recovery_action="renderer_exhausted")
     code = str(detail.get("code") or {401: 'UNAUTHORIZED', 403: 'FORBIDDEN'}.get(http_status, ''))
+    from ..spreadsheet_messages import spreadsheet_failure_hint
+    fixed_hint = spreadsheet_failure_hint(code, reason=details.get('reason', ''))
     rejected = http_status is not None and 400 <= http_status < 500 and http_status not in {408, 425, 429}
     return GatewayError(
         "Runtime rejected this request" if rejected else str(detail.get("message") or fallback),
         code=code,
         http_status=http_status,
         violation=str(details.get("violation_type") or ""),
-        validation_hint=str(details.get("validation_hint") or ""),
+        validation_hint=fixed_hint or str(details.get("validation_hint") or ""),
         layout_failure=location,
         conversion_failure=details.get("reason", ""),
         failure_metadata=metadata,

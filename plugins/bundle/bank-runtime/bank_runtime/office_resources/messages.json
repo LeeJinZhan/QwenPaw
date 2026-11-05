@@ -1,0 +1,114 @@
+{
+  "version": 1,
+  "failures": {
+    "csv_revision_unsupported": [
+      "ARTIFACT_VALIDATION_FAILED",
+      "当前不支持对上传的 CSV 直接局部修订，原件未修改。可在完整读取数据后重新生成 CSV 副本，或用 Excel/WPS 另存为 XLSX 后上传修改。重新生成需要完整数据，并核对编码、分隔符、前导零及长账号；CSV 不保存字体、颜色或列宽。"
+    ],
+    "xls_revision_unsupported": [
+      "ARTIFACT_TYPE_NOT_ALLOWED",
+      "当前不支持直接修订并交付 XLS，原件未修改。可先转换为 XLSX，再修改并交付 XLSX 副本；转换需当前环境支持，复杂格式、公式和对象可能存在差异。若必须保留 XLS 格式，当前无法完成。"
+    ],
+    "xls_revision_capability_disabled": [
+      "POLICY_BLOCKED",
+      "当前助手未开放 XLS 原格式修订，原件未修改。系统支持的处理路线是先转为 XLSX，再修订并交付 XLSX 副本；需要助手具备对应转换和修订能力，不能绕过权限。复杂格式、公式和对象可能存在差异。"
+    ],
+    "xls_conversion_unavailable": [
+      "DOCUMENT_WORKER_UNAVAILABLE",
+      "当前环境未提供 XLS 转 XLSX 能力，本次未生成转换文件，原件未修改。可用 Excel/WPS 另存为 XLSX 后重新上传，或联系管理员启用转换服务；另存后请核对关键数据和格式。"
+    ],
+    "csv_conversion_unsupported": [
+      "ARTIFACT_TYPE_NOT_ALLOWED",
+      "当前不支持直接转换该 CSV，原件未修改。可用 Excel/WPS 导入并另存为所需格式，或在完整读取数据后生成新表；导入时请核对编码、分隔符、前导零及长账号。"
+    ],
+    "docx_revision_unsupported": [
+      "ARTIFACT_VALIDATION_FAILED",
+      "DOCX：该请求不是受支持的局部文字修改，原件未修改。请读取原文，提交明确目标及原文/新文的局部替换；涉及整体重排时先说明重建及格式保留边界，不能静默切换。"
+    ],
+    "doc_revision_unsupported": [
+      "ARTIFACT_TYPE_NOT_ALLOWED",
+      "当前不支持直接修订并交付 DOC，原件未修改。可在当前环境支持且获授权时先转换为 DOCX；转换不等于完成修订，也不保证复杂版式和对象完全一致。"
+    ],
+    "doc_revision_capability_disabled": [
+      "POLICY_BLOCKED",
+      "当前助手未开放 DOC 原格式修订，原件未修改。转换为 DOCX 或生成修订稿仍需相应能力与授权，不能绕过权限。"
+    ],
+    "doc_conversion_unavailable": [
+      "DOCUMENT_WORKER_UNAVAILABLE",
+      "当前环境未提供 DOC 转 DOCX 能力，本次未生成转换文件，原件未修改。可用 Word/WPS 另存为 DOCX 后上传，或联系管理员启用转换服务。"
+    ],
+    "pptx_revision_unsupported": [
+      "ARTIFACT_VALIDATION_FAILED",
+      "PPTX：该请求不是受支持的局部文字修改，原件未修改。请读取原文，提交明确目标及原文/新文的局部替换；涉及整体重排时先说明重建及格式保留边界，不能静默切换。"
+    ],
+    "ppt_revision_unsupported": [
+      "ARTIFACT_TYPE_NOT_ALLOWED",
+      "当前不支持直接修订并交付 PPT，原件未修改。可在当前环境支持且获授权时先转为 PPTX，再按已支持方式处理；转换不等于修订完成，也不保证动画及复杂对象完全一致。若必须交付旧 PPT 格式，当前无法完成。"
+    ],
+    "ppt_revision_capability_disabled": [
+      "POLICY_BLOCKED",
+      "当前助手未开放 PPT 原格式修订，原件未修改。转换为 PPTX 或重新生成仍需相应能力与授权，不能绕过权限。"
+    ],
+    "ppt_conversion_unavailable": [
+      "DOCUMENT_WORKER_UNAVAILABLE",
+      "当前环境未提供 PPT 转 PPTX 能力，本次未生成转换文件，原件未修改。可用 PowerPoint/WPS 另存为 PPTX 后上传，并核对母版、动画、媒体及复杂对象，或联系管理员恢复转换服务。"
+    ],
+    "doc_conversion_failed": [
+      "ARTIFACT_RENDER_FAILED",
+      "DOC 转 DOCX 未成功，本次未生成转换文件，原件未修改。可用 Word/WPS 打开原件并另存为 DOCX 后上传，核对图片、批注及复杂版式；原件无法打开时请提供可正常打开的副本。不要重复提交相同失败转换。"
+    ],
+    "ppt_conversion_failed": [
+      "ARTIFACT_RENDER_FAILED",
+      "PPT 转 PPTX 未成功，本次未生成转换文件，原件未修改。可用 PowerPoint/WPS 打开原件并另存为 PPTX 后上传，核对母版、动画、媒体及嵌入对象；原件无法打开时请提供可正常打开的副本。不要重复提交相同失败转换。"
+    ],
+    "presentation_template_unavailable": [
+      "DOCUMENT_WORKER_UNAVAILABLE",
+      "指定的演示模板当前不可用，本次未生成文件。请联系管理员核对模板资源及完整性；不会自动改用其他主题。用户接受其他模板后，才可选择当前已提供的主题重新生成。"
+    ],
+    "text_patch_invalid_target": [
+      "ARTIFACT_VALIDATION_FAILED",
+      "局部修改未完成，原件未修改。请核对来源文件、原文字和段落/页码/表格位置，读取准确内容后再提交；不要自动重建。"
+    ],
+    "text_patch_ambiguous": [
+      "ARTIFACT_VALIDATION_FAILED",
+      "找到多处相同原文字，未修改文件。请明确段落、页面、文本框或表格单元格位置后再修改。"
+    ],
+    "text_patch_overlap": [
+      "ARTIFACT_VALIDATION_FAILED",
+      "多项修改的文字范围重叠，未修改文件。请合并重叠部分的原文与新文替换后再提交。"
+    ],
+    "text_patch_incompatible": [
+      "ARTIFACT_VALIDATION_FAILED",
+      "目标涉及保护、签名、混合文字样式、合并表格、域、链接或复杂对象，当前无法可靠地局部修改；原件保留。可缩小到简单文字范围，或在Word/PowerPoint/WPS中修改；未经接受不能重建。"
+    ]
+  },
+  "failure_codes": {
+    "TEMPLATE_NOT_AVAILABLE": "所选模板当前不可用，本次未生成文件。请重新选择当前助手可用的已发布模板，或联系管理员恢复模板及授权；不会自动改用普通 Word 或其他模板。",
+    "TEMPLATE_FIELD_REQUIRED": "当前模板缺少必填内容，本次未生成文件。请补齐已选模板要求的内容后继续；已有信息可直接沿用，不必更换模板。"
+  },
+  "converted": {
+    "xlsx": "已将 XLS 转换为 XLSX 副本，原件保留。",
+    "docx": "已将 DOC 转换为 DOCX 副本，原件保留。",
+    "other": "已生成转换后的副本，原件保留。",
+    "limitation": "尚未核验转换前后的版式、公式及复杂对象完全一致，请核对关键数据；转换成功不代表后续修订已完成。",
+    "pptx": "已将 PPT 转换为 PPTX 副本，原件保留。",
+    "limitations": {
+      "docx": "尚未核验转换前后的复杂版式、图片、批注及嵌入对象完全一致，请核对关键内容；转换成功不代表后续修订已完成。",
+      "pptx": "尚未核验转换前后的母版、动画、切换、媒体及嵌入对象完全一致，请核对关键页面；转换成功不代表后续修订已完成。"
+    }
+  },
+  "quality": {
+    "page_number_missing": "正文已保留，页码未完整设置。",
+    "table_header_missing": "表格内容已保留，部分表头未设置跨页重复。",
+    "paragraph_style_mismatch": "正文和顺序已保留，部分段落样式与默认模板不同。"
+  },
+  "revision_rebuild": "本文件按完整修订内容重新生成，原件保留；并非原件上的局部修改，原排版及复杂对象不保证全部保留。",
+  "xlsx_revision": {
+    "on_open": "已保留原样式并完成指定修改；公式及关联图表需用Excel/WPS打开后重新计算。",
+    "refresh_required": "透视表保留原结构，需打开后刷新数据。"
+  },
+  "revision_rebuild_by_format": {
+    "pptx": "本演示稿按完整修订内容重新生成，原件保留；并非原件上的局部修改，原母版、动画、切换、媒体、批注及嵌入对象不保证全部保留。"
+  },
+  "text_revision": "已完成指定文字的局部修改，原件保留；未涉及的文件内容及对象保持不变。沿用原格式，文字长度变化可能影响换行、分页或文本框容纳，尚未核验Office/WPS中的实际排版。"
+}

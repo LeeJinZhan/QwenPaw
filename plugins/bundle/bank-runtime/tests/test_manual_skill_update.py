@@ -21,6 +21,11 @@ def test_manual_export_is_complete_and_reproducible(tmp_path):
     assert 'reference=' not in delivery and 'references/' not in delivery
     assert '按需读取格式契约' not in delivery
     assert 'artifact_status=succeeded' in delivery
+    writing = (output / 'bank-document-writing.md').read_text()
+    assert (ROOT / 'skills/bank-document-writing/references/official-writing.md').read_text().strip() in writing
+    assert '通知说明事项' in writing and '请示提出具体待批事项' in writing
+    assert '"layout_kind":"standard_document"' in delivery
+    assert '"layout_kind":"official_document"' in delivery
     for reference in (ROOT / 'skills/bank-file-delivery/references').glob('*.md'):
         assert reference.read_text().strip() in delivery
     for name in module.SKILLS:

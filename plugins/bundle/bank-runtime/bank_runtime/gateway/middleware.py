@@ -12,6 +12,7 @@ from copy import copy
 import asyncio
 import json
 import logging
+import os
 import time
 from typing import Any, Mapping, TYPE_CHECKING
 import uuid
@@ -44,7 +45,7 @@ from .document_preparation import DocumentSourcePreparation
 from .document_access import DocumentAccessError, DocumentReferenceArgumentError, invalid_document_reference_argument
 from .source_dependencies import operation_sources, affected_sources
 from ..artifact_tools import DocumentReadIncompleteError
-from ..artifact_tools import FileOperationsIncompleteError, OfficeConversionFailureError
+from ..artifact_tools import FileOperationsIncompleteError, OfficeConversionFailureError, SpreadsheetOperationFailureError
 from ..presentation import artifact_model_result, failure_message, failure_metadata
 from ..conversion_reports import (ConversionCoverage, validate_conversion_report, conversion_reason, REASONS)
 from ..model_context import prepare_public_model_context
@@ -123,6 +124,7 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
         artifact_intent: ArtifactDeliveryIntent | None = None,
         model_reliability: Any | None = None,
         native_analysis_enabled: bool = False,
+        knowledge_citations_enabled: bool = False,
         caller_identity: TrustedBankIdentity | None = None,
         caller_identity_error: str = "",
     ) -> None:
@@ -132,6 +134,7 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
         self.model_reliability = model_reliability
         self.sandbox_executor = sandbox_executor
         self.native_analysis_enabled = native_analysis_enabled is True
+        self.knowledge_citations_enabled = knowledge_citations_enabled is True
         self._native_uncertain_scopes: set[tuple] = set()
         self.configuration_error = str(configuration_error or "")
         self.artifact_intent = artifact_intent
@@ -151,6 +154,7 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
         self.converted_sources: dict[str, str] = {}
         self.conversion_coverage = ConversionCoverage()
         self.conversion_failures: dict[str, str] = {}
+        self.spreadsheet_failures: dict[str, str] = {}
         self.document_reads = DocumentReadLedger()
         self._read_guard_failed = False
         self._scoped_answer_confirmed = False
@@ -200,6 +204,7 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
         self.converted_sources.clear()
         self.conversion_coverage = ConversionCoverage()
         self.conversion_failures.clear()
+        self.spreadsheet_failures.clear()
         self.document_reads = DocumentReadLedger()
         self.document_preparation = DocumentSourcePreparation(self._run_file_preparation_tool)
         self._read_guard_failed = False
@@ -237,11 +242,28 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
             if isinstance(text, str):
                 self._reply_text.append(text)
 
-    def _read_error(self):
+    def _attachment_gaps(self):
+        from ..sandbox.tools import attachment_read_state
+        failures, completed = attachment_read_state()
+        failures = {file_id: code for file_id, code in failures.items()
+                    if not self.document_reads.sources_complete([file_id])}
+        return failures, completed
+
+    def _read_error(self, sources=None):
         if self.native_analysis_enabled:
             return ""
         from ..sandbox.tools import attachment_read_error
-        code = attachment_read_error() or (self.document_reads.error_code if self.document_reads.pending else "")
+        failures, _ = self._attachment_gaps()
+        if sources is None and self.artifact_intent is not None:
+            sources = set(self.artifact_intent.source_refs)
+        if failures:
+            code = next((reason for file_id, reason in failures.items()
+                         if affected_sources(sources, {file_id}, self.converted_sources)), '')
+        else:
+            from ..sandbox.tools import attachment_read_state
+            original_failures, _ = attachment_read_state()
+            code = '' if original_failures else attachment_read_error()
+        code = code or (self.document_reads.error_code if self.document_reads.pending else "")
         if code and any(key.startswith("artifact:") for key in self.unresolved_file_operations):
             return "ARTIFACT_OUTPUT_MISSING"
         if not code and any(key.startswith("parse:") for key in self.unresolved_file_operations):
@@ -253,6 +275,9 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
         if self._read_guard_failed and not self.native_analysis_enabled:
             raise DocumentReadIncompleteError(self._read_error() or "DOCUMENT_READ_INCOMPLETE")
         if any(key.startswith("artifact:") for key in self.unresolved_file_operations):
+            for key, reason in self.spreadsheet_failures.items():
+                if key in self.unresolved_file_operations:
+                    raise SpreadsheetOperationFailureError(reason)
             for digest, reason in self.conversion_failures.items():
                 if (not self.native_analysis_enabled
                         or f'artifact:artifact_convert:{digest}' in self.unresolved_file_operations):
@@ -302,11 +327,12 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
         sources = operation_sources(name, payload, self.artifact_intent)
         if affected_sources(sources, self.conversion_coverage.incomplete_sources, self.converted_sources):
             return "DOCUMENT_CONVERSION_PARTIAL"
-        if self._read_error():
+        if self._read_error(sources):
             gaps = {gap['file_id'] for gap in self.document_reads.unfinished_scopes()}
+            gaps.update(self._attachment_gaps()[0])
             # A failure without an attributable source remains unknown.
             if not gaps or affected_sources(sources, gaps, self.converted_sources):
-                return self._read_error()
+                return self._read_error(sources)
         return ""
 
     def _requires_conversion_read(self, payload):
@@ -320,6 +346,22 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
     def _remember_conversion_failure(self, name, payload, reason):
         if name == "artifact_convert" and reason in REASONS:
             self.conversion_failures[canonical_payload_hash(payload)] = reason
+
+    def _remember_spreadsheet_failure(self, name, payload, error):
+        if name not in {'artifact_revise', 'artifact_convert'}:
+            return
+        from ..spreadsheet_messages import SPREADSHEET_FAILURES, spreadsheet_failure_hint
+        hint = spreadsheet_failure_hint(getattr(error, 'code', ''), message=getattr(error, 'validation_hint', ''))
+        if hint:
+            reason = next(key for key, (_, text) in SPREADSHEET_FAILURES.items() if text == hint)
+            from ..spreadsheet_messages import recoverable_patch_failure
+            if recoverable_patch_failure(reason):
+                return  # Normal recovery budgets still govern corrected requests.
+            keys = self._operation_keys(name, payload)
+            self.unresolved_file_operations.update(keys)
+            for key in keys:
+                if key.startswith('artifact:'):
+                    self.spreadsheet_failures[key] = reason
 
     async def _scoped_model_response(self, value):
         response = await _capture_model_output(value)
@@ -572,8 +614,7 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
                         "在 artifact_generate/artifact_revise 同时提交 delivery_plan，且仅含 "
                         "document_type（letter/request/notice/report/work_plan/task_list/article/other）、"
                         "target_format=docx、layout_kind（official_document/standard_document）。"
-                        "向单位商洽的函、报批请示、下发执行的任务通知通常用公文；任务清单、"
-                        "研究文章、教学示例通常用普通文档。不要只看关键词；用户明确普通版式时遵从。"
+                        "文种与版式选择遵循已加载的文件技能及用户明确要求。"
                         "正文结构须与登记版式一致；机构模板走已授权已发布模板版本。"
                         "若缺少或不一致，按工具提示修正后重试；不得只在最终回答中宣称判断或生成完成。"
                         f"本轮明确版式约束：{self.artifact_intent.layout_kind or '按用途判断'}。"
@@ -608,13 +649,20 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
             names = _tool_call_names(response.final)
             if not names:
                 text = ''.join(block.text for block in response.final.content if isinstance(block, TextBlock))
-                if (self.artifact_intent is None or self._scoped_answer_confirmed) and self.document_reads.permits_scoped_answer(text):
+                attachment_gaps, completed_attachments = self._attachment_gaps()
+                independent = bool(completed_attachments or self.document_reads.independent_scopes())
+                safe_gaps = not any(code in {'FILE_ACCESS_DENIED','FILE_REF_INVALID','FILE_REF_EXPIRED','MINERU_SUBMIT_AMBIGUOUS'}
+                                    for code in self.document_reads.failures.values())
+                partial_allowed = (self.document_reads.permits_scoped_answer(text)
+                                   or bool(attachment_gaps and independent and safe_gaps and text.strip()))
+                if (self.artifact_intent is None or self._scoped_answer_confirmed) and partial_allowed:
                     state = current_delivery_state()
                     if state is not None and state.task_id == getattr(getattr(self.client, 'config', None), 'task_id', ''):
                         self._confirm_scoped_delivery()
                         # A single verified formal snapshot avoids leaking a speculative buffered prefix.
                         final = copy(response.final)
-                        final.content = [TextBlock(text=text)]
+                        final.content = [TextBlock(text=('部分材料尚未完整读取，以下结果仅覆盖已成功读取的部分。\n\n' + text)
+                                                  if attachment_gaps else text)]
                         return _CapturedModelOutput((final,), response.streamed).replay()
                 self._read_guard_failed = True
                 raise DocumentReadIncompleteError(read_error)
@@ -803,9 +851,13 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
         state = current_delivery_state()
         if state is not None and state.task_id == getattr(getattr(self.client, 'config', None), 'task_id', ''):
             self._scoped_answer_confirmed = True
+            gaps = self.document_reads.unfinished_scopes()
+            present = {gap['file_id'] for gap in gaps}
+            gaps += [{'kind':'document', 'file_id':file_id, 'impact':'scope_unread'}
+                     for file_id in self._attachment_gaps()[0] if file_id not in present]
             state.analysis = {'version': 'reading-delivery-1', 'delivery': 'partial',
                 'gaps': [{**gap, 'file_id': self.converted_sources.get(gap['file_id'], gap['file_id'])}
-                         for gap in self.document_reads.unfinished_scopes()]}
+                         for gap in gaps]}
 
     def document_input(self, tool_name, tool_input):
         task_id = getattr(getattr(self.client, "config", None), "task_id", "")
@@ -951,7 +1003,7 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
                             if item.state == ToolResultState.INTERRUPTED
                             else failure_message()
                         )
-                        if is_knowledge_tool(name) and item.state == ToolResultState.ERROR:
+                        if self.knowledge_citations_enabled and is_knowledge_tool(name) and item.state == ToolResultState.ERROR:
                             _, knowledge_error = extract_knowledge_sources(item.content)
                             message = ("缺少有效可读范围，知识库检索未执行，请联系管理员检查授权。"
                                        if knowledge_error == "MISSING_SCOPE" else "知识库检索未完成，请稍后重试。")
@@ -1134,6 +1186,11 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
                                   "message": "未取得有效的文件发布结果，不能确认交付；请核对文件列表后再处理。"}}
                 if result.get("status") != "success":
                     self._remember_conversion_failure(tool_name, tool_input, conversion_reason(result))
+                    from ..spreadsheet_messages import spreadsheet_envelope_failure
+                    reason, hint = spreadsheet_envelope_failure(result)
+                    if hint:
+                        self._remember_spreadsheet_failure(tool_name, tool_input, GatewayError(
+                            hint, code=str(result.get('error_code') or ''), validation_hint=hint))
                 code = str(result.get("error_code") or "")
                 facts = failure_metadata(result) if result.get('status') != 'success' else {}
                 if facts:
@@ -1243,7 +1300,7 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
                             if reason:
                                 status, error_code = "failed", reason
                         knowledge_sources = None
-                        if is_knowledge_tool(tool_name) and status == "completed":
+                        if self.knowledge_citations_enabled and is_knowledge_tool(tool_name) and status == "completed":
                             knowledge_sources, knowledge_error = extract_knowledge_sources(item.content)
                             if knowledge_error:
                                 status, error_code = "failed", knowledge_error
@@ -1297,6 +1354,7 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
                 result_reported = True
                 await self._report_native_terminal(tool_call_id,'execution_unknown',started_at,'TOOL_EXECUTION_UNKNOWN')
             self._remember_conversion_failure(tool_name, tool_input, getattr(exc, "conversion_failure", ""))
+            self._remember_spreadsheet_failure(tool_name, tool_input, exc)
             if isinstance(exc, DocumentReferenceArgumentError):
                 self.document_reads.reject_reference_argument(tool_name, tool_input)
             elif isinstance(exc, DocumentAccessError):
@@ -1433,6 +1491,7 @@ class GatewayPermissionEngine:
                     _logger.warning('Document rejection audit unavailable: error_type=%s', type(audit_exc).__name__)
             self.middleware.reject_document_preflight(tool_name, tool_input, getattr(exc, 'code', ''))
             self.middleware._remember_conversion_failure(tool_name, tool_input, getattr(exc, "conversion_failure", ""))
+            self.middleware._remember_spreadsheet_failure(tool_name, tool_input, exc)
             if tool_name in _RUNTIME_EXECUTED_TOOLS and isinstance(exc, GatewayError):
                 # A preflight failure cannot have started this tool execution.
                 # Legacy input errors still allow correction unless trusted
@@ -1611,6 +1670,11 @@ def bank_runtime_middleware_factory(
             caller_identity=identity,
             caller_identity_error=identity_error,
             model_reliability=reliability,
+            # Operator-owned process configuration only; never trust request or
+            # model fields to enable citation parsing. Freeze for this task.
+            knowledge_citations_enabled=(os.environ.get(
+                "QWENPAW_RUNTIME_KNOWLEDGE_CITATIONS_ENABLED", "false"
+            ) == "true"),
             sandbox_executor=sandbox_executor,
             native_analysis_enabled=bool(sandbox_executor and sandbox_executor.sandbox_context.get('native_analysis_enabled') is True
                                          and sandbox_executor.sandbox_context.get('isolation_level') == 'container'),

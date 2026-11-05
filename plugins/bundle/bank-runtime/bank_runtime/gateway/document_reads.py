@@ -11,7 +11,7 @@ READ_ERROR_CODES = frozenset({
     "DOCUMENT_READ_INCOMPLETE", "DOCUMENT_READ_NO_PROGRESS", "DOCUMENT_PARSE_FAILED",
     "DOCUMENT_REF_EXPIRED", "DOCUMENT_RESULT_TOO_LARGE", "DOCUMENT_TEXT_TRUNCATED",
     "DOCUMENT_TEXT_ENCODING_UNSUPPORTED", "MINERU_TIMEOUT", "MINERU_UNAVAILABLE", "MINERU_SUBMIT_AMBIGUOUS",
-    "DOCUMENT_ENGINE_UNAVAILABLE", "DOCUMENT_QUEUE_TIMEOUT", "DOCUMENT_EXECUTION_TIMEOUT", "DOCUMENT_ANALYSIS_FAILED",
+    "DOCUMENT_SOURCE_UNAVAILABLE", "DOCUMENT_RESOURCE_EXHAUSTED", "DOCUMENT_ENGINE_UNAVAILABLE", "DOCUMENT_QUEUE_TIMEOUT", "DOCUMENT_EXECUTION_TIMEOUT", "DOCUMENT_ANALYSIS_FAILED",
 })
 FILE_POLICY_CODES = frozenset({"FILE_ACCESS_DENIED", "FILE_REF_INVALID", "FILE_REF_EXPIRED", "FILE_TYPE_UNSUPPORTED"})
 UNRESOLVED_REMOTE_CODES = frozenset({"MINERU_TIMEOUT", "MINERU_SUBMIT_AMBIGUOUS"})
@@ -92,7 +92,7 @@ class _Read:
 
     @property
     def structured(self):
-        return bool(self.inventory)
+        return bool(self.inventory) or self.inventory_total > 0
 
     @property
     def complete(self):
@@ -476,7 +476,11 @@ class DocumentReadLedger:
                         if isinstance(sheet, Mapping) and isinstance(sheet.get("name"), str)
                         and type(sheet.get("rows")) is int and sheet.get("rows") >= 0
                     }
-                    if not inventory or not isinstance(ref, str) or not ref:
+                    deferred_inventory = (not inventory and raw_inventory.get("inventory_complete") is False
+                        and type(raw_inventory.get("next_inventory_cursor")) is int
+                        and raw_inventory["next_inventory_cursor"] == 0
+                        and type(raw_inventory.get("sheet_count")) is int and raw_inventory["sheet_count"] > 0)
+                    if (not inventory and not deferred_inventory) or not isinstance(ref, str) or not ref:
                         continue
                     for old_ref, doc in list(self.documents.items()):
                         if doc.file_id == file_id and old_ref != ref:
@@ -485,7 +489,7 @@ class DocumentReadLedger:
                             self._clear_aggregate_reference(old_ref, ref)
                     existing = self.documents.get(ref)
                     if existing:
-                        if existing.file_id != file_id or existing.inventory != inventory:
+                        if existing.file_id != file_id or (not deferred_inventory and existing.inventory != inventory) or (deferred_inventory and existing.inventory_total != raw_inventory["sheet_count"]):
                             existing.error = "DOCUMENT_READ_INCOMPLETE"
                             continue
                         self.failures.pop("parse:" + file_id, None)
@@ -960,6 +964,8 @@ class DocumentReadLedger:
             if doc.complete:
                 continue
             if doc.structured:
+                if not doc.inventory_complete:
+                    gaps.append({"kind": "document", "file_id": doc.file_id, "impact": "scope_unread"})
                 for sheet in doc.inventory:
                     if not doc.sheet_full(sheet):
                         gaps.append({'kind': 'sheet', 'file_id': doc.file_id, 'target': sheet, 'impact': 'scope_unread'})
@@ -971,7 +977,7 @@ class DocumentReadLedger:
         return gaps
 
     def permits_scoped_answer(self, text):
-        if any(code in FILE_POLICY_CODES or code == 'MINERU_SUBMIT_AMBIGUOUS' for code in self.failures.values()):
+        if any(code in (FILE_POLICY_CODES - {'FILE_TYPE_UNSUPPORTED'}) or code == 'MINERU_SUBMIT_AMBIGUOUS' for code in self.failures.values()):
             return False
         return bool(self.independent_scopes() and self.unfinished_scopes() and text.strip())
 

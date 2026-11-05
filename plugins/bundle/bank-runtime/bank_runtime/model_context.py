@@ -18,6 +18,15 @@ GOAL_GUIDANCE = """结合当前消息与仍有效的上下文确定目标，沿�
 Skill方法按适用范围使用，示例不是本轮事实或要求。处理口径由用户要求、适用依据和实际材料确定；必要的自主方法选择说明依据或假设，不把案例方法设为其他任务的默认规则。
 """
 
+OUTPUT_SCOPE_GUIDANCE = """最终答复的数量与范围：
+按用户要求的单位和数量交付。改写成一句话时，选定一个版本，只输出这一句，不加前言、备选、解释或邀约；用户要求多个版本、比较或详细展开时，完整提供所需内容，不统一缩短。
+润色采用满足表达要求的最小改动，不扩写事实。保留原文的时态和承诺强度，不把意向写成保证、不把未来动作写成已经实施，不加入原文没有的计划、进度、原因、期限或建议。“更正式”不意味着增加承诺。
+输出前将改写中的每个事实和承诺与原文对照，删除无依据的增加项。这是本次写作内部的措辞检查，不是拒绝交付、额外重试或要求用户确认的条件。
+"""
+
+ARTIFACT_EVIDENCE_GUIDANCE = """文件交付说明以已确认的结果为依据：请求中的排版指令、所选主题和生成器默认值不等于实际已核验的样式。没有结果回执或实际检查依据时，不断言具体颜色、字体、加粗或保真效果；可直接说明文件已生成及已确认的内容，不为补写样式说明增加检查、重试或重新生成。
+"""
+
 CURRENT_TURN_GUIDANCE = """本轮回答约定：
 日期、能力和执行状态依据可信上下文及本轮实际结果；结果未知如实说明。历史回答、计划或工具结果不代表本轮已尝试或当前能力。
 普通问答、解释和写作不以拥有对应工具或联网为前提。
@@ -156,6 +165,8 @@ def prepare_public_model_context(
     # Keep the per-call reminder next to this turn rather than before a long
     # restored history. The static contract stays in the initial system prompt.
     conditional = DELIVERY_GUIDANCE if delivery_required else (OPERATION_GUIDANCE if artifact_operation_observed else "")
+    if delivery_required or artifact_operation_observed:
+        conditional += ARTIFACT_EVIDENCE_GUIDANCE
     conditional += RECOVERY_GUIDANCE if recovering else ""
     # Only the request factory's validated identity is eligible. Do not look in
     # user prose, profile, tool results or restored history for account facts.
@@ -175,5 +186,5 @@ def prepare_public_model_context(
     messages.append(SystemMsg(name="system", metadata={"bank_runtime_layer": _TURN_CONTEXT_NAME},
                               content=CURRENT_TURN_GUIDANCE + conditional + identity_context +
                               ('\n' + file_context if file_context else '') +
-                              "\n本轮可调用入口：" + json.dumps(names, ensure_ascii=False) + "\n\n" + FOLLOWUP_GUIDANCE))
+                              "\n本轮可调用入口：" + json.dumps(names, ensure_ascii=False) + "\n\n" + FOLLOWUP_GUIDANCE + "\n" + OUTPUT_SCOPE_GUIDANCE))
     return {**request, "messages": messages}

@@ -55,6 +55,8 @@ def client(monkeypatch, agent_profiles):
     "method, path",
     [
         ("GET", "/api/bank-runtime/agents/{agent_id}/health"),
+        ("GET", "/api/bank-runtime/agents/{agent_id}/skills"),
+        ("GET", "/api/bank-runtime/agents/{agent_id}/skills/bank-chart"),
         ("POST", "/api/bank-runtime/agents/{agent_id}/chat"),
         ("POST", "/api/bank-runtime/agents/{agent_id}/chat/stop"),
         ("GET", "/api/bank-runtime/health"),
@@ -75,7 +77,9 @@ def test_service_identity_accepts_each_enabled_agent(client, agent_id, method, p
 
 @pytest.mark.parametrize("agent_id", ["missing-agent", "disabled-agent"])
 @pytest.mark.parametrize(
-    "path", ["/api/bank-runtime/agents/{agent_id}/health", "/api/bank-runtime/health"]
+    "path", ["/api/bank-runtime/agents/{agent_id}/health", "/api/bank-runtime/health",
+             "/api/bank-runtime/agents/{agent_id}/skills",
+             "/api/bank-runtime/agents/{agent_id}/skills/bank-chart"]
 )
 def test_service_identity_rejects_missing_or_disabled_agent(client, agent_id, path):
     response = client.get(
@@ -150,6 +154,12 @@ def test_service_identity_fails_closed_when_registry_unavailable(
         ("GET", "/api/agents/assistant-a/models/active"),
         ("POST", "/api/agents"),
         ("GET", "/api/bank-runtime/agents/assistant-a/admin"),
+        ("GET", "/api/bank-runtime/agents/assistant_b/skills"),
+        ("GET", "/api/bank-runtime/agents/assistant_b/skills/bank-chart"),
+        ("POST", "/api/bank-runtime/agents/assistant-a/skills"),
+        ("DELETE", "/api/bank-runtime/agents/assistant-a/skills/bank-chart"),
+        ("GET", "/api/bank-runtime/skills"),
+        ("GET", "/api/bank-runtime/agents/assistant-a/skills/bank-chart/references/x.md"),
     ],
 )
 def test_non_default_agent_identity_stays_scoped(client, method, path):
@@ -164,10 +174,12 @@ def test_non_default_agent_identity_stays_scoped(client, method, path):
     assert response.status_code == 401
 
 
-def test_non_default_agent_rejects_wrong_service_token(client):
+@pytest.mark.parametrize("action", ["health", "skills", "skills/bank-chart"])
+@pytest.mark.parametrize("token", ["wrong", ""])
+def test_non_default_agent_rejects_wrong_service_token(client, action, token):
     response = client.get(
-        "/api/bank-runtime/agents/assistant-a/health",
-        headers={"Authorization": "Bearer wrong", "X-Agent-Id": "assistant-a"},
+        "/api/bank-runtime/agents/assistant-a/" + action,
+        headers={"Authorization": "Bearer " + token, "X-Agent-Id": "assistant-a"},
     )
     assert response.status_code == 401
 

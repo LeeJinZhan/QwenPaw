@@ -10,15 +10,23 @@ from .auth import require_service_identity
 _SERVICE_ROUTE = re.compile(
     r"/api/bank-runtime/(?:agents/([^/]+)/)?(health|chat|chat/stop)"
 )
+_SKILL_ROUTE = re.compile(
+    r"/api/bank-runtime/agents/([^/]+)/skills(?:/[\w.-]{1,128})?"
+)
 
 
 def authenticate_runtime_request(request) -> bool:
     path = request.url.path
     match = _SERVICE_ROUTE.fullmatch(path)
+    skill_match = _SKILL_ROUTE.fullmatch(path)
     if path == "/api/bank-runtime/capabilities":
         if request.method != "GET":
             return False
         path_agent = None
+    elif skill_match:
+        if request.method != "GET":
+            return False
+        path_agent = skill_match.group(1)
     elif match:
         path_agent, action = match.groups()
         if request.method != ("GET" if action == "health" else "POST"):
