@@ -27,6 +27,66 @@ def authorized_service_task():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('rtf_first', [False, True])
+@pytest.mark.parametrize('rtf_mime', ['application/msword', 'application/rtf'])
+async def test_three_word_batch_accepts_rtf_doc_and_reads_every_source(tmp_path, rtf_first, rtf_mime):
+    from docx import Document
+    from types import SimpleNamespace
+    base = _resolved(tmp_path)
+    sources = {}
+    expected = {'first': 'First Word 123.45', 'second': 'Second Word 678.90', 'legacy': 'RTF Word 001234'}
+    for file_id, body in expected.items():
+        suffix = '.doc' if file_id == 'legacy' else '.docx'
+        path = base.path.parent / (file_id + suffix)
+        if suffix == '.doc':
+            path.write_bytes(b'{\\rtf1\\ansi ' + body.encode() + b'\\par}')
+        else:
+            document = Document()
+            document.add_paragraph(body)
+            document.save(path)
+        sources[file_id] = replace(base, file_id=file_id, path=path, extension=suffix,
+            original_name=path.name, size_bytes=path.stat().st_size,
+            media_type=rtf_mime if suffix == '.doc' else
+            'application/vnd.openxmlformats-officedocument.wordprocessingml.document')
+    original = {key: source.path.read_bytes() for key, source in sources.items()}
+    service = MinerUToolService(file_resolver=SimpleNamespace(resolve=sources.__getitem__),
+        mineru_client=object(), document_store=DocumentStore(root=tmp_path))
+    order = ['legacy', 'first', 'second'] if rtf_first else ['first', 'second', 'legacy']
+    result = await service.parse_documents([{'file_id': key, 'file_ref': key} for key in order])
+    assert result['status'] == 'completed'
+    assert [item['file_id'] for item in result['items']] == order
+    for item in result['items']:
+        assert item['status'] == 'completed'
+        assert expected[item['file_id']] in item['markdown']
+        assert sources[item['file_id']].path.read_bytes() == original[item['file_id']]
+        assert item['document_ref']
+
+
+@pytest.mark.parametrize('name,content', [('fake.doc', b'<html>not RTF</html>'),
+    ('fake.doc', b'PK\x03\x04not a legacy Word file'), ('fake.ppt', br'{\rtf1\ansi text}')])
+@pytest.mark.asyncio
+async def test_rtf_word_support_does_not_accept_other_mismatched_signatures(tmp_path, name, content):
+    import hashlib
+    from types import SimpleNamespace
+    from bank_mineru_mcp.tools import _validate_source
+    base = _resolved(tmp_path)
+    path = base.path.parent / name
+    path.write_bytes(content)
+    source = replace(base, path=path, extension=path.suffix,
+        sha256=hashlib.sha256(content).hexdigest(), size_bytes=len(content),
+        media_type='application/msword' if path.suffix == '.doc' else 'application/vnd.ms-powerpoint')
+    _validate_source(source)  # Identification is deferred, never treated as successful reading.
+    service = MinerUToolService(file_resolver=SimpleNamespace(resolve=lambda ref: source),
+        mineru_client=object(), document_store=DocumentStore(root=tmp_path))
+    result = await service.parse_documents([{'file_id': source.file_id, 'file_ref': 'ref'}])
+    assert result['status'] == 'failed'
+    assert result['items'][0]['error_code'] in {'FILE_TYPE_UNSUPPORTED', 'DOCUMENT_PARSE_FAILED'}
+    assert result['items'][0]['document_ref'] is None
+    assert result['items'][0]['markdown'] is None
+    assert path.read_bytes() == content
+
+
+@pytest.mark.asyncio
 async def test_remote_failure_does_not_prevent_local_table_parse(tmp_path):
     from bank_mineru_mcp.mineru_client import MinerUClientError
     from bank_mineru_mcp.structured_store import StructuredStore

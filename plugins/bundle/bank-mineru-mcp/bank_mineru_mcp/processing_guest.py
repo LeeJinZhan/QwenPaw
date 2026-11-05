@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import sys
+from .processing_errors import processing_error_code
 
 from .spreadsheet import extract_workbook, SpreadsheetExtractError
 from .native_office import extract_native_office, SUPPORTED
@@ -58,8 +59,8 @@ def main():
         detail = getattr(exc, 'argument_error', {})
         if detail:
             value['argument_reason'] = detail['reason']
-    except (MemoryError, OSError):
-        value = {"status": "failed", "error_code": "DOCUMENT_RESULT_TOO_LARGE"}
+    except (MemoryError, OSError) as exc:
+        value = {"status": "failed", "error_code": processing_error_code(exc)}
     except Exception:
         value = {"status": "failed", "error_code": "DOCUMENT_PARSE_FAILED"}
     print(json.dumps(value, ensure_ascii=False))

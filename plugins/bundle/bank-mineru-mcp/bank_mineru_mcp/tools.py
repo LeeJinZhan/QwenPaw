@@ -11,13 +11,14 @@ import re
 import stat
 from collections import OrderedDict
 
-from dataclasses import asdict
+from dataclasses import asdict, replace, is_dataclass
+from copy import copy
 from datetime import datetime, timezone
 from pathlib import Path
-import zipfile
 from typing import Any, Mapping
 
 from bank_runtime.gateway.file_diagnostics import source_call
+from bank_runtime.sandbox.file_types import canonical_attachment_mime
 from .document_store import DocumentStore, DocumentStoreError
 from .mineru_client import MinerUClientError
 from .normalization import normalize_mineru_result
@@ -29,12 +30,13 @@ from .inventory import inventory_summary, inventory_page
 from .native_office import SUPPORTED as _NATIVE_OFFICE
 from .schemas import NormalizedDocument
 from .normalization import _chunks
+from .processing_errors import processing_error_code
 
 _PARSE_METHODS = {"auto", "ocr", "txt"}
 _LANGUAGES = {"auto", "zh", "en"}
 _STRUCTURED = {".xlsx", ".xls", ".csv", ".tsv"}
 _SUPPORTED = {
-    ".doc": {"application/msword"},
+    ".doc": {"application/msword", "application/rtf"},
     ".xls": {"application/vnd.ms-excel"},
     ".ppt": {"application/vnd.ms-powerpoint"},
     ".csv": {"text/csv", "text/plain", "application/csv"},
@@ -121,9 +123,9 @@ class MinerUToolService:
         options: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         task_id = self._current_task()
-        if not isinstance(documents, list) or not 1 <= len(documents) <= 5:
+        if not isinstance(documents, list) or not 1 <= len(documents) <= 50:
             raise ToolContractError(
-                "DOCUMENT_ARGUMENT_INVALID", "documents must contain 1-5 files"
+                "DOCUMENT_ARGUMENT_INVALID", "documents must contain 1-50 files"
             )
         if parse_method not in _PARSE_METHODS:
             raise ToolContractError("DOCUMENT_ARGUMENT_INVALID", "parse_method is invalid")
@@ -131,6 +133,7 @@ class MinerUToolService:
             raise ToolContractError("DOCUMENT_ARGUMENT_INVALID", "language is invalid")
         normalized_options = _options(options)
         resolved = []
+        source_errors = {}
         task_ids: set[str] = set()
         seen: set[str] = set()
         for document in documents:
@@ -160,7 +163,21 @@ class MinerUToolService:
                 raise ToolContractError(
                     "FILE_REF_INVALID", "file_id does not match file_ref"
                 )
-            _validate_source(source)
+            try:
+                _validate_source(source)
+            except ToolContractError as exc:
+                if exc.code != "FILE_TYPE_UNSUPPORTED":
+                    raise
+                source_errors[source.file_id] = exc.code
+            media_type = canonical_attachment_mime(source.path, source.media_type)
+            if media_type != source.media_type:
+                # The resolver port also supports plain attribute-based sources.
+                # Normalize a copy; never change its registered authorization data.
+                if is_dataclass(source):
+                    source = replace(source, media_type=media_type)
+                else:
+                    source = copy(source)
+                    source.media_type = media_type
             task_ids.add(source.task_id)
             resolved.append(source)
         if len(task_ids) != 1:
@@ -175,9 +192,9 @@ class MinerUToolService:
         layout = [
             source
             for source in resolved
-            if str(source.extension or "").lower() not in _STRUCTURED | _NATIVE_OFFICE
+            if source.file_id not in source_errors and str(source.extension or "").lower() not in _STRUCTURED | _NATIVE_OFFICE
         ]
-        local = [source for source in resolved if source.extension.lower() in _STRUCTURED | _NATIVE_OFFICE]
+        local = [source for source in resolved if source.file_id not in source_errors and source.extension.lower() in _STRUCTURED | _NATIVE_OFFICE]
         local_results = None
         cached_items = {}
         nonces = {}
@@ -198,11 +215,19 @@ class MinerUToolService:
                         cached_items[source.file_id] = self._structured_item(source, handle, self.structured_store.inventory(handle.document_ref))
             local = [source for source in local if source.file_id not in cached_items]
         if local and execution is not None:
-            try:
-                result = await execution.execute({"kind": "parse", "sources": [_source_descriptor(source) for source in local]})
-                local_results = {item["file_id"]: item for item in result.get("items", [])}
-            except Exception as exc:
-                local_results = {source.file_id: {"status": "failed", "error_code": getattr(exc, "code", "DOCUMENT_ENGINE_UNAVAILABLE")} for source in local}
+            local_results = {}
+            # One approved logical manifest; each isolated execution remains
+            # bounded to five sources and rechecks the original authorization.
+            for start in range(0, len(local), 5):
+                batch = local[start:start + 5]
+                try:
+                    result = await execution.execute({"kind": "parse", "sources": [_source_descriptor(source) for source in batch]})
+                    local_results.update({item["file_id"]: item for item in result.get("items", [])})
+                except Exception as exc:
+                    code = getattr(exc, "code", "DOCUMENT_ENGINE_UNAVAILABLE")
+                    if code in {"FILE_ACCESS_DENIED", "FILE_REF_INVALID", "FILE_REF_EXPIRED"}:
+                        raise
+                    local_results.update({source.file_id: {"status": "failed", "error_code": code} for source in batch})
         elif local and self.execution_mode == "runtime":
             local_results = {source.file_id: {"status": "failed", "error_code": "DOCUMENT_ENGINE_UNAVAILABLE"} for source in local}
         normalized = {}
@@ -227,6 +252,9 @@ class MinerUToolService:
         for source, requested in zip(resolved, documents):
             # Recheck after external parsing, including cancellation/revocation.
             self._resolve_authorized_source(requested["file_ref"])
+            if source.file_id in source_errors:
+                items.append(_failed_document(source, source_errors[source.file_id]))
+                continue
             if source.file_id in cached_items:
                 await execution.validate_sources([_source_descriptor(source)])
                 items.append(cached_items[source.file_id])
@@ -273,7 +301,8 @@ class MinerUToolService:
                     try:
                         native = await self._parse_native(source)
                     except Exception as exc:
-                        items.append(_failed_document(source, getattr(exc, "code", "DOCUMENT_PARSE_FAILED")))
+                        code = exc.code if isinstance(exc, SpreadsheetExtractError) else processing_error_code(exc)
+                        items.append(_failed_document(source, code))
                         continue
                 document = NormalizedDocument(title=source.original_name or source.path.name, markdown=native["markdown"],
                     chunks=_chunks(native["markdown"], 3200), page_count=native.get("page_count"))
@@ -333,7 +362,34 @@ class MinerUToolService:
             if completed == len(items)
             else "failed" if not completed else "partial"
         )
-        return {"status": status, "items": items}
+        response = {"status": status, "items": items}
+        # Every document is already stored. Spend the response budget on
+        # references instead of failing a successful batch or truncating text.
+        inline = sorted((item for item in items if item.get('content_mode') == 'inline'),
+            key=lambda item: len(json.dumps(item.get('markdown'), ensure_ascii=False).encode()), reverse=True)
+        for item in inline:
+            if len(json.dumps(response, ensure_ascii=False, indent=2).encode()) <= 32000:
+                break
+            item['content_mode'] = 'chunked'
+            item['markdown'] = None
+        if len(json.dumps(response, ensure_ascii=False, indent=2).encode()) > 32000:
+            for item in items:
+                item.pop('preview', None)
+                inventory = item.get('inventory')
+                if inventory is not None:
+                    # Full metadata stays in the authorized document store.
+                    # Cursor zero requests the first metadata page, not all rows.
+                    item['inventory'] = {'sheet_count': inventory['sheet_count'],
+                        'sheets': [], 'inventory_complete': False, 'next_inventory_cursor': 0}
+        if len(json.dumps(response, ensure_ascii=False, indent=2).encode()) > 32000:
+            for item in items:
+                # Preserve references, coverage and per-file failures. Optional
+                # display metadata must not turn a completed batch into failure.
+                for key in ('source_inventory', 'image_export', 'engine', 'media_type', 'page_count'):
+                    item.pop(key, None)
+                if 'ocr_batches' in item:
+                    item['ocr_batches'] = {'stop_reason': item['ocr_batches'].get('stop_reason')}
+        return response
 
     @_bounded_result
     def read_document_chunks(
@@ -878,12 +934,20 @@ def _options(value: dict[str, Any] | None) -> dict[str, Any]:
 
 def _validate_source(source: Any) -> None:
     suffix = str(source.extension or "").lower()
+    if suffix in {'.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx'}:
+        # Authorization and source integrity stay with the resolver/Runtime.
+        # Office format recognition belongs to the isolated reader, whose
+        # per-file errors preserve the other admitted files in a batch.
+        return
     allowed_mimes = _SUPPORTED.get(suffix)
-    if allowed_mimes is None or str(source.media_type).lower() not in allowed_mimes:
+    media_type = canonical_attachment_mime(Path(source.path), source.media_type)
+    if allowed_mimes is None:
         raise ToolContractError("FILE_TYPE_UNSUPPORTED", "file type is unsupported")
     path = Path(source.path)
     with path.open("rb") as handle:
         prefix = handle.read(16)
+    if media_type not in allowed_mimes:
+        raise ToolContractError("FILE_TYPE_UNSUPPORTED", "file type is unsupported")
     valid = True
     if suffix == ".pdf":
         valid = prefix.startswith(b"%PDF-")
@@ -891,10 +955,6 @@ def _validate_source(source: Any) -> None:
         valid = prefix.startswith(b"\x89PNG\r\n\x1a\n")
     elif suffix in {".jpg", ".jpeg"}:
         valid = prefix.startswith(b"\xff\xd8\xff")
-    elif suffix in {".docx", ".pptx", ".xlsx"}:
-        valid = zipfile.is_zipfile(path)
-    elif suffix in {".doc", ".ppt", ".xls"}:
-        valid = prefix.startswith(bytes.fromhex("d0cf11e0a1b11ae1"))
     if not valid:
         raise ToolContractError(
             "FILE_TYPE_UNSUPPORTED", "file signature is unsupported"

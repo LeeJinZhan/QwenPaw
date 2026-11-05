@@ -1,0 +1,105 @@
+{
+  "version": 1,
+  "recovery": {
+    "repeat_limit": 2,
+    "operation_limit": 4,
+    "task_limit": 16
+  },
+  "workbook": {
+    "max_sheets": 20,
+    "max_rows": 50000,
+    "max_columns": 200,
+    "max_formulas": 10000,
+    "max_formula_cells": 10000,
+    "max_dependencies": 1000000
+  },
+  "patch": {
+    "max_operations": 1000,
+    "max_cells": 10000,
+    "max_columns": 200
+  },
+  "csv": {
+    "defaults": {
+      "encoding": "utf-8",
+      "delimiter": ",",
+      "line_ending": "CRLF"
+    },
+    "encodings": [
+      "utf-8",
+      "utf-8-sig"
+    ],
+    "delimiters": [
+      ",",
+      ";",
+      "\t"
+    ],
+    "line_endings": {
+      "CRLF": "\r\n",
+      "LF": "\n"
+    }
+  },
+  "revision_failures": {
+    "session_file": {
+      "csv": "csv_revision_unsupported",
+      "docx": "docx_revision_unsupported",
+      "xls": "xls_revision_unsupported",
+      "doc": "doc_revision_unsupported",
+      "pptx": "pptx_revision_unsupported",
+      "ppt": "ppt_revision_unsupported"
+    },
+    "workspace_file": {
+      "csv": "csv_revision_unsupported",
+      "docx": "docx_revision_unsupported",
+      "xls": "xls_revision_unsupported",
+      "doc": "doc_revision_unsupported",
+      "pptx": "pptx_revision_unsupported",
+      "ppt": "ppt_revision_unsupported"
+    },
+    "generated_file": {
+      "xls": "xls_revision_unsupported",
+      "doc": "doc_revision_unsupported",
+      "ppt": "ppt_revision_unsupported"
+    }
+  },
+  "capability_failures": {
+    "revise:xls": "xls_revision_capability_disabled",
+    "revise:doc": "doc_revision_capability_disabled",
+    "revise:ppt": "ppt_revision_capability_disabled"
+  },
+  "converter_failures": {
+    "artifact.convert:xls->xlsx": "xls_conversion_unavailable",
+    "artifact.convert:doc->docx": "doc_conversion_unavailable",
+    "artifact.convert:ppt->pptx": "ppt_conversion_unavailable"
+  },
+  "conversion_pairs": [
+    [
+      "doc",
+      "docx"
+    ],
+    [
+      "xls",
+      "xlsx"
+    ],
+    [
+      "ppt",
+      "pptx"
+    ]
+  ],
+  "patch_failures": {
+    "docx": "docx_revision_unsupported",
+    "pptx": "pptx_revision_unsupported"
+  },
+  "conversion_failures": {
+    "doc": "doc_conversion_failed",
+    "ppt": "ppt_conversion_failed"
+  },
+  "text_patch": {
+    "max_operations": 200,
+    "max_text_length": 32767
+  },
+  "recoverable_patch_failures": [
+    "text_patch_invalid_target",
+    "text_patch_ambiguous",
+    "text_patch_overlap"
+  ]
+}

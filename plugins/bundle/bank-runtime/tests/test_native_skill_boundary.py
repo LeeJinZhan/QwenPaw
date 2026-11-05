@@ -47,7 +47,14 @@ async def test_native_read_is_scoped_and_one_use_without_granting_browser():
         async for item in agent.toolkit.call_tool(call, agent.state):
             yield item
 
-    result = [item async for item in middleware.on_acting(agent, {"tool_call": call}, execute)]
+    from bank_runtime.delivery_state import DeliveryState, delivery_scope
+    state = DeliveryState("task-test")
+    with delivery_scope(state):
+        result = [item async for item in middleware.on_acting(agent, {"tool_call": call}, execute)]
+    assert len(state.operations_events) == 1
+    assert state.operations_events[0]["event_type"] == "native_skill.activated"
+    assert state.operations_events[0]["skill_id"] == "browser"
+    assert len(state.operations_events[0]["content_hash"]) == 64
     assert "network access" in result[-1].content[0].text
     with pytest.raises(Exception) as denied:
         _ = [item async for item in middleware.on_acting(agent, {"tool_call": call}, execute)]

@@ -40,3 +40,26 @@ def test_table_pages_repeat_only_a_valid_header_and_preserve_every_row():
     assert len(doc.chunks) > 1
     assert all(c.text.startswith(header) for c in doc.chunks)
     assert ''.join(c.text[len(header):] for c in doc.chunks) == ''.join(rows)
+
+
+def test_large_table_header_and_rows_fit_each_page_without_losing_cells():
+    import json
+    from dataclasses import asdict
+    header = '| ' + '列' * 7400 + ' | 值 |\n| --- | --- |\n'
+    rows = [f'| {"值" * 200} | {i} |\n' for i in range(20)]
+    document = normalize_mineru_result({'results': {'f': {'md_content': header + ''.join(rows)}}},
+        upload_stems={'id': 'f'}, chunk_chars=3200)['id']
+    assert all(len(json.dumps(asdict(c), ensure_ascii=False, indent=2).encode()) < 30000 for c in document.chunks)
+    assert all(c.text.startswith(header) for c in document.chunks)
+    assert ''.join(c.text[len(header):] for c in document.chunks) == ''.join(rows)
+
+
+def test_oversized_table_header_is_lossless_continuation_not_dropped():
+    import json
+    from dataclasses import asdict
+    markdown = '| ' + '列' * 11000 + ' | 值 |\n| --- | --- |\n| 数据 | 1 |\n'
+    document = normalize_mineru_result({'results': {'f': {'md_content': markdown}}}, upload_stems={'id': 'f'})['id']
+    assert ''.join(c.text for c in document.chunks) == markdown
+    assert len(document.chunks) > 1
+    assert all('连续片段' in c.heading for c in document.chunks)
+    assert all(len(json.dumps(asdict(c), ensure_ascii=False, indent=2).encode()) < 30000 for c in document.chunks)

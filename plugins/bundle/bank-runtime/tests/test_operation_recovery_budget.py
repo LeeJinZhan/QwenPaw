@@ -54,14 +54,17 @@ def test_continually_changed_inputs_still_hit_operation_limit():
     assert budget.blocked_reason("artifact_generate", document(content={"paragraphs": ["new"]}))
 
 
-def test_success_resolves_only_same_operation_and_does_not_reset_task_budget():
+def test_success_releases_only_same_operation_pending_budget():
     budget = OperationRecoveryBudget(task_limit=3)
     budget.fail("artifact_generate", document(), "INVALID_REQUEST")
     budget.fail("artifact_generate", document("other.docx"), "INVALID_REQUEST")
     budget.succeed("artifact_generate", document())
     assert budget.pending_count == 1
     budget.fail("artifact_generate", document("third.docx"), "INVALID_REQUEST")
+    assert not budget.task_exhausted
+    budget.fail("artifact_generate", document("fourth.docx"), "INVALID_REQUEST")
     assert budget.task_exhausted
+    assert budget.total_failures == 4
     assert budget.blocked_reason("chart_export", {"chart_id": "new"}) == "task_recovery_budget_exhausted"
 
 
@@ -96,3 +99,22 @@ def test_malformed_json_is_bounded_without_parsing_untrusted_partial_identity():
     assert not budget.blocked_reason("artifact_generate", document())
     budget.succeed("artifact_generate", document())
     assert budget.pending_count == 0
+
+
+@pytest.mark.parametrize("empty", [None, []])
+def test_optional_empty_source_defaults_share_recovery_without_clearing_other_sources(empty):
+    budget = OperationRecoveryBudget()
+    payload = {"artifact_type": "xlsx", "output_name": "costs.xlsx"}
+    budget.fail("artifact_generate", {**payload, "source_refs": empty}, "INVALID_REQUEST")
+    budget.fail("artifact_generate", {**payload, "source_refs": ["file-a"]}, "INVALID_REQUEST")
+    budget.succeed("artifact_generate", payload)
+    assert budget.pending_input_failures == 1
+    assert budget.pending_count == 1
+
+
+def test_optional_defaults_cannot_reset_unknown_execution_protection():
+    budget = OperationRecoveryBudget()
+    payload = {"artifact_type": "xlsx", "output_name": "costs.xlsx"}
+    budget.fail("artifact_generate", {**payload, "source_refs": None}, "WORKER_TIMEOUT",
+                execution_state="execution_unknown")
+    assert budget.blocked_reason("artifact_generate", payload) == "execution_unknown"

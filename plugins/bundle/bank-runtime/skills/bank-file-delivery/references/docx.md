@@ -1,4 +1,4 @@
-# Word与公文格式契约
+# Word 类型、来源与模板选择
 
 适用于已确定的DOCX交付。公共操作、权限和发布核验遵循本技能主文。
 
@@ -21,61 +21,36 @@
 
 用户明确要普通 Word、不要公文排版时，遵从 standard_document；明确要公文版式时遵从 official_document。文种与版式不是同一个字段，例如用户要求普通排版的函仍可 document_type=letter。只说“任务”且上下文无法区分个人清单和正式下发通知时，简短问清用途；已说明主送部门和执行安排时直接起草。缺失事实不凭空补全。
 
-DOCX 的 artifact_generate / artifact_revise 调用必须同时提交严格三字段 delivery_plan，例如 `{"document_type":"notice","target_format":"docx","layout_kind":"official_document"}`；下文给出与正文一起提交的完整请求。
+DOCX 的 artifact_generate / artifact_revise 调用必须同时提交严格三字段 delivery_plan，例如 `{"document_type":"notice","target_format":"docx","layout_kind":"official_document"}`；按所选版式读取对应契约中的完整请求。
 
-document_type 仅支持 letter、request、notice、report、work_plan、task_list、article、other；layout_kind 仅支持 official_document、standard_document。这三个字段是工具参数，不作为正文或内部推理展示。公文 content 必须使用下文固定版式，普通文档可用完整正文字符串或 sections/paragraphs 对象；对象不再次序列化为 JSON 字符串。重试保持已确认版式。修订同样提交完整判断与完整正文，改变版式需要用户意图支持。
+document_type 仅支持 letter、request、notice、report、work_plan、task_list、article、other；layout_kind 仅支持 official_document、standard_document。这三个字段是工具参数，不作为正文或内部推理展示。公文 content 必须使用公文契约中的固定版式，普通文档可用完整正文字符串或 sections/paragraphs 对象；对象不再次序列化为 JSON 字符串。重试保持已确认版式。修订同样提交完整判断与完整正文，改变版式需要用户意图支持。
 
 模板优先级高于上述默认版式：用户明确选择机构模板时走 template_fill_docx，使用真实已发布且当前授权的 template_version_id；不虚构版本、不自动选择未知模板。固定公文版式的 layout_version 为 bank-official-docx-v1，模板版本为空；不能将它冒充机构模板。
 
-## 普通 Word 与来源选择
+## 选择所需契约
 
-“生成 Word”沿用刚确认的正文和用途，不重新问标题或文种，不先返回大纲等待确认。内容足够时直接生成。用户上传的文件不是已生成成果：上传原稿需实际读取后用 artifact_generate 生成新稿；artifact_revise 只接受工具真实返回的 source_generated_file_id。只改局部时保留其余全文，不把修订建议或摘要当作完整正文。
+确定版式后，只使用对应的《普通 Word 生成与修订》或《公文 DOCX 交付》契约，不混用两套参数。普通 Word 关注内容层级与阅读体验；公文关注文种、专用字段与固定版式。正文起草或润色方法使用 bank-document-writing，不以选择文件版式替代正文写作。
 
-普通 Word 完整参数示例（示例正文仅用于说明结构，实际用当前确认稿替换）：
+## 来源与续聊
 
-```json
-{"artifact_type":"docx","title":"工作说明示例","content":{"sections":[{"heading":"工作安排","heading_level":1,"paragraphs":["测试完成后，各组汇总结果并提交测试记录。"]}]},"output_name":"工作说明示例.docx","delivery_plan":{"document_type":"article","target_format":"docx","layout_kind":"standard_document"}}
-```
+“生成 Word”沿用刚确认的正文和用途，不重新问标题或文种，不先返回大纲等待确认。内容足够时直接生成。用户上传的文件不是已生成成果：用户接受生成新稿时，先完整读取，再用 artifact_generate 生成新稿；Word完整内容修订使用工具真实返回的 source_generated_file_id。不把修订建议或摘要当作完整正文。
 
-普通 sections 可用 heading_level（1–6 的整数，默认 1）表达标题层级。tables 使用等列二维数组，首行为表头；普通 Word 宽表自动横向分节，过宽时分组并重复首列，长行允许跨页、表头重复。不要为容纳表格删列或把正文缩成摘要。
+### 操作前说明实际处理方式
 
-公文保持固定纵向纸张及公文字体；宽表通过分组、重复首列处理，输入预算为 32 列、1000 数据行，仍受全文 100000 字符预算约束。
+在开始文件操作前，用简短自然语言说明本次是新建/重新生成、原件局部修改、格式转换或指定模板填充；说明的是实际将执行的方式，不只说“处理文件”。目标和处理方式已经明确时直接执行，不为这段说明重复索要确认。
 
-直接 PDF 的 Markdown 表格支持按内容计算列宽、纵横混排、分组与重复表头；Office 导出 PDF 保留原文件版式。
+| 实际方式 | 能力与保留边界 |
+| --- | --- |
+| 重新生成Word修订稿 | 按完整修订正文重新排版，原件保留；任意原样式、图片、图表、批注、修订痕迹、页眉页脚及嵌入对象不保证保留。已有成果修订显式传revision_mode=rebuild，不能称为“原样修订”。 |
+| 原件局部修改 | DOCX支持正文段落、普通表格单元格内的指定文字替换，沿用原样式，保留未涉及内容和对象。使用artifact_revise、revision_mode=patch及下述docx_patch内容；原件不覆盖。页眉页脚、域、批注、图片和复杂对象本轮不编辑。超出范围时说明限制，不静默重建。 |
+| DOC转DOCX或Word导出PDF | 使用受控转换，原件保留；转换不等于修订或完整读取，也不证明复杂版式、公式和对象完全一致。保持用户要求的目标格式。 |
+| 指定机构模板填充 | 仅使用已发布、已授权模板中的指定占位符；模板填充不是任意原件局部编辑，也不保证改写段落内所有混合样式不变。 |
 
-## 公文 DOCX 交付
+不要将操作方式写入正文或暴露内部字段。最终回复依据实际报告说明完成的方式及已知限制；不因文件已发布就省略重建边界。
 
-普通文字与公文写作由当前助手直接完成，不因为文种委派专家。用户只要正文时直接交付正文。要求公文 DOCX 时调用当前获授权的 `artifact_generate`；以下是完整参数，content 直接提交对象，kind 和 layout_version 位于 content 内、document 外：
-
-```json
-{"artifact_type":"docx","title":"工作安排通知初稿示例","output_name":"工作安排通知初稿示例.docx","delivery_plan":{"document_type":"notice","target_format":"docx","layout_kind":"official_document"},"content":{"kind":"official_document","layout_version":"bank-official-docx-v1","document":{"title":"关于工作安排的通知","recipients":["各测试小组"],"blocks":[{"type":"heading","level":1,"text":"一、工作安排"},{"type":"paragraph","text":"测试完成后，各组汇总结果并提交测试记录。"}]}}}
-```
-
-此为字段示例，不是用户事实。document 可选字段：signatory、date、classification、urgency 为字符串，attachments、cc 为字符串数组。blocks 支持 paragraph（text）、heading（level 为 1–4 的整数、text）与 table（headers 为非空字符串数组、rows 为等宽字符串二维数组）。正文每个语义段落一个块，不合并丢段；数组直接传数组，不加 item、不转成 JSON 字符串或代码块。所有主送和抄送完整保留；recipients 每项填写一个单位名称，不自行添加冒号、换行或放进正文 blocks，主送段落由渲染器排版。布局由服务端固定，不传字体、路径、脚本、外链、命令或身份。
-
-无明确事实不补日期、密级、文号、署名、附件或抄送。可以交付初稿时说明缺项，关键缺项影响实质内容时集中澄清。以“公文初稿”命名交付，不假冒签发、审批或正式定密。固定版式不是已发布机构模板。
-
-在已确定的公文 DOCX 任务中，用户要求“直接生成初稿”时，沿用前文主题和文种；不影响起草的缺失事实用明确待补标记，例如【待填写】或【待核实】，不机械要求全部补齐，不编造事实。关键缺项影响实质内容时集中澄清。按实际文种选择 document_type，使用 official_document 版式与公文 content 对象。若工具提示 JSON 不完整，应重新提交完整 kind/layout_version/document 对象，不将公文改成普通 sections/paragraphs，也不把对象再次编码成字符串。
-
-主送、落款单位和成文日期必须使用专用字段：document.recipients、document.signatory、document.date，不能放入 blocks 普通段落。主送由排版器顶格排在标题后，落款与日期由排版器在正文后右对齐；不要靠空格、换行或正文缩进模拟。初稿缺项使用能辨识含义的待补标记，用户已指定占位方式时遵从；不擅自将当前日期或登录人的部门当成成文日期、申请单位。blocks只放正文标题、正文段落与表格。
-
-用户明确指定机构模板时，仅用已获授权的真实已发布版本调用 `template_fill_docx`，使用实际字段 schema。模板未发布、停用或无权时说明限制，不以固定版式规避；用户未指定机构模板时才使用上述固定版式。
-
-后续修改使用 `artifact_revise`，携带已有受控文件引用及完整修订结构。外层文件名可变化，`document.title` 保持用户确认的正文标题；不得覆盖旧文件。要求普通 Word 而非公文时使用完整正文字符串或普通 DOCX sections/paragraphs 对象。
-
-生成成功且实际返回当前文件引用后，才说明文件已生成，由原文件卡片和工作区交付。缺字体、未知版式或校验失败时保留可用正文，准确说明尚未交付文件，不静默降级或改用 shell、write_file 等绕过。结构输入错误可据工具给出的安全提示修正后通过同一工具重试；权限拒绝不得规避。已发布文件和后续回答失败分别说明。
-
-
-修订完整参数示例：`generated_example_only` 仅为结构占位，调用前必须替换为本轮可用且已授权的真实成果引用；没有该引用时不试填编号。content 包含未修改的全部段落；不添加 artifact_type、title 或 source_refs 等修订工具不接受的外层字段。
-
-```json
-{"source_generated_file_id":"generated_example_only","instructions":"主送增加运维小组，新增问题反馈要求，保留其余内容","output_name":"工作安排通知修订初稿示例.docx","delivery_plan":{"document_type":"notice","target_format":"docx","layout_kind":"official_document"},"content":{"kind":"official_document","layout_version":"bank-official-docx-v1","document":{"title":"关于工作安排的通知","recipients":["各测试小组","运维小组"],"blocks":[{"type":"heading","level":1,"text":"一、工作安排"},{"type":"paragraph","text":"测试完成后，各组汇总结果并提交测试记录。"},{"type":"heading","level":1,"text":"二、问题反馈"},{"type":"paragraph","text":"发现的问题于测试当天统一汇总。"}]}}}
-```
-
+普通Word的quality_warnings属于可交付成果的呈现提醒：依据实际代码说明页码、重复表头或段落样式情况，不能推断正文丢失。正文缺失/顺序错误、文件损坏及用户明确的公文版式仍不能以提醒代替失败。
 
 ## 文件参数失败后的恢复
-
-运行时仅在尚未提交成果操作、无来源文件的普通 Word 参数生成异常时，可触发一次正文恢复。只有收到该恢复指令才采用其短元信息与完整正文格式；正文仍须满足原主题、篇幅和事实要求。程序组装后的请求继续经过原有权限、参数校验和成果发布流程；草稿返回不等于文件已生成，不能降级公文、改用未授权模板或把内部元信息展示给用户。
 
 生成 Word 时把完整正文直接放入 content 对象（paragraphs/sections 或指定公文结构），不要手工拼接或二次 JSON 编码。一次调用必须同时包含正文、文件信息和所需 delivery_plan，不能先调用只有文件名的半成品参数。收到 JSON 不完整或结构校验错误时，重新构造完整对象并正确转义正文引号，按具体诊断和剩余恢复预算修正；不允许恢复或无实质进展时说明未生成，不重复播报准备生成，不换工具绕过校验。
 
@@ -83,6 +58,34 @@ document_type 仅支持 letter、request、notice、report、work_plan、task_li
 
 将上传的旧版 Word 转为可读取的 DOCX。转换成功后使用实际返回的附件引用读取；若未返回可读引用，只说明转换已完成、读取未完成，不猜文件路径或配对引用，也不反复转换试探文件名。
 
+### 转换与模板问题的下一步
+
+| 实际诊断 | 下一步 |
+| --- | --- |
+| DOC转换器缺失或转换失败 | 说明本次未取得转换文件、原件保留；可用Word/WPS另存为DOCX后上传，并核对图片、批注和复杂版式，或联系管理员恢复转换服务。不自动重写为普通Word，不把另存为可用视为已保证无损。 |
+| 转换或模板权限未开放 | 说明当前助手缺少相应能力，联系管理员确认授权；不换工具、路径或模板绕过。 |
+| 指定模板不可用 | 说明未生成模板稿；从当前获授权的已发布模板中重新选择，或请管理员恢复指定模板、文件及绑定。不猜版本，不擅自换成普通Word或其他模板。 |
+| 缺少模板填充内容 | 复用上下文已有内容，只补充或询问实际缺少的必填项，然后继续同一模板；不把空白、空列表或占位文案当作已填写，不补造事实，也不让用户填写内部编号。 |
+
 ```json
 {"source_type":"session_file","source_id":"uploaded_doc_example_only","target_format":"docx","purpose":"read","output_name":"转换示例.docx"}
 ```
+
+直接 PDF 的 Markdown 表格支持按内容计算列宽、纵横混排、分组与重复表头；Office 导出 PDF 保留原文件版式。
+
+
+## DOCX局部文字修改
+
+用户要求局部修改时优先使用此路径；普通Word和公文DOCX都可处理已支持的目标，不重新套生成模板。通过当前已授权读取能力取得准确原文和必要位置，不必为一处修改重新整理整篇正文。不执行脚本改写和交付文件，不从插件目录读取材料。未提供原件或无法读取目标时只补齐必要信息。
+
+上传文件传source_type=session_file或workspace_file及真实source_id；平台成果可传source_generated_file_id。content示例：
+
+```json
+{"kind":"docx_patch","edits":[{"target":{"paragraph":1},"old_text":"原金额100万元","new_text":"原金额200万元"},{"target":{"table":1,"row":2,"column":1},"old_text":"审批中","new_text":"已审批"}]}
+```
+
+段落、表格、行列从1开始。paragraph只计文档正文顶层段落，包括空段落，不计表格、页眉页脚或文本框；table只计正文顶层表格，column按逻辑网格列定位。不能凭提取摘要猜段落编号；已读到准确文字且在正文顶层段落中唯一时，可用target={}自动定位。old_text是单个段落内的准确子串，new_text为空表示删除该文字；支持同段落多处不重叠替换，全部基于原文件定位，不依赖前一项修改后的文字。表格目标只搜索该单元格的段落；不能跨段落替换或插入换行，不传delivery_plan或生成样式字段。
+
+不改段落属性、页面设置或未涉及对象。同样式的连续文字片段可一起替换；跨不同字符样式、合并目标单元格、域、链接、修订痕迹等不可靠目标会返回具体原因。可缩小到简单文字片段，不把整段内容抹平。遇原文不匹配、位置错误或范围重叠时，依据已读原文修正请求，在现有恢复预算内重试；重复原文先补充实际位置，只有无法判断用户意图时才澄清。受保护/签名原件不绕过保护，不能自动改为重建。
+
+完成优先：排版尚未核验不会阻止已验证的局部修改交付。交付时说明修改范围和原件保留；文字长度变化可能引起换行/分页，不承诺视觉排版完全不变，不因轻微排版提醒重新生成。只有实际文件成功返回才称修改完成。旧Worker未提供对应局部能力时说明需要配套更新，不能退回完整重建冒充局部修改。

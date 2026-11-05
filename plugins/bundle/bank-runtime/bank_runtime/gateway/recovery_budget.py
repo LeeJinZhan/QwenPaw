@@ -21,7 +21,12 @@ def recovery_operation_key(name: str, payload: Any) -> tuple[str, str]:
         "source_id", "source_generated_file_id", "source_refs", "file_id",
         "file_ref", "document_ref", "chart_id", "version_id", "template_id",
         "template_version_id", "purpose",
-    ) if key in payload}
+    ) if key in payload and payload[key] is not None and payload[key] != ""
+        and not (key == "source_refs" and payload[key] == [])}
+    # SDK JSON repair can insert optional defaults that valid model JSON omits.
+    # Empty optional identities denote no source/target, not a new operation.
+    # Keep nonempty sources and invalid typed values distinct; this key never
+    # substitutes for Runtime validation, authorization or execution hashes.
     return name, canonical_payload_hash(identity)
 
 
@@ -35,7 +40,7 @@ class _OperationRecovery:
 
 
 class OperationRecoveryBudget:
-    """Two equal failures, four repairs per operation, sixteen per task.
+    """Two equal failures, four repairs per operation, sixteen unresolved per task.
 
     Changed validated input/diagnostics may justify another bounded attempt.
     Returning to a failed input never forgets its prior attempts. Unknown side
@@ -43,8 +48,13 @@ class OperationRecoveryBudget:
     The existing task deadline remains the authoritative wall-clock limit.
     """
 
-    def __init__(self, *, repeat_limit=2, operation_limit=4, task_limit=16):
-        if min(repeat_limit, operation_limit, task_limit) < 1:
+    def __init__(self, *, repeat_limit=None, operation_limit=None, task_limit=None):
+        from ..office_assets import execution_budget
+        defaults = execution_budget('recovery')
+        repeat_limit = defaults['repeat_limit'] if repeat_limit is None else repeat_limit
+        operation_limit = defaults['operation_limit'] if operation_limit is None else operation_limit
+        task_limit = defaults['task_limit'] if task_limit is None else task_limit
+        if any(type(v) is not int or v < 1 for v in (repeat_limit, operation_limit, task_limit)):
             raise ValueError("Recovery limits must be positive")
         self.repeat_limit = repeat_limit
         self.operation_limit = operation_limit
@@ -54,7 +64,9 @@ class OperationRecoveryBudget:
 
     @property
     def task_exhausted(self) -> bool:
-        return self.total_failures >= self.task_limit
+        # Verified recovery retires its own pending failures. Historical failures
+        # remain observable, but cannot exhaust unrelated future deliverables.
+        return self.pending_count >= self.task_limit
 
     @property
     def pending_count(self) -> int:

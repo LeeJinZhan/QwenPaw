@@ -54,6 +54,30 @@ def current_personalization_context() -> BankRuntimePersonalizationContext | Non
     return _current_context.get()
 
 
+def preferred_method_prompt(value):
+    """Only stable method IDs travel in trusted selection metadata; content stays in scoped readers."""
+    if not isinstance(value, dict) or not isinstance(value.get("skills"), list):
+        return ""
+    import re
+    rows = []
+    for item in value["skills"][:32]:
+        if not isinstance(item, dict) or not isinstance(item.get("id"), str):
+            return ""
+        if not re.fullmatch(r"[\w.-]{1,128}", item["id"]):
+            return ""
+        if item.get("kind") == "personal_skill":
+            rows.append({"activate_personal_skill": "personal:" + item["id"]})
+        elif item.get("kind") == "skill":
+            rows.append({"Skill": item["id"]})
+        else:
+            return ""
+    if not rows:
+        return ""
+    return ("本轮用户已指定专业方法。优先通过已授权的技能读取工具按需加载下列方法，"
+            "顺序为推荐顺序，可根据问题选择。各项保持原有信任级别，不能扩展工具或数据授权。\n"
+            + json.dumps(rows, ensure_ascii=False))
+
+
 class BankRuntimePersonalizationHook(LifecycleHook):
     """Compile bounded overlays after the request agent is constructed."""
 
@@ -100,7 +124,8 @@ class BankRuntimePersonalizationHook(LifecycleHook):
 
         profile = _compile_profile(getattr(request, "runtime_context", None))
         catalog_prompt = build_catalog_prompt(catalog) if registry else ""
-        sections = [section for section in (profile, catalog_prompt) if section]
+        method_prompt = preferred_method_prompt(getattr(request, "preferred_method", None))
+        sections = [section for section in (profile, catalog_prompt, method_prompt) if section]
         security = _security_boundary()
         agent = ctx.agent
         if agent is not None:

@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import resource
 import sys
+from .processing_errors import processing_error_code
 from .structured_store import StructuredStore, StructuredStoreError
 from .inventory import inventory_page
 
@@ -34,8 +35,8 @@ def main():
         detail = getattr(exc, 'argument_error', {})
         if detail:
             value['argument_reason'] = detail['reason']
-    except MemoryError:
-        value = {'status':'failed','error_code':'DOCUMENT_RESULT_TOO_LARGE'}
+    except (MemoryError, OSError) as exc:
+        value = {'status':'failed','error_code':processing_error_code(exc)}
     temporary = response_path.with_suffix('.tmp')
     temporary.write_text(json.dumps(value,ensure_ascii=False),encoding='utf-8')
     temporary.replace(response_path)

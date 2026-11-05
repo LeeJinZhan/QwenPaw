@@ -93,28 +93,21 @@ def test_processor_does_not_inspect_office_archive_members(tmp_path) -> None:
     assert "secret" not in block.text
 
 
-def test_processor_rejects_declared_text_with_binary_signature(tmp_path) -> None:
-    path = tmp_path / "fake.txt"
-    path.write_bytes(b"binary\x00payload")
-    with pytest.raises(SandboxCacheError):
-        AttachmentProcessor().process([_prepared(path, content_type="text/plain")])
-
-
-def test_processor_rejects_pdf_and_image_signature_mismatch(tmp_path) -> None:
-    fake_pdf = tmp_path / "fake.pdf"
-    fake_pdf.write_bytes(b"not a pdf")
-    with pytest.raises(SandboxCacheError, match="type mismatch"):
-        AttachmentProcessor().process(
-            [_prepared(fake_pdf, content_type="application/pdf")],
-            file_refs={"file_001": "fr1_fake"},
-        )
-
-    wrong_mime = tmp_path / "image.png"
-    wrong_mime.write_bytes(b"\x89PNG\r\n\x1a\n")
-    with pytest.raises(SandboxCacheError, match="type mismatch"):
-        AttachmentProcessor().process(
-            [_prepared(wrong_mime, content_type="image/jpeg")]
-        )
+@pytest.mark.parametrize("name,content,mime", [
+    ("fake.txt", b"binary\x00payload", "text/plain"),
+    ("fake.pdf", b"not a pdf", "application/pdf"),
+    ("image.png", b"\x89PNG\r\n\x1a\n", "image/jpeg"),
+])
+def test_processor_isolates_invalid_signature_without_inlining_content(tmp_path, name, content, mime):
+    path = tmp_path / name
+    path.write_bytes(content)
+    processor = AttachmentProcessor()
+    blocks = processor.process([_prepared(path, content_type=mime)],
+                               file_refs={"file_001": "fr1_fake"})
+    assert len(blocks) == 1
+    assert "正文未读取" in blocks[0].text
+    assert processor.read_failures == {"file_001": "FILE_TYPE_UNSUPPORTED"}
+    assert not processor.read_successes
 
 
 def test_processor_routes_pdf_to_an_opaque_tool_required_block(tmp_path) -> None:
@@ -213,5 +206,6 @@ def test_legacy_office_is_routed_to_native_tool(tmp_path, extension, mime):
     assert "artifact_convert" not in block.text
     assert "approved Worker Skill" not in block.text
     path.write_bytes(b"not an OLE document")
-    with pytest.raises(SandboxCacheError):
-        AttachmentProcessor().process([_prepared(path, content_type=mime)], file_refs={"file_001": "fr1_old"})
+    block = AttachmentProcessor().process([_prepared(path, content_type=mime)], file_refs={"file_001": "fr1_old"})[0]
+    assert 'tool_required' in block.text and '正文尚未读取' in block.text
+    assert 'not an OLE document' not in block.text

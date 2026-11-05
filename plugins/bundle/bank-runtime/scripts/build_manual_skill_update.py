@@ -1,6 +1,6 @@
 """Export self-contained Skills for manual admin editing on existing readers.
 
-Run from QwenPaw: python plugins/bundle/bank-runtime/scripts/build_manual_skill_update.py --output ../agentic-runtime/data/manual-skills-20261023
+Run from QwenPaw: python plugins/bundle/bank-runtime/scripts/build_manual_skill_update.py --output ../agentic-runtime/data/manual-skills-20261103-word
 No installation, service mutation, or network access is performed.
 """
 import argparse
@@ -16,11 +16,11 @@ SKILLS = ('bank-file-delivery', 'bank-assistant-zh', 'bank-document-writing',
 
 GUIDE = """# 管理端手动更新试用说明
 
-版本：2026-10-23；状态：本地候选，未在内网安装或验收。
+版本：2026-11-03；状态：本地候选，未在内网安装或验收。
 
 本目录是适配现有 Skill 主文读取器的单文件兼容版，建议 DVL 先使用此版本。
 manual-skill-update.zip是传输总包，先在个人电脑解压后阅读本说明，不把总包直接导入管理端。
-格式契约由源码 references 自动合并到 bank-file-delivery 正文；没有遗漏格式参数，也不要求模型读取宿主文件。
+格式契约由源码 references 自动合并到 bank-file-delivery 正文，公文正文方法合并到 bank-document-writing 正文；没有遗漏格式参数，也不要求模型读取宿主文件。
 源码拆分版依赖新增的 reference 读取代码，不能单独粘贴其简短主文到现有环境。
 本次不更新镜像、补丁、身份配置、工具策略或数据库，不需要安装宿主 Python 或其它依赖。
 Skills 只指导行为，不能替代工具启用、真实身份、权限或成果发布能力。
@@ -69,13 +69,22 @@ bank-assistant-zh 的历史 frontmatter 名称为 bank_assistant，本包原样�
 def compatible_content(name):
     source = ROOT / 'skills' / name
     text = (source / 'SKILL.md').read_text(encoding='utf-8')
-    if name != 'bank-file-delivery':
+    if name not in ('bank-file-delivery', 'bank-document-writing'):
         return text
-    main, references = text.split('## 按需读取格式契约', 1)
+    heading = ('## 按需读取格式契约' if name == 'bank-file-delivery'
+               else '## 按需读取公文写作方法')
+    main, references = text.split(heading, 1)
+    if name == 'bank-document-writing':
+        references, remaining = references.split('## 内容组织与长文', 1)
+        main += ('公文正文方法见本文附录，实际正式行文时使用；仅要正文时也适用，'
+                 '不凭文种名称增加文件交付目标。\n\n## 内容组织与长文' + remaining)
     paths = re.findall(r'\]\((references/[A-Za-z0-9_-]+\.md)\)', references)
-    if len(paths) != 4 or len(set(paths)) != len(paths):
-        raise ValueError('Expected exactly four distinct format contracts')
-    return main + '## 格式契约\n\n按当前所需格式使用以下契约；无关格式不增加交付目标。\n\n' + '\n\n'.join(
+    if not paths or len(set(paths)) != len(paths):
+        raise ValueError('Expected distinct explicitly linked references')
+    appendix = ('## 格式契约\n\n先按Word类型、来源与模板规则选择，再使用对应版式契约；'
+                '其它格式按当前目标选用，无关格式不增加交付目标。\n\n'
+                if name == 'bank-file-delivery' else '## 公文写作方法附录\n\n')
+    return main + appendix + '\n\n'.join(
         (source / path).read_text(encoding='utf-8').strip() for path in paths) + '\n'
 
 
@@ -87,7 +96,7 @@ def build(output):
         content = compatible_content(name).encode('utf-8')
         (output / f'{name}.md').write_bytes(content)
         with zipfile.ZipFile(output / f'{name}.zip', 'w', compression=zipfile.ZIP_DEFLATED) as archive:
-            info = zipfile.ZipInfo(f'{name}/SKILL.md', date_time=(2026, 10, 23, 0, 0, 0))
+            info = zipfile.ZipInfo(f'{name}/SKILL.md', date_time=(2026, 11, 3, 0, 0, 0))
             info.compress_type = zipfile.ZIP_DEFLATED
             info.external_attr = 0o100644 << 16
             archive.writestr(info, content)
@@ -96,12 +105,12 @@ def build(output):
             files[filename] = hashlib.sha256((output / filename).read_bytes()).hexdigest()
     (output / 'README.md').write_text(GUIDE, encoding='utf-8')
     files['README.md'] = hashlib.sha256((output / 'README.md').read_bytes()).hexdigest()
-    manifest = {'version': '2026-10-23', 'mode': 'admin-compatible-main-only',
+    manifest = {'version': '2026-11-03', 'mode': 'admin-compatible-main-only',
                 'installed': False, 'files': files}
     (output / 'manifest.json').write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
     with zipfile.ZipFile(output / 'manual-skill-update.zip', 'w') as archive:
         for filename in sorted([*files, 'manifest.json']):
-            info = zipfile.ZipInfo(f'manual-skills/{filename}', date_time=(2026, 10, 23, 0, 0, 0))
+            info = zipfile.ZipInfo(f'manual-skills/{filename}', date_time=(2026, 11, 3, 0, 0, 0))
             info.compress_type = zipfile.ZIP_DEFLATED
             info.external_attr = 0o100644 << 16
             archive.writestr(info, (output / filename).read_bytes())
