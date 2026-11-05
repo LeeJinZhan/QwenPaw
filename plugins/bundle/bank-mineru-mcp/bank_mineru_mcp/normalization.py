@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import json
 from typing import Any, Mapping
 
 from .schemas import NormalizedChunk, NormalizedDocument
@@ -53,22 +54,40 @@ def _chunks(markdown: str, limit: int) -> tuple[NormalizedChunk, ...]:
     """Structure-aware chunking: tables stay row-aligned and repeat headers."""
     chunks: list[NormalizedChunk] = []
     heading = ""
+    table_number = 0
     for block in _blocks(markdown):
         if block["table"]:
             lines = block["text"].splitlines(keepends=True)
             header = lines[:2]
             rows = lines[2:]
+            table_number += 1
+            # A table row (or its header) may exceed a whole response. Preserve
+            # the exact table stream as labelled continuations; fragments are
+            # not independent rows and must be reassembled in index order.
+            header_text = ''.join(header)
+            header_bytes = len(json.dumps(header_text, ensure_ascii=False).encode('utf-8')) - 2
+            row_bytes = [len(json.dumps(row, ensure_ascii=False).encode('utf-8')) - 2 for row in rows]
+            if header_bytes + max(row_bytes, default=0) > 24000:
+                size = max(1, min(limit, 3200))
+                text = block['text']
+                count = (len(text) + size - 1) // size
+                for part, start in enumerate(range(0, len(text), size), 1):
+                    chunks.append(NormalizedChunk(index=len(chunks),
+                        heading=f"{heading} 表格{table_number}连续片段{part}/{count}（按顺序拼接，非独立行）".strip(),
+                        text=text[start:start + size]))
+                continue
             if not rows:
                 chunks.append(_chunk_from_lines(chunks, heading, header))
                 continue
             current: list[str] = []
-            size = 0
-            for row in rows:
-                if current and size + len(row) > limit:
+            size = byte_size = 0
+            for row, encoded_bytes in zip(rows, row_bytes):
+                if current and (size + len(row) > limit or header_bytes + byte_size + encoded_bytes > 24000):
                     chunks.append(_chunk_from_lines(chunks, heading, header + current))
-                    current, size = [], 0
+                    current, size, byte_size = [], 0, 0
                 current.append(row)
                 size += len(row)
+                byte_size += encoded_bytes
             if current:
                 chunks.append(_chunk_from_lines(chunks, heading, header + current))
             continue

@@ -98,7 +98,7 @@ class MinerUMcpService:
         @self.mcp.tool(
             name="parse_documents",
             description=(
-                "Parse 1-5 Runtime-authorized documents. XLSX/XLS/CSV/TSV use the shared table-facts engine; DOC/DOCX/PPT/PPTX use independent pinned DocVortex; PDF/images use MinerU. options.header_row (default 1, 0=no header) is an integer or a sheet-name map (*=default), selecting the analysis header explicitly. Source rows remain available through format=source. Excel images are excluded. Native Office image text requires options.image_text=true and is OCRed through authorized MinerU; inspect coverage before claiming completeness. For structured results use read_range/aggregate/search. "
+                "Parse 1-50 Runtime-authorized documents, automatically in isolated groups of at most 5. If inventory_complete=false, continue read_range(format=inventory,row_cursor=next_inventory_cursor); zero is a valid first cursor. XLSX/XLS/CSV/TSV use the shared table-facts engine; DOC/DOCX/PPT/PPTX use independent pinned DocVortex; PDF/images use MinerU. options.header_row (default 1, 0=no header) is an integer or a sheet-name map (*=default), selecting the analysis header explicitly. Source rows remain available through format=source. Excel images are excluded. Native Office image text requires options.image_text=true and is OCRed through authorized MinerU; inspect coverage before claiming completeness. For structured results use read_range/aggregate/search. "
                 "Each document must contain file_id; the bank Gateway supplies an omitted "
                 "file_ref from the current attachment; never pass paths or URLs."
             ),

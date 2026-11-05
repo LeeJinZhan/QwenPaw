@@ -4,6 +4,7 @@ from __future__ import annotations
 from importlib.metadata import version
 from importlib import import_module
 from contextlib import contextmanager
+from dataclasses import replace
 import json
 import hashlib
 import io
@@ -15,10 +16,33 @@ import zipfile
 from xml.etree import ElementTree as ET
 
 from .spreadsheet import SpreadsheetExtractError
+from .office_formats import office_parser_format
 
 ENGINE = "docvortex-0.5.4"
 SUPPORTED = frozenset({".doc", ".docx", ".ppt", ".pptx"})
 _NATIVE_PARSE_LOCK = RLock()
+
+
+@contextmanager
+def _compatible_doc_fib():
+    """Align pinned DocVortex 0.5.4 with MS-DOC FibBase, without editing bytes.
+
+    fObfuscated must be ignored when fEncrypted is clear. Remove this local
+    adapter after upgrading to an engine that implements that rule itself.
+    """
+    from docvortex.analyzers.native.office.doc import doc_converter
+    with _NATIVE_PARSE_LOCK:
+        original = doc_converter.parse_fib
+        def parse_fib(content):
+            fib = original(content)
+            if not fib.base.encrypted and fib.base.obfuscated:
+                return replace(fib, base=replace(fib.base, flags=fib.base.flags & ~0x8000))
+            return fib
+        try:
+            doc_converter.parse_fib = parse_fib
+            yield
+        finally:
+            doc_converter.parse_fib = original
 
 
 @contextmanager
@@ -70,10 +94,17 @@ def extract_native_office(path: Path, target: Path, *, max_bytes: int, max_image
         raise SpreadsheetExtractError("DOCUMENT_ENGINE_UNAVAILABLE", "Pinned native engine is required")
     import docvortex
     target.mkdir(mode=0o700, parents=True, exist_ok=True)
-    inventory, notes = _source_inventory(path, max_bytes=max_bytes)
+    detected = office_parser_format(path)
+    family = {'.doc', '.docx', '.rtf'} if path.suffix.lower() in {'.doc', '.docx'} else {'.ppt', '.pptx'}
+    if detected not in family:
+        raise SpreadsheetExtractError('FILE_TYPE_UNSUPPORTED', 'Office content belongs to another document family')
+    inventory, notes = _source_inventory(path, max_bytes=max_bytes, detected=detected)
     rejected_pixels = set()
-    with _guard_native_pixels(rejected_pixels):
-        parsed = docvortex.parse(path, file_suffix=path.suffix.lower()[1:])
+    parser_suffix = detected.removeprefix('.')
+    from .office_read_copy import passive_office_copy
+    with passive_office_copy(path) as (reading_path, external_count):
+        with _guard_native_pixels(rejected_pixels), _compatible_doc_fib():
+            parsed = docvortex.parse(reading_path, file_suffix=parser_suffix)
     artifact = docvortex.render_artifact(parsed.middle_json, "markdown", assets=parsed.assets)
     assets = []
     asset_bytes = 0
@@ -118,11 +149,14 @@ def extract_native_office(path: Path, target: Path, *, max_bytes: int, max_image
     if notes:
         markdown += "\n\n" + "\n\n".join(f"### 演讲备注（{name}）\n{text}" for name, text in notes)
     diagnostics = sorted({diagnostic.code for diagnostic in parsed.diagnostics + artifact.diagnostics} | set(image_diagnostics))
+    if external_count:
+        diagnostics.append('external_resource_not_loaded')
     image_export['exported'] = len(assets)
     result = {"engine": ENGINE, "markdown": markdown, "page_count": len(parsed.middle_json.pages),
               "source_inventory": inventory, "diagnostics": diagnostics, "image_assets": assets, 'image_export':image_export,
               "coverage": {"native_text": "parsed", "image_text": "unread" if inventory["images"] or assets else "not_present" if inventory["source_inventory_complete"] else "unknown",
                            "embedded_objects": "unread" if inventory["embedded_objects"] else "not_present" if inventory["source_inventory_complete"] else "unknown",
+                           "external_resources": "unread" if external_count else "not_present",
                            "formula_evaluation": "not_performed", "rendered_layout": "not_verified"}}
     encoded = json.dumps(result, ensure_ascii=False).encode("utf-8")
     # Reserve the exact serialized text/metadata budget before publishing,
@@ -142,11 +176,13 @@ def extract_native_office(path: Path, target: Path, *, max_bytes: int, max_image
     return result
 
 
-def _source_inventory(path, *, max_bytes):
+def _source_inventory(path, *, max_bytes, detected=None):
     inventory = {"format": path.suffix.lower(), "tables": 0, "slides": 0, "notes": 0,
                  "images": 0, "embedded_objects": 0, "source_inventory_complete": False}
     notes = []
-    if path.suffix.lower() in {".doc", ".ppt"}:
+    detected = detected or path.suffix.lower()
+    inventory['detected_format'] = detected
+    if detected in {".doc", ".ppt", ".rtf"}:
         # Binary Office object coverage is not inferred from an OOXML inventory.
         inventory["image_coverage"] = "unknown"
         return inventory, notes
