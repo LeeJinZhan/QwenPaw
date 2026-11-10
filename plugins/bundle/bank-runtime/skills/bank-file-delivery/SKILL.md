@@ -17,11 +17,13 @@ description: 用户当前或有效历史目标要求生成、修订、转换可�
 | 已确定的操作 | 使用当前获授权的能力 |
 | --- | --- |
 | 新建文件、依据上传材料形成新稿 | artifact_generate；必要材料先实际读取 |
-| 修订平台已生成的成果 | artifact_revise；使用真实source_generated_file_id，按格式契约选择局部修改或完整重建 |
-| 保留上传原件的样式局部修改 | artifact_revise；XLSX单元格按表格契约，DOCX段落/单元格文字按docx.md，PPTX文本框/单元格文字按bank-presentation；真实source_type/source_id，revision_mode=patch |
+| 重新生成平台已有成果 | 用户明确接受完整新稿后使用artifact_revise、revision_mode=rebuild及真实source_generated_file_id，提交完整正文 |
+| 修改Office原件且要求保留原格式 | 提供分析、问题位置及替换建议，用户在Office/WPS中修改；不承诺直接返回保格式修改副本 |
 | 转换已有文件格式 | artifact_convert；核对来源类型及目标格式，不把重新生成冒充转换 |
 | 使用机构模板 | template_fill_docx；仅使用真实、已发布且获授权的模板 |
 | 制作演示文稿、可编辑图表或导出现有图表 | 按bank-presentation、bank-chart的专业契约执行 |
+
+所有 Office 文件的保留原格式局部修订已暂停，包括上传附件、个人文件及平台生成成果。这是内部能力边界，不向用户说“暂停局部修订”。对用户说明：“我可以提供修改位置和替换内容，方便你在 Office/WPS 中编辑；如果接受重新排版，也可以生成完整新稿。”只有实际尝试未交付时才说明“这次没有生成修订文件，原文件保持不变”。用户要求改标题、文字、单元格或公式时，先说明当前不能直接交付保格式修订文件；依据实际读取范围提供“位置—原内容—建议内容”，由用户在 Office/WPS 中编辑。不得继续提交局部修订，也不改用脚本、转换副本或其他工具绕过。只有用户明确接受重新排版和完整新稿时，才进入重新生成；“只改一处、其他不变”不等于接受重建。
 
 上传材料编号、已有成果编号和临时路径不能互换。转换上传材料使用source_type=session_file/workspace_file及source_id；转换已有成果使用source_generated_file_id，不能混填。交付转换为purpose=delivery，内部读取转换为purpose=read；内部转换不自动增加下载成果。
 

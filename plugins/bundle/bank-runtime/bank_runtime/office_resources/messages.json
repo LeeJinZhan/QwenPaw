@@ -3,15 +3,15 @@
   "failures": {
     "csv_revision_unsupported": [
       "ARTIFACT_VALIDATION_FAILED",
-      "当前不支持对上传的 CSV 直接局部修订，原件未修改。可在完整读取数据后重新生成 CSV 副本，或用 Excel/WPS 另存为 XLSX 后上传修改。重新生成需要完整数据，并核对编码、分隔符、前导零及长账号；CSV 不保存字体、颜色或列宽。"
+      "当前不支持对上传的 CSV 直接局部修订，原件未修改。可在完整读取数据后重新生成 CSV 副本，或在 Excel/WPS 中手动修改。重新生成需要完整数据，并核对编码、分隔符、前导零及长账号；CSV 不保存字体、颜色或列宽。"
     ],
     "xls_revision_unsupported": [
       "ARTIFACT_TYPE_NOT_ALLOWED",
-      "当前不支持直接修订并交付 XLS，原件未修改。可先转换为 XLSX，再修改并交付 XLSX 副本；转换需当前环境支持，复杂格式、公式和对象可能存在差异。若必须保留 XLS 格式，当前无法完成。"
+      "当前不支持直接修订并交付 XLS，原件未修改。可在当前环境支持时转换为 XLSX 供读取分析。复杂格式、公式和对象可能存在差异；需要新表时先明确接受重新生成，或在 Excel/WPS 中手动修改。"
     ],
     "xls_revision_capability_disabled": [
       "POLICY_BLOCKED",
-      "当前助手未开放 XLS 原格式修订，原件未修改。系统支持的处理路线是先转为 XLSX，再修订并交付 XLSX 副本；需要助手具备对应转换和修订能力，不能绕过权限。复杂格式、公式和对象可能存在差异。"
+      "当前助手未开放 XLS 原格式修订，原件未修改。转换为 XLSX 供分析或重新生成新表仍需相应能力与授权，不能绕过权限。复杂格式、公式和对象可能存在差异。"
     ],
     "xls_conversion_unavailable": [
       "DOCUMENT_WORKER_UNAVAILABLE",
@@ -23,7 +23,7 @@
     ],
     "docx_revision_unsupported": [
       "ARTIFACT_VALIDATION_FAILED",
-      "DOCX：该请求不是受支持的局部文字修改，原件未修改。请读取原文，提交明确目标及原文/新文的局部替换；涉及整体重排时先说明重建及格式保留边界，不能静默切换。"
+      "这次没有生成Word修订文件，原文件保持不变。我可以提供修改位置和替换内容，方便你在 Office/WPS 中编辑；如果接受重新排版，也可以生成完整新稿。"
     ],
     "doc_revision_unsupported": [
       "ARTIFACT_TYPE_NOT_ALLOWED",
@@ -39,7 +39,7 @@
     ],
     "pptx_revision_unsupported": [
       "ARTIFACT_VALIDATION_FAILED",
-      "PPTX：该请求不是受支持的局部文字修改，原件未修改。请读取原文，提交明确目标及原文/新文的局部替换；涉及整体重排时先说明重建及格式保留边界，不能静默切换。"
+      "这次没有生成PPT修订文件，原文件保持不变。我可以提供修改位置和替换内容，方便你在 Office/WPS 中编辑；如果接受重新排版，也可以生成完整新稿。"
     ],
     "ppt_revision_unsupported": [
       "ARTIFACT_TYPE_NOT_ALLOWED",
@@ -80,6 +80,10 @@
     "text_patch_incompatible": [
       "ARTIFACT_VALIDATION_FAILED",
       "目标涉及保护、签名、混合文字样式、合并表格、域、链接或复杂对象，当前无法可靠地局部修改；原件保留。可缩小到简单文字范围，或在Word/PowerPoint/WPS中修改；未经接受不能重建。"
+    ],
+    "office_local_revision_paused": [
+      "ARTIFACT_VALIDATION_FAILED",
+      "这次没有生成修订文件，原文件保持不变。我可以提供修改位置和替换内容，方便你在 Office/WPS 中编辑；如果接受重新排版，也可以生成完整新稿。"
     ]
   },
   "failure_codes": {
