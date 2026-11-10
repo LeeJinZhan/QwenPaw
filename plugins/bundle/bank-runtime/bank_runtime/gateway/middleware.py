@@ -50,7 +50,7 @@ from ..presentation import artifact_model_result, failure_message, failure_metad
 from ..conversion_reports import (ConversionCoverage, validate_conversion_report, conversion_reason, REASONS)
 from ..model_context import prepare_public_model_context
 from ..delivery_state import current_delivery_state
-from ..artifact_schema import describe_docx_tools, docx_retry_schema_hint
+from ..artifact_schema import describe_docx_tools, describe_revision_tools, docx_retry_schema_hint
 from ..chart_schema import describe_chart_tools
 from ..chart_tools import normalize_chart_input
 from ..docx_draft import controlled_docx_call, draft_request
@@ -457,6 +457,7 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
         if self._native_scope_key() in self._native_uncertain_scopes:
             input_kwargs['tools'] = [schema for schema in (input_kwargs.get('tools') or [])
                 if not self.native_execution_paused(str(schema.get('function', {}).get('name', '')))]
+        input_kwargs["tools"] = describe_revision_tools(input_kwargs.get("tools"))
         input_kwargs["tools"] = describe_docx_tools(
             input_kwargs.get("tools"), self.artifact_intent or self._artifact_schema_hint,
         )
@@ -506,12 +507,14 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
                 *list(input_kwargs.get("messages") or []),
                 SystemMsg(name="system", content=(
                     "文件工具参数未通过校验。按该操作的诊断修正，重复同一错误不得盲目重试；提交完整 JSON 对象，"
-                    "确保全部括号闭合；生成或修订须包含完整 content，转换按其工具字段提交。DOCX 正文直接使用对象，例如 "
+                    "确保全部括号闭合；生成或完整重建须包含完整正文 content，转换按其工具字段提交。"
+                    "Office文件原格式编辑改为提供修改位置和替换内容，供用户在Office/WPS中编辑；不提交patch、不重试或用脚本绕过，不向用户说“暂停局部修订”。"
+                    "先提供修改建议；用户明确接受重新排版、生成完整新稿后才能生成或重建。DOCX 完整正文直接使用对象，例如 "
                     '{"paragraphs":["正文"]}，不要把 sections/paragraphs 再编码成 JSON 字符串。'
-                    "公文必须直接提交含 kind=official_document、layout_version、document 的完整对象，"
+                    "公文生成或完整重建必须直接提交含 kind=official_document、layout_version、document 的完整对象，"
                     "document 内保留 title、recipients、blocks；公文不得改成普通 sections/paragraphs 结构，"
                     "delivery_plan 与正文版式必须一致。"
-                    "正文中的英文双引号须正确转义；保留原事实与版式要求及 delivery_plan。"
+                    "正文中的英文双引号须正确转义；保留原事实与版式要求，生成或完整重建保留 delivery_plan。"
                     "不要只提交文件名，不重复宣告准备生成，也不要改用脚本或绕过受控工具。"
                 )),
             ]
@@ -592,10 +595,11 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
                 SystemMsg(
                     name="system",
                     content=(
-                        "本轮已明确要求公文 DOCX。生成或修订必须提交完整公文 content："
+                        "本轮已明确要求公文 DOCX。生成或完整重建必须提交完整公文 content："
                         "kind=official_document、layout_version=bank-official-docx-v1、"
                         "document={title,recipients,blocks,...}。按 bank-document-writing 技能组织内容。"
                         "普通字符串或 sections/paragraphs 的 Word 不能满足本轮要求。"
+                        "原格式编辑提供修改位置和替换内容，供用户在Office/WPS中编辑；未经用户接受不得改成完整重建。"
                         "若工具指出版式不符，修正结构后通过同一受控工具重试；不得改写用户事实或声称已经完成。"
                     ),
                 ),
@@ -610,11 +614,12 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
                 SystemMsg(
                     name="system",
                     content=(
-                        "本轮要求交付 DOCX。先按 bank-document-writing 判断沟通用途、文种和版式，"
-                        "在 artifact_generate/artifact_revise 同时提交 delivery_plan，且仅含 "
+                        "本轮要求交付 DOCX。生成或完整重建时按 bank-document-writing 判断沟通用途、文种和版式，"
+                        "在 artifact_generate 或完整重建的 artifact_revise 同时提交 delivery_plan，且仅含 "
                         "document_type（letter/request/notice/report/work_plan/task_list/article/other）、"
                         "target_format=docx、layout_kind（official_document/standard_document）。"
                         "文种与版式选择遵循已加载的文件技能及用户明确要求。"
+                        "原格式编辑提供修改位置和替换内容，供用户在Office/WPS中编辑；只有用户明确接受新稿才生成或重建。"
                         "正文结构须与登记版式一致；机构模板走已授权已发布模板版本。"
                         "若缺少或不一致，按工具提示修正后重试；不得只在最终回答中宣称判断或生成完成。"
                         f"本轮明确版式约束：{self.artifact_intent.layout_kind or '按用途判断'}。"

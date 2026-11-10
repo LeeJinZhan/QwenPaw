@@ -68,4 +68,3 @@ def test_pptx_rebuild_and_ppt_conversion_disclose_object_preservation_limits():
     from bank_runtime.spreadsheet_messages import converted_copy_hint
     hint = converted_copy_hint({'provenance': {'engine': 'libreoffice'}}, artifact_type='pptx')
     assert 'PPTX' in hint and '动画' in hint
-

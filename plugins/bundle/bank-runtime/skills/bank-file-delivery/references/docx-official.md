@@ -26,7 +26,7 @@
 修订完整参数示例：`generated_example_only` 仅为结构占位，调用前必须替换为本轮可用且已授权的真实成果引用；没有该引用时不试填编号。content 包含未修改的全部段落；不添加 artifact_type、title 或 source_refs 等修订工具不接受的外层字段。
 
 ```json
-{"source_generated_file_id":"generated_example_only","instructions":"主送增加运维小组，新增问题反馈要求，保留其余内容","output_name":"工作安排通知修订初稿示例.docx","delivery_plan":{"document_type":"notice","target_format":"docx","layout_kind":"official_document"},"content":{"kind":"official_document","layout_version":"bank-official-docx-v1","document":{"title":"关于工作安排的通知","recipients":["各测试小组","运维小组"],"blocks":[{"type":"heading","level":1,"text":"一、工作安排"},{"type":"paragraph","text":"测试完成后，各组汇总结果并提交测试记录。"},{"type":"heading","level":1,"text":"二、问题反馈"},{"type":"paragraph","text":"发现的问题于测试当天统一汇总。"}]}}}
+{"source_generated_file_id":"generated_example_only","instructions":"主送增加运维小组，新增问题反馈要求，保留其余内容","output_name":"工作安排通知修订初稿示例.docx","delivery_plan":{"document_type":"notice","target_format":"docx","layout_kind":"official_document"},"content":{"kind":"official_document","layout_version":"bank-official-docx-v1","document":{"title":"关于工作安排的通知","recipients":["各测试小组","运维小组"],"blocks":[{"type":"heading","level":1,"text":"一、工作安排"},{"type":"paragraph","text":"测试完成后，各组汇总结果并提交测试记录。"},{"type":"heading","level":1,"text":"二、问题反馈"},{"type":"paragraph","text":"发现的问题于测试当天统一汇总。"}]}},"revision_mode":"rebuild"}
 ```
 
 ## 公文表格与纸张
