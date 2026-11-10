@@ -374,38 +374,26 @@ async def artifact_revise(
     source_id: str = "",
     revision_mode: str = "",
 ) -> str:
-    """Revise a generated artifact, or patch an authorized XLSX preserving styles.
+    """Regenerate a complete platform-generated artifact after user acceptance.
+
+    Office original-preserving local revision is paused for every source,
+    including generated files. Do not send docx_patch/xlsx_patch/pptx_patch,
+    retry paused edits, or use scripts/conversions to bypass this boundary.
+    Offer analysis and replacement text based on material actually read.
+    Only regenerate when the user explicitly accepts a complete new draft
+    and possible layout/object changes; a local edit request is not consent.
 
     Args:
-        source_generated_file_id: Runtime-generated source file identifier.
-        instructions: Requested changes.
-        content: For XLSX local edits use {"kind":"xlsx_patch","edits":[
-            {"sheet":"Data","cell":"B2","value":120}]} against the actual
-            source workbook. Optional append_rows contains sheet, start_row,
-            rows, style_from_row and table (extend only when requested).
-            Formula results require recalculation on opening; do not claim
-            calculated values were verified. DOCX/PPTX local text edits use kind=docx_patch/pptx_patch and edits
-            with target, old_text, new_text. Word targets: paragraph (1-based body
-            paragraph), or table/row/column; empty target requires unique body text.
-            PPTX targets: slide (1-based), optional shape_id from the original
-            file, and row/column for table cells. Do not guess locators.
-            Other revisions use complete structured content. Official
-            documents retain kind, layout_version and document.title, including
-            every unchanged block; do not pass only a patch or revised section.
+        source_generated_file_id: Real authorized platform-generated source ID.
+        instructions: Requested changes and accepted regeneration scope.
+        content: Complete revised structured content, including unchanged
+            sections, slides and facts. Never a local patch or partial draft.
         output_name: Optional safe output filename.
-        source_type: For uploaded XLSX/DOCX/PPTX use session_file or workspace_file;
-            generated_file is also accepted with source_id. Omit when using
-            source_generated_file_id. Source remains unchanged.
-        source_id: Real authorized file identifier; never a local path.
-        revision_mode: patch for original-preserving local edits, rebuild for
-            full-content regeneration. Omit only for legacy compatibility.
-            Word/PPTX text patches retain original object formatting; text growth may
-            affect layout. Never switch to rebuild without the user's acceptance.
-            XLSX patch requires
-            xlsx_patch content. Explain the chosen operation before execution.
-        delivery_plan: Omit for local text patches. For DOCX regeneration, semantic decision using the same strict three fields
-            and enums as artifact_generate. Preserve the original purpose/layout
-            unless the user requests a change; send complete revised content.
+        source_type: generated_file when using source_id instead of the legacy ID.
+        source_id: Real authorized generated file ID, never an uploaded file or path.
+        revision_mode: rebuild, only after the user accepts full regeneration.
+        delivery_plan: For DOCX regeneration, the same strict three fields and
+            enums as artifact_generate, matching the selected complete content.
     """
     del source_generated_file_id, instructions, content, output_name, delivery_plan, source_type, source_id, revision_mode
     return _UNMEDIATED

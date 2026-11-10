@@ -6,6 +6,28 @@ from typing import Any
 from .artifact_tools import ArtifactDeliveryIntent
 
 
+def describe_revision_tools(tools: Any) -> Any:
+    """Only describe full regeneration; Runtime also rejects legacy patches."""
+    result = deepcopy(tools)
+    for schema in result or []:
+        function = schema.get('function', {})
+        if function.get('name') != 'artifact_revise':
+            continue
+        parameters = function.get('parameters', {})
+        properties = parameters.get('properties', {})
+        if 'revision_mode' in properties:
+            properties['revision_mode'] = {
+                'type': 'string', 'enum': ['rebuild'],
+                'description': '仅在用户明确接受重新排版、完整新稿时使用。保留原格式时提供修改位置和替换内容，由用户在Office/WPS中编辑；不提交patch或改用脚本绕过。'}
+            required = parameters.setdefault('required', [])
+            if 'revision_mode' not in required:
+                required.append('revision_mode')
+        if 'source_type' in properties:
+            properties['source_type'] = {'type': 'string', 'enum': ['generated_file'],
+                                         'description': '平台成果来源；上传原件提供分析和修改建议，明确接受新稿后另行生成。'}
+    return result
+
+
 def docx_retry_schema_hint(tool_name: str, payload: Mapping[str, Any]) -> ArtifactDeliveryIntent | None:
     """Describe a rejected proposal; this never creates trusted task authority."""
     operation = {'artifact_generate': 'generate', 'artifact_revise': 'revise'}.get(tool_name)
@@ -56,7 +78,10 @@ def describe_docx_tools(tools: Any, intent: ArtifactDeliveryIntent | None) -> An
                 branch['description'] = '完整普通 Word 正文。章节用 sections，每节包含 heading 和 paragraphs；不得再次编码成 JSON 字符串。'
                 standard = branch
                 official = _official_content_schema()
-                properties['content'] = (standard if intent.layout_kind == 'standard_document' else official if intent.layout_kind == 'official_document' else {'anyOf': [standard, official]})
+                alternatives = ([standard] if intent.layout_kind == 'standard_document'
+                                else [official] if intent.layout_kind == 'official_document'
+                                else [standard, official])
+                properties['content'] = alternatives[0] if len(alternatives) == 1 else {'anyOf': alternatives}
                 break
         if 'delivery_plan' in properties:
             properties['delivery_plan'] = {'type': 'object', 'additionalProperties': False, 'properties': {
