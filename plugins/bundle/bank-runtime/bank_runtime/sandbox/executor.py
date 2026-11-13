@@ -246,12 +246,50 @@ class AuthorizedReadingExecution:
     name: str
     arguments: dict[str, Any]
 
+    @property
+    def shared_document_references(self):
+        return self.executor.sandbox_context.get('shared_file_references') is True
+
+    async def publish_document(self, file_ref, document):
+        from .shared_documents import publish
+        if not self.shared_document_references or self.name!='parse_documents':
+            raise SandboxExecutorError('Document publication requires approved parse','FILE_ACCESS_DENIED')
+        return await publish(self,file_ref,document)
+
+    async def read_shared_document(self, arguments):
+        from .shared_documents import read
+        if not self.shared_document_references or self.name!='read_document_chunks' or arguments!=self.arguments:
+            raise SandboxExecutorError('Document page differs from approved query','FILE_ACCESS_DENIED')
+        return await read(self)
+
+    async def restore_file_reference(self, file_ref, file_id, registry):
+        from .shared_files import restore
+        if (self.executor.sandbox_context.get('shared_file_references') is not True
+                or self.name.removeprefix('MinerU__')!='parse_documents'
+                or {'file_id':file_id,'file_ref':file_ref} not in self.arguments.get('documents',[])):
+            raise SandboxExecutorError('Reference differs from approved parse','FILE_ACCESS_DENIED')
+        return await restore(self.executor,file_ref,file_id,registry)
+
     async def execute(self, plan):
         return await self.executor.process_documents(tool_call_id=self.tool_call_id, name=self.name,
                                                        arguments=self.arguments, plan=plan)
 
     async def validate_sources(self, sources):
         return await self.executor.validate_sources(sources)
+
+    async def materialize_result(self, result, task_directory):
+        from .reading_results import materialize_reading_result
+        return await materialize_reading_result(self.executor, result, task_directory)
+
+    async def bind_result(self, result, document_ref):
+        from .reading_results import bind_reading_reference
+        return await bind_reading_reference(self.executor, result, document_ref)
+
+    async def resolve_reference(self, document_ref):
+        from .reading_results import resolve_reading_reference
+        if self.arguments.get('document_ref')!=document_ref:
+            raise SandboxExecutorError('Reference differs from approved query','FILE_ACCESS_DENIED')
+        return await resolve_reading_reference(self.executor,document_ref)
 
 
 def _remaining_seconds(context: Mapping[str, Any]) -> float:

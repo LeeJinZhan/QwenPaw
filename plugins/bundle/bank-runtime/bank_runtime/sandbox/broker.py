@@ -91,6 +91,22 @@ class RuntimeFileBroker:
             data.get("denied"), list
         ):
             raise SandboxBrokerError("Runtime attachment authorization is invalid")
+        if scope.sandbox_context.get('shared_file_references') is True:
+            from .shared_files import issue,resolve
+            # Only automatic current-task rehydration can reuse consumed raw
+            # grants. Explicit selection errors must retain their original denial.
+            denied=data['denied']
+            if denied and (selection_records or any(item.get('reason_code') != 'FILE_NOT_IN_SANDBOX' for item in denied)):
+                return data
+            checked=await self._post('/runtime/internal/sandbox/attachments/validate-materialized',
+                dict(sandbox_context=scope.sandbox_context,file_ids=file_ids))
+            files=[{key:item[key] for key in ('file_id','content_hash','size_bytes')} for item in checked['files']]
+            refs=await issue(self,scope.sandbox_context,files)
+            locators=[]
+            for file_id in file_ids:
+                value=await resolve(self,scope.sandbox_context,refs[file_id],file_id)
+                locators.append(value|{'storage_provider':'runtime_reference','_sandbox_context':dict(scope.sandbox_context)})
+            return {'authorized':locators,'denied':[]}
         return data
 
     async def _post(self, path: str, payload: dict[str, Any], *, timeout_seconds: float = 30) -> dict[str, Any]:
@@ -174,6 +190,10 @@ class RuntimeFileBroker:
 
     def stream_locator(self, locator: dict[str, Any], write_chunk: Any) -> None:
         provider = str(locator.get("storage_provider") or "").lower()
+        if provider=='runtime_reference':
+            from .shared_files import stream
+            stream(self,locator,write_chunk)
+            return
         object_key = _safe_object_key(locator.get("object_key"))
         if provider == "local":
             try:

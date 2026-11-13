@@ -37,6 +37,8 @@ from .recovery_budget import OperationRecoveryBudget, recovery_operation_key
 from .native_skills import NativeSkillReader
 from .personal_skills import PersonalSkillReader
 from .history_recall import CurrentSessionHistoryReader, RECALL_GUIDANCE
+from .result_recall import RuntimeResultReader
+from .delegations import RuntimeDelegationTools
 from .completion import operation_keys, parse_outcomes
 from .document_reads import DocumentReadLedger, result_error, is_read_recovery_tool
 from . import file_diagnostics as file_diag
@@ -110,6 +112,8 @@ class _PreparedExecution:
     native_skill: bool = False
     personal_skill: bool = False
     history_recall: bool = False
+    result_recall: bool = False
+    orchestration: bool = False
 
 
 class BankRuntimeGatewayMiddleware(MiddlewareBase):
@@ -163,6 +167,8 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
         self.native_skills: NativeSkillReader | None = None
         self.personal_skills: PersonalSkillReader | None = None
         self.history_recall: CurrentSessionHistoryReader | None = None
+        self.result_recall: RuntimeResultReader | None = None
+        self.delegations: RuntimeDelegationTools | None = None
         self._model_tool_projection_logged = False
         self.allowed_tool_names: frozenset[str] | None = None
         self.document_preparation = DocumentSourcePreparation(self._run_file_preparation_tool)
@@ -181,10 +187,16 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
         self.native_skills = NativeSkillReader(agent)
         self.personal_skills = PersonalSkillReader(agent)
         self.history_recall = CurrentSessionHistoryReader(agent, request, self.client)
+        self.result_recall = RuntimeResultReader(agent, self.client)
+        self.delegations = RuntimeDelegationTools(agent, self.client)
         for group in agent.toolkit.tool_groups:
-            group.tools[:] = [tool for tool in group.tools if getattr(tool, 'name', '') not in {'recall_history', 'recall_history_python'}]
+            group.tools[:] = [tool for tool in group.tools if getattr(tool, 'name', '') not in {'recall_history', 'recall_history_python', 'read_runtime_result', 'delegate_runtime_expert', 'read_runtime_expert_results'}]
         if self.history_recall.eligible():
             agent.toolkit.tool_groups[0].tools.append(self.history_recall.tool)
+        if self.result_recall.eligible():
+            agent.toolkit.tool_groups[0].tools.append(self.result_recall.tool)
+        if self.delegations.eligible():
+            agent.toolkit.tool_groups[0].tools.extend(self.delegations.tools)
 
     async def on_reply(
         self,
@@ -451,6 +463,11 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
         input_kwargs: dict[str, Any],
         next_handler: Callable[..., Any],
     ) -> Any:
+        if self.delegations is not None:
+            await self.delegations.suspend_if_needed(agent)
+        from ..input_inbox import inject_pending_inputs, checkpoint_model_boundary
+        input_kwargs = await inject_pending_inputs(agent, input_kwargs)
+        await checkpoint_model_boundary(agent, self.client)
         # Inspect completed model calls before AgentScope sanitizes malformed
         # JSON into synthetic tool errors (which never enter the Gateway).
         input_kwargs = dict(input_kwargs)
@@ -461,6 +478,9 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
             input_kwargs.get("tools"), self.artifact_intent or self._artifact_schema_hint,
         )
         input_kwargs["tools"] = describe_chart_tools(input_kwargs["tools"])
+        from ..model_capacity import govern_model_handler
+        next_handler = govern_model_handler(next_handler,
+            self.model_reliability.deadline if self.model_reliability else time.monotonic()+1800)
         if self.model_reliability is not None:
             raw_handler = next_handler
             async def reliable_handler(**kwargs):
@@ -561,6 +581,10 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
                 allowed.add(self.history_recall.tool.name)
                 input_kwargs = {**input_kwargs, 'messages':[*list(input_kwargs.get('messages') or []),
                     SystemMsg('system', RECALL_GUIDANCE)]}
+            if self.result_recall is not None and await self.result_recall.visible():
+                allowed.add(self.result_recall.tool.name)
+            if self.delegations is not None:
+                allowed.update(await self.delegations.visible_names())
             input_kwargs = dict(input_kwargs)
             input_kwargs["tools"] = [
                 schema
@@ -642,6 +666,8 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
                      if isinstance(schema, dict) and isinstance(schema.get('function'), dict)},
                     self.sandbox_executor),
             )
+        from ..context_budget import enforce_model_budget
+        enforce_model_budget(input_kwargs)
         if read_error:
             # Only this incomplete-read model round is buffered. A complete
             # file answer and ordinary conversation retain their normal stream.
@@ -920,6 +946,8 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
         native_skill: bool = False,
         personal_skill: bool = False,
         history_recall: bool = False,
+        result_recall: bool = False,
+        orchestration: bool = False,
     ) -> None:
         key = (str(tool_name), canonical_payload_hash(tool_input))
         self._prepared[key].append(
@@ -927,6 +955,8 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
                 key[0], key[1], dict(preflight), native_skill=native_skill,
                 personal_skill=personal_skill,
                 history_recall=history_recall,
+                result_recall=result_recall,
+                orchestration=orchestration,
             )
         )
 
@@ -1115,6 +1145,20 @@ class BankRuntimeGatewayMiddleware(MiddlewareBase):
             reader = self.history_recall
             if reader is None or reader.agent is not agent or not await reader.available(tool_input):
                 raise GatewayError('History read scope changed')
+            async for item in next_handler():
+                yield item
+            return
+        if prepared.result_recall:
+            reader = self.result_recall
+            if reader is None or reader.agent is not agent or not await reader.available(tool_input):
+                raise GatewayError("Runtime result read scope changed")
+            async for item in next_handler():
+                yield item
+            return
+        if prepared.orchestration:
+            coordinator = self.delegations
+            if coordinator is None or coordinator.agent is not agent or not await coordinator.available_call(tool_name, tool_input):
+                raise GatewayError("Runtime delegation scope changed")
             async for item in next_handler():
                 yield item
             return
@@ -1410,6 +1454,28 @@ class GatewayPermissionEngine:
             return _deny("此操作当前不可用，本次未执行。")
         personal_reader = self.middleware.personal_skills
         history_reader = self.middleware.history_recall
+        result_reader = self.middleware.result_recall
+        coordinator = self.middleware.delegations
+        if coordinator is not None and coordinator.recognizes(tool):
+            if not await coordinator.available_call(tool.name, tool_input):
+                return _deny("当前专家协调操作不可用。")
+            input_hash = canonical_payload_hash(tool_input)
+            decision = await self.delegate.check_permission(tool, tool_input)
+            if (decision.behavior != PermissionBehavior.ALLOW or canonical_payload_hash(tool_input) != input_hash
+                    or not await coordinator.available_call(tool.name, tool_input)):
+                return _deny("当前专家协调操作不可用。")
+            self.middleware.prepare(tool.name, tool_input, {}, orchestration=True)
+            return decision
+        if result_reader is not None and result_reader.recognizes(tool):
+            if not await result_reader.available(tool_input):
+                return _deny("当前执行结果不可用。")
+            input_hash = canonical_payload_hash(tool_input)
+            decision = await self.delegate.check_permission(tool, tool_input)
+            if (decision.behavior != PermissionBehavior.ALLOW or canonical_payload_hash(tool_input) != input_hash
+                    or not await result_reader.available(tool_input)):
+                return _deny("当前执行结果不可用。")
+            self.middleware.prepare(tool.name, tool_input, {}, result_recall=True)
+            return decision
         if history_reader is not None and history_reader.recognizes(tool):
             if not await history_reader.available(tool_input):
                 return _deny('当前会话历史不可用。')
@@ -1665,8 +1731,11 @@ def bank_runtime_middleware_factory(
             getattr(request, "identity_json", None),
             request_user_id=str(getattr(request, "user_id", "") or ""),
         )
+        from ..session import current_managed_session_scope
+        managed = current_managed_session_scope()
+        execution = managed.remote_client.execution if managed is not None and managed.remote_client is not None else None
         return BankRuntimeGatewayMiddleware(
-            GatewayClient(config),
+            GatewayClient(config, execution=execution),
             caller_identity=identity,
             caller_identity_error=identity_error,
             model_reliability=reliability,

@@ -738,6 +738,7 @@ class ToolResultPruningMiddleware(MiddlewareBase):
         exempt_tool_names: set[str] | None = None,
         tool_results_dir: str = "",
         agent_id: str = "default",
+        save_text: Callable[..., str] | None = None,
     ) -> None:
         self._enabled = enabled
         self._recent_n = recent_n
@@ -745,7 +746,7 @@ class ToolResultPruningMiddleware(MiddlewareBase):
         self._recent_max_bytes = recent_max_bytes
         self._exempt_extensions = exempt_file_extensions or set()
         self._exempt_tools = exempt_tool_names or set()
-        self._pruner = ToolResultPruner(tool_results_dir)
+        self._pruner = ToolResultPruner(tool_results_dir, save_text=save_text)
         self._agent_id = agent_id
 
     async def on_acting(

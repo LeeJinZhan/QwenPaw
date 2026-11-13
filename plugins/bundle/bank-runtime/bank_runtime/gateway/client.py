@@ -142,10 +142,13 @@ class GatewayClient:
         config: GatewayConfig,
         *,
         outbox: GatewayResultOutbox | None = None,
+        execution: Any = None,
     ) -> None:
         self.config = config
-        self.outbox = outbox or GatewayResultOutbox()
-        self.guard_outbox = GatewayGuardOutbox(self.outbox.root / "guard")
+        self.execution = execution
+        self.pending_acknowledgements: set[str] = set()
+        self.outbox = None if execution is not None else (outbox or GatewayResultOutbox())
+        self.guard_outbox = GatewayGuardOutbox(self.outbox.root / "guard") if self.outbox is not None else None
 
     async def preflight(
         self,
@@ -158,7 +161,11 @@ class GatewayClient:
         call_id = str(call_id or "").strip() or f"call_{uuid.uuid4().hex}"
         idempotency_key = f"qwenpaw:{call_id}"
         await self._flush_pending_results()
-        guard_delivery = await self.guard_outbox.flush(self.config.task_id, self._send_guard)
+        if self.pending_acknowledgements:
+            raise GatewayError("Prior execution acknowledgement is unresolved", code="TOOL_RESULT_REPORT_FAILED",
+                failure_metadata={"execution_status": "execution_unknown", "retryable": False})
+        guard_delivery = (await self.guard_outbox.flush(self.config.task_id, self._send_guard)
+            if self.guard_outbox is not None else {"pending": 0, "exhausted": 0})
         if guard_delivery["pending"] or guard_delivery["exhausted"]:
             raise GatewayError("Prior Guard decision synchronization is pending; execution stopped", code="TOOL_GUARD_REPORT_FAILED")
         payload = {
@@ -238,14 +245,20 @@ class GatewayClient:
         for attempt in range(_RESULT_ATTEMPTS):
             try:
                 response = await self._send_guard(payload)
-                self.guard_outbox.remove(self.config.task_id, payload["tool_call_id"])
+                if self.guard_outbox is not None:
+                    self.guard_outbox.remove(self.config.task_id, payload["tool_call_id"])
+                self.pending_acknowledgements.discard("guard:" + payload["tool_call_id"])
                 return response
             except Exception as exc:
                 if isinstance(exc, GatewayError) and exc.definitive_rejection:
-                    self.guard_outbox.remove(self.config.task_id, payload["tool_call_id"])
+                    if self.guard_outbox is not None:
+                        self.guard_outbox.remove(self.config.task_id, payload["tool_call_id"])
                     raise
                 if attempt == _RESULT_ATTEMPTS - 1:
-                    self.guard_outbox.enqueue_guard(payload)
+                    if self.guard_outbox is not None:
+                        self.guard_outbox.enqueue_guard(payload)
+                    else:
+                        self.pending_acknowledgements.add("guard:" + payload["tool_call_id"])
                     raise GatewayError("Runtime Guard acknowledgement failed; decision synchronization is pending", code="TOOL_GUARD_REPORT_FAILED", failure_metadata={"execution_status": "not_started", "retryable": False}) from exc
                 await asyncio.sleep(0.05 * (attempt + 1))
         raise AssertionError("unreachable")
@@ -334,12 +347,18 @@ class GatewayClient:
                     raise GatewayError(
                         "Runtime Tool Gateway result acknowledgement is invalid"
                     )
-                self.outbox.remove(self.config.task_id, str(tool_call_id))
+                if self.outbox is not None:
+                    self.outbox.remove(self.config.task_id, str(tool_call_id))
+                self.pending_acknowledgements.discard("result:" + str(tool_call_id))
                 return response
             except Exception as exc:  # result callback is retried, execution is not
                 last_error = exc
                 if attempt + 1 < _RESULT_ATTEMPTS:
                     await asyncio.sleep(0.05 * (attempt + 1))
+        if self.outbox is None:
+            self.pending_acknowledgements.add("result:" + str(tool_call_id))
+            raise GatewayError("Runtime execution result acknowledgement is unresolved", code="TOOL_RESULT_REPORT_FAILED",
+                failure_metadata={"execution_status": "execution_unknown", "retryable": False}) from last_error
         self.outbox.enqueue(
             task_id=self.config.task_id,
             tool_call_id=str(tool_call_id),
@@ -356,13 +375,16 @@ class GatewayClient:
             "error_type": type(last_error).__name__ if last_error else "",
         }
 
-    def _scope_payload(self) -> dict[str, str]:
+    def _scope_payload(self) -> dict[str, Any]:
         return {
             "task_id": self.config.task_id,
             "session_id": self.config.session_id,
             "tool_session_id": self.config.tool_session_id,
             "policy_snapshot_id": self.config.policy_snapshot_id,
             "worker_agent_id": self.config.agent_id,
+            **({"execution_id": self.execution.execution_id, "epoch": self.execution.epoch,
+                "branch_id": self.execution.branch_id,
+                **({'recovery_generation':self.execution.recovery_generation} if self.execution.recovery_generation else {})} if self.execution is not None else {}),
         }
 
     @property
@@ -410,6 +432,8 @@ class GatewayClient:
         return body
 
     async def _flush_pending_results(self) -> None:
+        if self.outbox is None:
+            return
         async def sender(record: dict[str, Any]) -> None:
             protocol = record.get("protocol")
             if not isinstance(protocol, Mapping):

@@ -61,6 +61,7 @@ class Clarification(BaseModel):
 
 class BatchRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
+    runtime_model_capacity: dict | None = None
     job_id: str = Field(min_length=1, max_length=128)
     batch_key: str = Field(min_length=1, max_length=256)
     goal: str = Field(min_length=1, max_length=8000)
@@ -72,6 +73,7 @@ class BatchRequest(BaseModel):
 
 class WorkbookPlanRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
+    runtime_model_capacity: dict | None = None
     goal: str = Field(min_length=1, max_length=8000)
     workbook: str = Field(min_length=2, max_length=24000)
 
@@ -86,19 +88,21 @@ sheet 为完整主表名，header_row 为标题行号，group_by 为列字母数
 
 
 async def analyze(agent_id: str, payload: BatchRequest) -> str:
-    user_data = payload.model_dump(exclude={"job_id", "batch_key", "grouped_comparison"})
+    user_data = payload.model_dump(exclude={"job_id", "batch_key", "grouped_comparison", 'runtime_model_capacity'})
     user_data["evidence"] = json.loads(payload.evidence)
     # Earlier Runtime versions called the material group "supplier".
     for row in user_data["evidence"]:
         if "supplier" in row:
             row.setdefault("material_group", row.pop("supplier"))
     policy = _POLICY + "\n" + _GROUP_COMPARISON if payload.grouped_comparison else _POLICY
-    return await _reply(agent_id, policy, user_data)
+    return await _reply(agent_id, policy, user_data, capacity=payload.runtime_model_capacity)
 
 
-async def _reply(agent_id, system, user_data):
+async def _reply(agent_id, system, user_data, *, capacity=None, purpose='background-analysis'):
     require_review_agent(agent_id)
     model = create_review_model(agent_id)
+    from .helper_model_capacity import govern_helper_model
+    model = govern_helper_model(model, agent_id, purpose, capacity)
     messages = [
         Msg(name="analysis", role="system", content=[{"type": "text", "text": system}]),
         Msg(
@@ -146,7 +150,7 @@ def build_background_analysis_router():
             async with _SLOT:
                 text = await asyncio.wait_for(_reply(trusted, _WORKBOOK_POLICY, {
                     "goal": payload.goal, "workbook": json.loads(payload.workbook)
-                }), timeout=165)
+                }, capacity=payload.runtime_model_capacity, purpose='background-workbook-plan'), timeout=165)
             plan = json.loads(text)
             if plan is not None and (not isinstance(plan, dict) or len(text) > 8192):
                 raise ValueError("Invalid plan")

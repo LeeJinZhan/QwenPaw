@@ -1438,6 +1438,9 @@ def _resolved_provider_id(provider: Any, configured_provider_id: str) -> str:
 def create_model_and_formatter(
     agent_id: Optional[str] = None,
     model_slot_override: Any = None,
+    *,
+    agent_config_snapshot: Any = None,
+    provider_snapshot: Any = None,
 ) -> Tuple[ChatModelBase, FormatterBase]:
     """Factory method to create model and formatter instances.
 
@@ -1476,7 +1479,7 @@ def create_model_and_formatter(
     compact_threshold: Optional[float] = None
     if agent_id:
         try:
-            agent_config = load_agent_config(agent_id)
+            agent_config = agent_config_snapshot if agent_config_snapshot is not None else load_agent_config(agent_id)
             model_slot = agent_config.active_model
             retry_config = RetryConfig(
                 enabled=agent_config.running.llm_retry_enabled,
@@ -1498,7 +1501,8 @@ def create_model_and_formatter(
             if getattr(ccc, "enabled", False):
                 compact_threshold = ccc.compact_threshold_ratio
         except Exception:
-            pass
+            if agent_config_snapshot is not None:
+                raise
 
     slot = _resolve_model_slot_override(model_slot_override)
     if slot is not None and slot.provider_id and slot.model:
@@ -1507,8 +1511,9 @@ def create_model_and_formatter(
     # Create chat model from agent-specific or global config
     if model_slot and model_slot.provider_id and model_slot.model:
         # Use agent-specific model
-        manager = ProviderManager.get_instance()
-        provider = manager.get_provider(model_slot.provider_id)
+        provider = provider_snapshot
+        if provider is None:
+            provider = ProviderManager.get_instance().get_provider(model_slot.provider_id)
         if provider is None:
             raise ProviderError(
                 message=f"Provider '{model_slot.provider_id}' not found.",

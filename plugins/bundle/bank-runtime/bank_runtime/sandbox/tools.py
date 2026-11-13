@@ -163,7 +163,13 @@ async def _prepared_blocks(state, prepared, *, originals=True):
         return []
     expiry = datetime.fromisoformat(str(state.scope.sandbox_context["expires_at"]).replace("Z", "+00:00"))
     registry = get_file_ref_registry()
-    refs = {item.file_id: registry.issue(item, expires_at=expiry) for item in prepared}
+    if state.scope.sandbox_context.get('shared_file_references') is True:
+        from .shared_files import issue
+        refs=await issue(state.broker,state.scope.sandbox_context,[dict(file_id=item.file_id,
+            content_hash=item.sha256,size_bytes=item.size_bytes) for item in prepared])
+        for item in prepared:registry.bind_shared_reference(item,refs[item.file_id],expires_at=expiry)
+    else:
+        refs = {item.file_id: registry.issue(item, expires_at=expiry) for item in prepared}
     if state.scope.native_analysis_enabled and originals:
         metadata = await state.broker.prepare_originals(state.scope, prepared)
         state.scope.prepared_originals.update({item['file_id']: item for item in metadata})

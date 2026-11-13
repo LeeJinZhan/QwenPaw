@@ -45,7 +45,7 @@ def normalize_document_input(name, arguments, *, task_id, ledger):
     ref = value.get('document_ref')
     if isinstance(ref, str) and ref not in ledger.documents:
         file_id = ref
-        if ref.startswith('fr1_'):
+        if ref.startswith(('fr1_','fr2_')):
             try:
                 file_id = get_file_ref_registry().resolve(ref, expected_task_id=task_id).file_id
             except FileRefError:

@@ -109,6 +109,9 @@ class ConsoleChannel(BaseChannel):
 
     channel = "console"
 
+    def uses_local_chat_history(self, request: Any) -> bool:
+        return True
+
     def __init__(
         self,
         process: ProcessHandler,
@@ -436,7 +439,7 @@ class ConsoleChannel(BaseChannel):
         # and terminal CLI paths, so touching here covers them all. We only
         # touch an already-existing chat (never create one) to preserve the
         # current behavior for sessions that have no ChatSpec yet.
-        if self._workspace is not None and session_id:
+        if self._workspace is not None and session_id and self.uses_local_chat_history(request):
             try:
                 chat_mgr = getattr(self._workspace, "chat_manager", None)
                 if chat_mgr is not None:

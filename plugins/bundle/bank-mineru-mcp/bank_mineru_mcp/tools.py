@@ -154,7 +154,13 @@ class MinerUToolService:
                 )
             seen.add(file_id)
             try:
-                source = self.file_resolver.resolve(file_ref)
+                if file_ref.startswith('fr2_'):
+                    from bank_runtime.gateway.document_access import current_document_execution
+                    execution=current_document_execution()
+                    if execution is None:raise ToolContractError('FILE_ACCESS_DENIED','Shared reference requires current execution')
+                    source=await execution.restore_file_reference(file_ref,file_id,self.file_resolver)
+                else:
+                    source = self.file_resolver.resolve(file_ref)
             except Exception as exc:
                 raise _translated(exc, "FILE_REF_INVALID") from exc
             if source.task_id != task_id:
@@ -212,6 +218,9 @@ class MinerUToolService:
                 async with file_lock(lock):
                     handle = self.structured_store.cached(nonce, source.task_id)
                     if handle is not None:
+                        material = self.structured_store.runtime_material(handle.document_ref)
+                        if material:
+                            await execution.bind_result(material, handle.document_ref)
                         cached_items[source.file_id] = self._structured_item(source, handle, self.structured_store.inventory(handle.document_ref))
             local = [source for source in local if source.file_id not in cached_items]
         if local and execution is not None:
@@ -267,7 +276,10 @@ class MinerUToolService:
                     continue
                 work = None
                 try:
-                    work = _physical_work(self.document_store.root, source.task_id, result.get("job_id"))
+                    if result.get('result_ref'):
+                        work = await execution.materialize_result(result, source.path.parent)
+                    else:
+                        work = _physical_work(self.document_store.root, source.task_id, result.get("job_id"))
                     if source.extension.lower() in _STRUCTURED:
                         inventory = _read_processing_metadata(work / "inventory.json", max_bytes=16 * 1024**2)
                         inventory["title"] = source.original_name or source.path.name
@@ -277,7 +289,12 @@ class MinerUToolService:
                         async with file_lock(lock):
                             handle = self._structured().cached(nonce, source.task_id)
                             if handle is None:
-                                handle = self._structured().write(source, inventory, work, nonce=nonce)
+                                handle = self._structured().write(source, inventory, work, nonce=nonce,
+                                    **({'runtime_material':{key:result[key] for key in ('job_id','result_ref')}}
+                                       if result.get('result_ref') else {}))
+                            material = self._structured().runtime_material(handle.document_ref)
+                            if material:
+                                await execution.bind_result(material, handle.document_ref)
                         items.append(self._structured_item(source, handle, inventory))
                         continue
                     native = _read_processing_metadata(work / "native.json", max_bytes=32 * 1024**2)
@@ -329,9 +346,13 @@ class MinerUToolService:
                 **({"image_export": native["image_export"]} if native and "image_export" in native else {}),
             }
             try:
-                handle = self.document_store.write(source, document)
-            except DocumentStoreError as exc:
-                items.append(_failed_document(source, exc.code))
+                if getattr(execution,'shared_document_references',False) is True:
+                    document_ref=await execution.publish_document(requested['file_ref'],document)
+                else:
+                    document_ref=self.document_store.write(source, document).document_ref
+            except Exception as exc:
+                if getattr(exc,'code','')=='FILE_ACCESS_DENIED':raise
+                items.append(_failed_document(source, getattr(exc,'code','DOCUMENT_ENGINE_UNAVAILABLE')))
                 continue
             if (len(document.markdown) <= self.inline_max_chars
                     and len(json.dumps(document.markdown, ensure_ascii=False).encode("utf-8")) <= 5000):
@@ -340,7 +361,7 @@ class MinerUToolService:
                         **base,
                         "content_mode": "inline",
                         "markdown": document.markdown,
-                        "document_ref": handle.document_ref,
+                        "document_ref": document_ref,
                     }
                 )
             else:
@@ -349,7 +370,7 @@ class MinerUToolService:
                         **base,
                         "content_mode": "chunked",
                         "markdown": None,
-                        "document_ref": handle.document_ref,
+                        "document_ref": document_ref,
                     }
                 )
         for item, requested, source in zip(items, documents, resolved):
@@ -434,6 +455,15 @@ class MinerUToolService:
             ),
             "recovery_hint": "restart_null",
         }
+
+    @_bounded_result
+    async def execute_shared_document_query(self,name,arguments):
+        from bank_runtime.gateway.document_access import current_document_execution
+        execution=current_document_execution()
+        if name!='read_document_chunks' or execution is None:
+            raise ToolContractError('FILE_ACCESS_DENIED','Shared document requires current query authorization')
+        try:return await execution.read_shared_document(arguments)
+        except Exception as exc:raise _translated(exc,'DOCUMENT_ENGINE_UNAVAILABLE') from exc
 
     @_bounded_result
     def read_range(
@@ -527,28 +557,37 @@ class MinerUToolService:
 
     async def execute_structured_query(self, name, arguments):
         from .parse_jobs import query_job
+        from bank_runtime.gateway.document_access import current_document_execution
         ref = arguments.get("document_ref")
+        execution = current_document_execution()
         now = datetime.now(timezone.utc)
         for key, (_, _, expiry, encoded) in list(self._query_results.items()):
             if expiry <= now:
                 del self._query_results[key]
                 self._query_result_bytes -= len(encoded)
-        self._authorize_document(ref)
+        restored = None
+        if ref not in self._document_sources and execution is not None and hasattr(execution,'resolve_reference'):
+            restored = await self._restore_query_reference(execution,ref)
+        else:
+            self._authorize_document(ref)
         if name not in {"read_range", "read_document_chunks", "aggregate", "search", "analyze"}:
             raise ToolContractError("FILE_ACCESS_DENIED", "Unregistered query")
         if name == 'read_document_chunks':
             self._validate_chunk_arguments(arguments.get('cursor'), arguments.get('limit', 5))
         cache_key = hashlib.sha256(json.dumps([self._current_task(), name, arguments],
                                               sort_keys=True, ensure_ascii=False).encode()).hexdigest()
-        cached = self._query_results.get(cache_key)
+        # A replacement Worker has no verified local material. Let Runtime
+        # verify the shared files on each query instead of serving a local cache.
+        cached = self._query_results.get(cache_key) if restored is None else None
         if cached is not None:
             # Validate the durable document too: deleted/expired manifests must
             # not remain readable merely because their response is cached.
-            try:
-                self._structured().inventory(ref)
-            except StructuredStoreError as exc:
-                raise ToolContractError(exc.code, str(exc)) from exc
-            self._authorize_document(ref)
+            if restored is None:
+                try:
+                    self._structured().inventory(ref)
+                except StructuredStoreError as exc:
+                    raise ToolContractError(exc.code, str(exc)) from exc
+                self._authorize_document(ref)
             self._query_results.move_to_end(cache_key)
             return json.loads(cached[3])
         if name == "read_range":
@@ -559,11 +598,10 @@ class MinerUToolService:
             if mode == "cell" and (not isinstance(rows,list) or len(rows)!=2 or rows[0]!=rows[1] or type(rows[0]) is not int or rows[0]<1 or not isinstance(columns,list) or len(columns)!=1 or (cursor is not None and (type(cursor) is not int or cursor<0))):
                 raise ToolContractError("DOCUMENT_ARGUMENT_INVALID", "Invalid cell range")
         try:
-            from bank_runtime.gateway.document_access import current_document_execution
-            execution = current_document_execution()
             if execution is not None:
-                source = self._resolve_authorized_source(self._document_sources[ref][0])
-                result = await execution.execute({"kind": "query", "sources": [_source_descriptor(source)]})
+                source = (restored['source'] if restored is not None else
+                    _source_descriptor(self._resolve_authorized_source(self._document_sources[ref][0])))
+                result = await execution.execute({"kind": "query", "sources": [source]})
             elif self.execution_mode == "runtime" or name == "analyze":
                 raise StructuredStoreError("DOCUMENT_ENGINE_UNAVAILABLE", "Runtime physical execution is required")
             else:
@@ -576,10 +614,14 @@ class MinerUToolService:
         except Exception as exc:
             raise ToolContractError(getattr(exc, "code", "DOCUMENT_ENGINE_UNAVAILABLE"), "Physical query failed",
                                     argument_reason=getattr(exc, 'argument_reason', '')) from exc
-        self._authorize_document(ref)  # Recheck revocation after external work.
+        if restored is not None:
+            if await self._restore_query_reference(execution,ref) != restored:
+                raise ToolContractError('FILE_ACCESS_DENIED','Reading reference changed during query')
+        else:
+            self._authorize_document(ref)  # Recheck revocation after external work.
         if len(json.dumps(result, ensure_ascii=False, indent=2).encode()) > 32000:
             raise ToolContractError("DOCUMENT_RESULT_TOO_LARGE", "Query response exceeds budget")
-        if result.get("status") != "failed":
+        if result.get("status") != "failed" and restored is None:
             encoded = json.dumps(result, ensure_ascii=False).encode()
             previous = self._query_results.pop(cache_key, None)
             self._query_result_bytes += len(encoded) - (len(previous[3]) if previous else 0)
@@ -588,6 +630,14 @@ class MinerUToolService:
                 _, removed = self._query_results.popitem(last=False)
                 self._query_result_bytes -= len(removed[3])
         return result
+
+    async def _restore_query_reference(self, execution, document_ref):
+        self._current_task()
+        try:
+            return await execution.resolve_reference(document_ref)
+        except Exception as exc:
+            raise ToolContractError(getattr(exc,'error_code',getattr(exc,'code','DOCUMENT_ENGINE_UNAVAILABLE')),
+                                    'Shared document reference unavailable') from exc
 
     def discard_task_results(self, task_id: str) -> None:
         """Release cached plaintext at the same boundary as task file refs."""

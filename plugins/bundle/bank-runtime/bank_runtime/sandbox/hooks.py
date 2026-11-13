@@ -16,7 +16,7 @@ from qwenpaw.runtime.hooks import HookAction, HookContext, HookResult
 from qwenpaw.runtime.phases import Phase
 
 from .broker import RuntimeFileBroker
-from .cache import SandboxCacheError, TaskAttachmentCache
+from .cache import SandboxCacheError, TaskAttachmentCache, get_task_attachment_cache
 from .file_refs import get_file_ref_registry
 from .processor import AttachmentProcessor
 from .scope import MAX_TASK_FILES, SandboxRequestScope
@@ -34,7 +34,7 @@ from ..gateway.visibility import parse_runtime_tool_visibility
 _TOKEN = "bank_runtime_sandbox_state_token"
 _STATE = "bank_runtime_sandbox_state"
 # Authorized originals and one converted derivative each share the existing byte quota.
-_CACHE = TaskAttachmentCache(max_files=2 * MAX_TASK_FILES)
+_CACHE = get_task_attachment_cache()
 _FILE_REFS = get_file_ref_registry()
 
 
@@ -148,9 +148,15 @@ class BankRuntimeAttachmentPrepareHook(LifecycleHook):
         }
         blocks = (await _prepared_blocks(state, prepared) if state.scope.native_analysis_enabled
                   else state.processor.process(prepared, file_refs=file_refs))
-        if not ctx.input_msgs:
+        from ..session import current_managed_session_scope
+        managed = current_managed_session_scope()
+        resuming = managed is not None and managed.remote_client is not None and managed.remote_client.execution.resume
+        if resuming:
+            target = next((message for message in reversed(ctx.agent.state.context) if message.role == "user"), None)
+        else:
+            target = ctx.input_msgs[-1] if ctx.input_msgs else None
+        if target is None:
             raise RuntimeError("Runtime attachment target message is missing")
-        target = ctx.input_msgs[-1]
         content = getattr(target, "content", None)
         if not isinstance(content, list):
             raise RuntimeError("Runtime attachment target content is invalid")

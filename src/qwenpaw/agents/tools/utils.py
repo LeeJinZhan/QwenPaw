@@ -78,6 +78,12 @@ def build_truncation_metadata(
         "\nIf the current content is not enough, call `read_file` with "
         f'file_path="{file_path or ""}" start_line={read_from} to read more.'
     )
+    if isinstance(file_path, str) and re.fullmatch(r"runtime-result:result_[a-f0-9]{64}", file_path):
+        info["result_ref"] = file_path
+        notice = (TRUNCATION_NOTICE_MARKER + "\nThe output above was truncated."
+            "\nThe full content is retained in the current Runtime execution scope."
+            f'\nCall read_runtime_result(result_ref="{file_path}", offset=0, limit=8192) '
+            "to read bounded pages; continue with the returned next_offset.")
     info["notice"] = _fit_truncation_notice(notice, info)
     return {TRUNCATION_METADATA_KEY: {str(block_index): info}}
 
@@ -114,8 +120,9 @@ def save_text_output(
 class ToolResultPruner:
     """Shared block-aware pruning for fresh and retained tool results."""
 
-    def __init__(self, output_dir: Path | str | None) -> None:
+    def __init__(self, output_dir: Path | str | None, *, save_text=None) -> None:
         self._output_dir = output_dir or None
+        self._save_text = save_text
 
     @staticmethod
     def _block_type(block: Any) -> str | None:
@@ -156,6 +163,10 @@ class ToolResultPruner:
             return None
 
     def _save_fresh_text(self, text: str, encoding: str) -> str | None:
+        if self._save_text is not None:
+            # Request-owned stores are authoritative. Never downgrade a failed
+            # remote write into a host-local path or an unbounded model input.
+            return self._save_text(text, encoding=encoding)
         try:
             saved_path = save_text_output(
                 text,

@@ -125,7 +125,8 @@ class BankRuntimePersonalizationHook(LifecycleHook):
         profile = _compile_profile(getattr(request, "runtime_context", None))
         catalog_prompt = build_catalog_prompt(catalog) if registry else ""
         method_prompt = preferred_method_prompt(getattr(request, "preferred_method", None))
-        sections = [section for section in (profile, catalog_prompt, method_prompt) if section]
+        from .coordination import coordination_prompt
+        sections = [section for section in (profile, catalog_prompt, method_prompt, coordination_prompt()) if section]
         security = _security_boundary()
         agent = ctx.agent
         if agent is not None:

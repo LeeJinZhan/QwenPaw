@@ -77,6 +77,8 @@ class MinerUMcpService:
             raise ToolContractError("FILE_ACCESS_DENIED", "Current task authorization is required") from exc
         try:
             with consume_document_call(metadata, name, arguments):
+                if str(arguments.get('document_ref','')).startswith('dr2_'):
+                    return await self.tool_service.execute_shared_document_query(name,arguments)
                 if name != "parse_documents" and str(arguments.get("document_ref", "")).startswith("ds1_"):
                     return await self.tool_service.execute_structured_query(name, arguments)
                 result = getattr(self.tool_service, name)(**arguments)

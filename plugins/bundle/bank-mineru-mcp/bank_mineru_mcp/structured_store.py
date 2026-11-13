@@ -32,6 +32,15 @@ _FILTER_OPS = set(FILTERS)
 _METRICS = set(FUNCTIONS)
 
 
+def _runtime_material(value):
+    import re
+    if (not isinstance(value,dict) or set(value) != {'job_id','result_ref'}
+            or not isinstance(value['job_id'],str) or not re.fullmatch('[a-f0-9]{32}',value['job_id'])
+            or not isinstance(value['result_ref'],str) or not re.fullmatch('[a-f0-9]{64}',value['result_ref'])):
+        raise StructuredStoreError('FILE_ACCESS_DENIED','Invalid shared reading material')
+    return dict(value)
+
+
 class StructuredStoreError(RuntimeError):
     def __init__(self, code: str, message: str, *, argument_reason: str = "") -> None:
         super().__init__(message)
@@ -106,7 +115,8 @@ class StructuredStore:
                 except (OSError, ValueError, KeyError, json.JSONDecodeError):
                     continue
 
-    def write(self, source: Any, inventory: dict[str, Any], work_dir: Path, *, nonce: bytes | None = None) -> DocumentHandle:
+    def write(self, source: Any, inventory: dict[str, Any], work_dir: Path, *, nonce: bytes | None = None,
+              runtime_material: dict | None = None) -> DocumentHandle:
         now = _utc(self.clock())
         expiry = min(_utc(source.expires_at), now + timedelta(seconds=self.ttl_seconds))
         if expiry <= now:
@@ -132,6 +142,8 @@ class StructuredStore:
             "engine_version": "table-facts-3",
             "files": {path.name: _file_hash(path) for path in work_dir.iterdir() if path.is_file()},
         }
+        if runtime_material is not None:
+            payload['runtime_material'] = _runtime_material(runtime_material)
         payload["sha256"] = hashlib.sha256(
             json.dumps(payload, sort_keys=True).encode("utf-8")
         ).hexdigest()
@@ -192,6 +204,11 @@ class StructuredStore:
     def inventory(self, document_ref: str) -> dict[str, Any]:
         entry, manifest = self._entry(document_ref)
         return manifest["inventory"]
+
+    def runtime_material(self, document_ref):
+        _, manifest = self._entry(document_ref)
+        value = manifest.get('runtime_material')
+        return _runtime_material(value) if value is not None else None
 
     # ---------------------------------------------------------------- reads
 

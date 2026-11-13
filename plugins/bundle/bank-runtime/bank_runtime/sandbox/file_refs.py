@@ -67,6 +67,7 @@ class FileRefRegistry:
         self._entries: dict[str, ResolvedTaskFile] = {}
         self._expired: dict[str, datetime] = {}
         self._file_tokens: dict[tuple[str, str], str] = {}
+        self._shared_aliases: dict[str, str] = {}
         self._revocation_listeners: set[WeakMethod] = set()
 
     def on_task_revoked(self, callback: Callable[[str], None]) -> None:
@@ -79,6 +80,19 @@ class FileRefRegistry:
             raise FileRefError("FILE_ACCESS_DENIED", "File has not been prepared for this task")
         self.resolve(token, expected_task_id=expected_task_id)
         return token
+
+    def bind_shared_reference(self, prepared, file_ref, *, expires_at):
+        from .shared_files import REFERENCE
+        if not isinstance(file_ref,str) or not REFERENCE.fullmatch(file_ref):
+            raise FileRefError('FILE_REF_INVALID','Invalid shared reference')
+        previous=self._shared_aliases.get(file_ref)
+        if previous:
+            entry=self.resolve(previous,expected_task_id=prepared.task_id)
+            if entry.file_id!=prepared.file_id or entry.sha256!=prepared.sha256:
+                raise FileRefError('FILE_REF_INVALID','Shared reference binding changed')
+        else:
+            self._shared_aliases[file_ref]=self.issue(prepared,expires_at=expires_at)
+        self._file_tokens[(prepared.task_id,prepared.file_id)]=file_ref
 
     def issue(
         self,
@@ -216,6 +230,9 @@ class FileRefRegistry:
         return len(expired)
 
     def _authenticate(self, file_ref: str) -> tuple[bytes, str]:
+        if not isinstance(file_ref,str):
+            raise FileRefError('FILE_REF_INVALID','File reference is invalid')
+        file_ref=self._shared_aliases.get(file_ref,file_ref)
         parts = str(file_ref or "").split("_")
         if len(parts) != 3 or parts[0] != "fr1":
             raise FileRefError("FILE_REF_INVALID", "File reference is invalid")
@@ -236,8 +253,12 @@ class FileRefRegistry:
         if entry is not None:
             key = (entry.task_id, entry.file_id)
             token = self._file_tokens.get(key, "")
+            token = self._shared_aliases.get(token,token)
             if token and hashlib.sha256(_decode(token.split("_")[1])).hexdigest() == nonce_hash:
                 self._file_tokens.pop(key, None)
+        for alias,token in list(self._shared_aliases.items()):
+            if hashlib.sha256(_decode(token.split('_')[1])).hexdigest()==nonce_hash:
+                self._shared_aliases.pop(alias,None)
         self._expired[nonce_hash] = _as_utc(self._clock())
 
 

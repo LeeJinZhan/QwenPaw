@@ -20,6 +20,10 @@ _RECOVERABLE_SESSION_ERROR_CODES = {
     "RUNTIME_SESSION_SCOPE_MISMATCH",
 }
 _PUBLIC_ERROR_CODES = _RECOVERABLE_SESSION_ERROR_CODES | {
+    "WORKER_EPOCH_STALE", "WORKER_STATE_INVALID", "WORKER_STATE_UNAVAILABLE",
+    "WORKER_STATE_CONFLICT", "WORKER_SCOPE_MISMATCH", "WORKER_RESULT_NOT_FOUND",
+    "WORKER_CONTEXT_BUDGET_UNAVAILABLE", "WORKER_CONTEXT_BUDGET_EXCEEDED",
+    "WORKER_POLICY_MISMATCH",
     "WORKER_EMPTY_RESPONSE",
     "FILE_ACCESS_DENIED",
     'MODEL_TIMEOUT', 'MODEL_OUTPUT_TRUNCATED', 'MODEL_UPSTREAM_UNAVAILABLE', 'MODEL_REQUEST_REJECTED', 'MODEL_CONTENT_FILTERED', 'MODEL_EXECUTION_ERROR', "WORKER_FAILED",
@@ -119,6 +123,17 @@ class CompactEventProjector:
         ).strip()
         status = str(raw_event.get("status") or "").strip().lower()
         obj = str(raw_event.get("object") or "").strip().lower()
+
+        if obj == "execution" and event_name in {"execution.waiting", "execution.waiting_inputs"}:
+            children = raw_event.get("waiting_child_task_ids")
+            checkpoint = raw_event.get("checkpoint_id")
+            if (isinstance(checkpoint, str) and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,191}", checkpoint)
+                    and isinstance(children, list)
+                    and (not children if event_name == 'execution.waiting_inputs' else 1 <= len(children) <= 16)
+                    and all(isinstance(child, str) and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,191}", child) for child in children)):
+                self._terminal = True
+                return [{"event": event_name, "checkpoint_id": checkpoint, "waiting_child_task_ids": children}]
+            return [self._terminal_event("answer.failed", error_code="WORKER_STATE_INVALID")]
 
         if event_name in _TERMINAL_EVENTS:
             return [self._terminal_event(event_name)]

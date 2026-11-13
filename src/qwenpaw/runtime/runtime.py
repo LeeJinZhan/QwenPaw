@@ -25,6 +25,7 @@ from .executor import AgentExecutor
 from .hooks import HookAction, HookContext
 from .message_convert import _get_last_user_text, _request_input_to_msgs
 from .phases import Phase
+from .control import RuntimeSuspension
 
 logger = logging.getLogger(__name__)
 
@@ -140,6 +141,11 @@ class Runtime:
             async for ev in envelope.finalize():
                 yield ev
 
+        except RuntimeSuspension as e:
+            ctx.error = e
+            from ..schemas import AgentResponse, RunStatus
+            yield AgentResponse(object="execution", event="execution.waiting_inputs" if e.waiting_inputs else "execution.waiting", status=RunStatus.InProgress,
+                checkpoint_id=e.checkpoint_id, waiting_child_task_ids=list(e.waiting_child_task_ids))
         except (asyncio.CancelledError, KeyboardInterrupt) as e:
             ctx.error = e
             # The Task's _must_cancel flag may still be True after

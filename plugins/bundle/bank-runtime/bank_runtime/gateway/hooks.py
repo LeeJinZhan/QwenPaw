@@ -72,6 +72,11 @@ class BankRuntimeToolVisibilityHook(LifecycleHook):
                 history = middleware.history_recall
                 if history is not None and await history.visible():
                     context_names.add(history.tool.name)
+                result_reader = middleware.result_recall
+                if result_reader is not None and await result_reader.visible():
+                    context_names.add(result_reader.tool.name)
+                if middleware.delegations is not None:
+                    context_names.update(await middleware.delegations.visible_names())
         filter_managed_driver_tools(agent.toolkit, allowed_names | frozenset(context_names))
         for middleware in getattr(agent, "_acting_middlewares", ()):
             if isinstance(middleware, BankRuntimeGatewayMiddleware):

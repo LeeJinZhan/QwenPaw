@@ -43,7 +43,7 @@ def _write(name, data):
 def _ref(value, key):
     kind = 'missing' if value is None else 'string' if isinstance(value,str) else type(value).__name__
     if isinstance(value,str):
-        kind = next((p for p in ('ds1_', 'dr1_', 'fr1_', 'file_', 'dc1_') if value.startswith(p)), 'other_string')
+        kind = next((p for p in ('ds1_', 'dr1_', 'dr2_', 'fr1_', 'fr2_', 'file_', 'dc1_') if value.startswith(p)), 'other_string')
     # Oversized/unexpected objects are never stringified or traversed.
     encoded = value.encode() if isinstance(value,str) and len(value)<=32768 else str(value).encode() if type(value) in (int,bool) else b''
     return {'kind':kind, 'digest':hmac.new(key,encoded,hashlib.sha256).hexdigest()[:24] if encoded else None}

@@ -7,8 +7,9 @@ import copy
 import json
 import re
 import threading
+import tempfile
 from contextvars import ContextVar, Token
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from agentscope.message import Msg
@@ -28,7 +29,8 @@ _DROP = object()
 # Redact both document handles and the actual offset-bearing cursor format on
 # save AND load so existing sessions cannot feed task-local references back.
 _RUNTIME_REFERENCE = re.compile(
-    r"\b(?:(?:fr1|dr1|ds1|cur1)_[0-9a-f]{64}_[0-9a-f]{64}"
+    r"\b(?:fr2_[0-9a-f]{2,320}_[0-9a-f]{64}_[0-9a-f]{64}|(?:fr1|dr1|ds1|cur1)_[0-9a-f]{64}_[0-9a-f]{64}"
+    r"|dr2_[0-9a-f]{32}_[0-9a-f]{64}_[0-9a-f]{64}|cur2_[0-9]{1,5}_[0-9a-f]{64}"
     r"|(?:cur1|cs1)_[0-9]+_[0-9a-f]{32}_[0-9a-f]{64})\b"
 )
 
@@ -70,6 +72,11 @@ class ManagedSessionScope:
     commit_allowed: bool = False
     committed: bool = False
     closed: bool = False
+    remote_client: Any = None
+    candidate_id: str = ""
+    scratch_directory: Any = None
+    coordination: dict[str, Any] = field(default_factory=dict)
+    watchdog: asyncio.Task | None = None
 
     @property
     def lock_key(self) -> tuple[str, str, str, str]:
@@ -152,6 +159,29 @@ class ManagedSessionStore:
         scope: ManagedSessionScope,
         bootstrap: Any,
     ) -> None:
+        if scope.remote_client is not None:
+            package = scope.remote_client.execution.context_package
+            if package["format"] == "agent-state-v1":
+                state = package["agent_state"]
+            else:
+                messages = []
+                for index, item in enumerate(package["messages"]):
+                    if not isinstance(item, dict) or item.get("role") not in {"user", "assistant", "tool"}:
+                        raise ManagedSessionError("RUNTIME_SESSION_REQUEST_INVALID")
+                    message = Msg(name=item.get("name") or item["role"], role=item["role"],
+                        content=copy.deepcopy(item.get("content") or []), metadata=copy.deepcopy(item.get("metadata"))).to_dict()
+                    if isinstance(item.get("id"), str) and item["id"]:
+                        message["id"] = item["id"]
+                    else:
+                        from .remote_state import canonical_hash
+                        message["id"] = "runtime_msg_" + canonical_hash({"package": package["hash"], "index": index})
+                    if item.get("timestamp") is not None:
+                        message["timestamp"] = item["timestamp"]
+                    messages.append(message)
+                state = {"state": {"session_id": scope.session_id, "summary": package.get("summary") or "", "context": messages}}
+            scope.loaded_agent_state = _remote_agent_state(state)
+            scope.loaded_agent_state["state"]["session_id"] = scope.session_id
+            return
         stored = await self.delegate.get_session_state_dict(
             session_id=scope.session_id,
             user_id=scope.user_id,
@@ -250,6 +280,21 @@ class ManagedSessionStore:
         agent = state_modules_mapping.get("agent")
         if agent is None:
             raise ManagedSessionError("RUNTIME_SESSION_REQUEST_INVALID")
+        if scope.remote_client is not None:
+            if not scope.candidate_id:
+                from .remote_state import RemoteStateError
+                state = _remote_agent_state(agent.state_dict())
+                try:
+                    scope.candidate_id = await scope.remote_client.stage(state)
+                except RemoteStateError as exc:
+                    if exc.http_status != 409 or exc.reason != 'input_revision_changed':
+                        raise
+                    from qwenpaw.runtime.control import RuntimeSuspension
+                    checkpoint_id = await scope.remote_client.checkpoint(state, [], waiting_inputs=True)
+                    scope.commit_allowed = False
+                    raise RuntimeSuspension(checkpoint_id, [], waiting_inputs=True) from exc
+            scope.commit_allowed = False
+            return
         sanitized = _sanitize_agent_state(agent.state_dict())
         agent_proxy = StateProxy()
         agent_proxy.data = sanitized
@@ -323,6 +368,13 @@ class ManagedSessionPrepareHook(LifecycleHook):
         if operation not in {"append", "regenerate"}:
             raise ManagedSessionError("RUNTIME_SESSION_REQUEST_INVALID")
 
+        from .remote_state import execution_from_request, RemoteStateClient, RemoteOffloader
+        execution = execution_from_request(request, values["agent_id"])
+        actual_policy_hash = ''
+        if execution is not None:
+            from .context_budget import verify_execution_budget
+            actual_policy_hash = await verify_execution_budget(ctx, execution)
+
         store = _install_managed_session_store(ctx.workspace)
         key = (
             values["agent_id"],
@@ -337,8 +389,22 @@ class ManagedSessionPrepareHook(LifecycleHook):
             regenerate_from_task_id=str(
                 getattr(request, "regenerate_from_task_id", "") or ""
             ).strip(),
-            lock=store.lock_for(key),
+            lock=asyncio.Lock() if execution is not None else store.lock_for(key),
         )
+        if execution is not None:
+            from .coordination import coordination_from_request
+            scope.coordination = coordination_from_request(request)
+            scope.remote_client = RemoteStateClient(execution)
+            scope.remote_client.actual_policy_hash = actual_policy_hash
+            scope.scratch_directory = tempfile.TemporaryDirectory(prefix="bank-runtime-scroll-")
+            ctx.extras["request_context_storage"] = {
+                "offloader": RemoteOffloader(scope.remote_client),
+                "save_tool_result": scope.remote_client.save_text,
+                "scroll_workspace_dir": scope.scratch_directory.name,
+            }
+            role = scope.coordination.get("role_snapshot")
+            if role is not None:
+                ctx.extras["request_skill_filter"] = list(role.get("skill_ids", []))
         token = _current_scope.set(scope)
         ctx.extras[_CTX_TOKEN_KEY] = token
         ctx.extras[_CTX_SCOPE_KEY] = scope
@@ -358,6 +424,10 @@ class ManagedSessionPrepareHook(LifecycleHook):
         else:
             from .gateway.history_recall import SCOPED_SCROLL_PROMPT
             ctx.extras['bank_runtime_session_recall_prompt'] = SCOPED_SCROLL_PROMPT
+        if scope.remote_client is not None:
+            from .remote_state import watch_execution
+            owner = asyncio.current_task()
+            scope.watchdog = asyncio.create_task(watch_execution(scope.remote_client, owner, lambda: not scope.closed))
         return HookResult()
 
 
@@ -369,7 +439,28 @@ class ManagedSessionCommitHook(LifecycleHook):
     async def run(self, ctx: HookContext) -> HookResult:
         scope = _current_scope.get()
         if scope is not None and not scope.closed and ctx.error is None and ctx.agent is not None:
-            scope.commit_allowed = True
+            if scope.remote_client is not None:
+                for middleware in getattr(ctx.agent, "_acting_middlewares", ()):
+                    client = getattr(middleware, "client", None)
+                    if getattr(client, "pending_acknowledgements", None):
+                        from .remote_state import RemoteStateError
+                        scope.commit_allowed = False
+                        raise RemoteStateError("WORKER_STATE_UNAVAILABLE")
+                    delegations = getattr(middleware, "delegations", None)
+                    if delegations is not None:
+                        await delegations.suspend_if_needed(ctx.agent, final=True)
+                # Native SessionSaveHook logs and suppresses persistence errors.
+                # Stage here so a failed acknowledgement prevents completion.
+                store = _install_managed_session_store(ctx.workspace)
+                scope.commit_allowed = True
+                try:
+                    await store.save_session_state(session_id=scope.session_id, user_id=scope.user_id,
+                        channel=scope.channel, agent=ctx.agent)
+                finally:
+                    scope.commit_allowed = False
+                ctx.extras["bank_runtime_candidate_id"] = scope.candidate_id
+            else:
+                scope.commit_allowed = True
         return HookResult()
 
 
@@ -436,7 +527,8 @@ class ManagedSessionErrorHook(LifecycleHook):
     priority = 100
 
     async def run(self, ctx: HookContext) -> HookResult:
-        if isinstance(ctx.error, ManagedSessionError):
+        from .remote_state import RemoteStateError
+        if isinstance(ctx.error, (ManagedSessionError, RemoteStateError)):
             ctx.extras["_error_code"] = ctx.error.error_code
             ctx.extras["_error_text"] = ctx.error.message
         return HookResult()
@@ -450,13 +542,28 @@ class ManagedSessionCleanupHook(LifecycleHook):
     async def run(self, ctx: HookContext) -> HookResult:
         # Generator cleanup may run in another task/context. The request owns
         # this scope; a ContextVar lookup may be empty or point to another turn.
+        configuration = ctx.extras.pop('request_configuration', None)
+        if configuration is not None:
+            configuration.close()
         scope = ctx.extras.pop(_CTX_SCOPE_KEY, None)
         if isinstance(scope, ManagedSessionScope):
             scope.closed = True
             scope.commit_allowed = False
+            if scope.watchdog is not None:
+                scope.watchdog.cancel()
+                try:
+                    await scope.watchdog
+                except asyncio.CancelledError:
+                    pass
+                scope.watchdog = None
             if scope.lock_acquired:
                 scope.lock.release()
                 scope.lock_acquired = False
+            if scope.scratch_directory is not None:
+                scope.scratch_directory.cleanup()
+                scope.scratch_directory = None
+            ctx.extras.pop("request_context_storage", None)
+            ctx.extras.pop("request_skill_filter", None)
         token = ctx.extras.pop(_CTX_TOKEN_KEY, None)
         if isinstance(token, Token):
             try:
@@ -538,9 +645,42 @@ def _sanitize_agent_state(value: Any) -> Any:
     return sanitized if isinstance(sanitized, dict) else {}
 
 
+def _remote_agent_state(value: Any) -> dict[str, Any]:
+    """Keep protocol context and semantic summary, never node-local indices."""
+    from .personalization import current_personalization_context
+    personalization = current_personalization_context()
+    if personalization is not None and personalization.registry is not None:
+        value = personalization.registry.redact_for_persistence(copy.deepcopy(value))
+    state = _sanitize_agent_state(value)
+    if not isinstance(state.get("state"), dict):
+        raise ManagedSessionError("RUNTIME_SESSION_REQUEST_INVALID")
+    scroll = state.pop("scroll", None)
+    if isinstance(scroll, dict) and isinstance(scroll.get("continuation_summary"), dict):
+        state["scroll"] = {"continuation_summary": scroll["continuation_summary"]}
+    scope = current_managed_session_scope()
+    if scope is not None and scope.loaded_agent_state is not None:
+        original = scope.loaded_agent_state.get("state", {}).get("context", [])
+        if scope.remote_client is not None:
+            ids = scope.remote_client.execution.context_package.get('confirmed_message_ids')
+            if ids is not None:
+                # Checkpoint C also carries this fixed H/P ID set. SDK may
+                # extend an unconfirmed assistant Msg when resuming; retain
+                # that addition without rewriting any confirmed message.
+                original = [message for message in original if isinstance(message, dict) and message.get('id') in ids]
+        confirmed = {message["id"]: message for message in original
+            if isinstance(message, dict) and isinstance(message.get("id"), str)}
+        messages = state["state"].get("context")
+        if isinstance(messages, list):
+            # Pruning/folding changes only the working window. The confirmed
+            # record remains immutable even when the live block was shortened.
+            state["state"]["context"] = [copy.deepcopy(confirmed.get(message.get("id"), message))
+                if isinstance(message, dict) else message for message in messages]
+    return state
+
+
 def _project_execution_history(value: Any) -> Any:
     from .sandbox.native_tools import NATIVE_TOOL_NAMES
-    transient_names = NATIVE_TOOL_NAMES | {'recall_history', 'recall_history_python'}
+    transient_names = NATIVE_TOOL_NAMES | {'recall_history', 'recall_history_python', 'read_runtime_result'}
     protocol_types = {'tool_call', 'tool_use', 'tool_result'}
     native_ids = set()
 

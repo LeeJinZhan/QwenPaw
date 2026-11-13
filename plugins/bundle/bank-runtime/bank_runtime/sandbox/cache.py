@@ -17,6 +17,14 @@ from .cache_retention import CacheLease
 
 _SAFE_NAME = re.compile(r"[^A-Za-z0-9._-]+")
 _SAFE_EXTENSION = re.compile(r"\.[A-Za-z0-9]{1,15}")
+_SHARED_CACHE = None
+
+
+def get_task_attachment_cache():
+    global _SHARED_CACHE
+    if _SHARED_CACHE is None:
+        _SHARED_CACHE = TaskAttachmentCache(max_files=2 * MAX_TASK_FILES)
+    return _SHARED_CACHE
 
 
 class SandboxCacheError(RuntimeError):

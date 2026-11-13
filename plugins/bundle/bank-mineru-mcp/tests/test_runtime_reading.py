@@ -91,7 +91,48 @@ async def test_remote_parse_cancels_local_wait_at_source_expiry(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_production_table_cache_rechecks_authority_and_preserves_reference(tmp_path):
+@pytest.mark.parametrize('revoked',[False,True])
+async def test_replacement_worker_queries_shared_reference_without_local_registry_or_key(tmp_path,revoked):
+    from bank_runtime.sandbox.executor import SandboxExecutorError
+    ref='ds1_'+'d'*64+'_'+'e'*64
+    arguments={'document_ref':ref,'format':'inventory'}
+    source=dict(file_id='file',sha256='a'*64,extension='.csv')
+    receipt=dict(document_ref=ref,source=source,
+        expires_at=(datetime.now(timezone.utc)+timedelta(minutes=5)).isoformat())
+    class Execution:
+        resolutions=0
+        calls=0
+        async def resolve_reference(self,value):
+            assert value==ref
+            self.resolutions+=1
+            if revoked and self.resolutions>1:
+                raise SandboxExecutorError('revoked','FILE_ACCESS_DENIED')
+            return receipt
+        async def execute(self,plan):
+            assert plan==dict(kind='query',sources=[source])
+            self.calls+=1
+            return dict(document_ref=ref,content_mode='inventory',sheet_count=1)
+    execution=Execution()
+    service=MinerUToolService(file_resolver=None,mineru_client=None,document_store=DocumentStore(root=tmp_path))
+    for turn in range(1 if revoked else 2):
+        with approved_document_grant('task_001','read_range',arguments,execution=execution) as metadata:
+            with consume_document_call(metadata,'read_range',arguments):
+                if revoked:
+                    with pytest.raises(ToolContractError) as raised:
+                        await service.execute_structured_query('read_range',arguments)
+                    assert raised.value.code=='FILE_ACCESS_DENIED'
+                else:
+                    result=await service.execute_structured_query('read_range',arguments)
+                    assert result['sheet_count']==1
+    assert execution.calls==(1 if revoked else 2)
+    assert not service._document_sources
+    assert service.structured_store is None
+    assert not list(tmp_path.rglob('.bank-mineru-struct.key'))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('shared', [False, True])
+async def test_production_table_cache_rechecks_authority_and_preserves_reference(tmp_path, shared):
     task = tmp_path / "task_001"
     task.mkdir()
     path = task / "f.csv"
@@ -111,12 +152,22 @@ async def test_production_table_cache_rechecks_authority_and_preserves_reference
             self.validations += 1
         async def execute(self, plan):
             self.runs += 1
-            job = task / ".reading-physical" / ("a" * 32)
+            job = (tmp_path / 'remote-node' if shared else task / '.reading-physical') / ('a'*32)
             job.mkdir(parents=True)
             inventory = extract_workbook(path, job, stem="bank")
             import json
             (job / "inventory.json").write_text(json.dumps(inventory))
-            return {"items": [{"file_id": "f", "status": "ready", "job_id": "a" * 32}]}
+            return {"items": [{"file_id": "f", "status": "ready", "job_id": "a" * 32,
+                               **({'result_ref':'b'*64} if shared else {})}]}
+        async def materialize_result(self, result, task_directory):
+            import shutil
+            assert shared and task_directory == task and result['result_ref'] == 'b'*64
+            destination = task / '.reading-import-test'
+            shutil.copytree(tmp_path/'remote-node'/('a'*32), destination)
+            return destination
+        async def bind_result(self, result, document_ref):
+            assert shared and result == {'job_id':'a'*32,'result_ref':'b'*64}
+            assert document_ref.startswith('ds1_')
 
     execution = Execution()
     service = MinerUToolService(file_resolver=Resolver(), mineru_client=None, document_store=DocumentStore(root=tmp_path),
@@ -128,6 +179,7 @@ async def test_production_table_cache_rechecks_authority_and_preserves_reference
             with consume_document_call(metadata, "parse_documents", arguments):
                 results.append(await service.parse_documents(**arguments))
     assert execution.runs == 1
+    assert not (task / '.reading-import-test').exists()
     assert execution.validations >= 2
     assert results[0]["items"][0]["document_ref"] == results[1]["items"][0]["document_ref"]
     ref = results[0]['items'][0]['document_ref']

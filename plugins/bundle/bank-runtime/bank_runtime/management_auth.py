@@ -13,16 +13,30 @@ _SERVICE_ROUTE = re.compile(
 _SKILL_ROUTE = re.compile(
     r"/api/bank-runtime/agents/([^/]+)/skills(?:/[\w.-]{1,128})?"
 )
+_CONTEXT_ROUTE = re.compile(
+    r"/api/bank-runtime/agents/([^/]+)/context/(?:budget|summarize)"
+)
+_RELEASE_ROUTE = re.compile(r'/api/bank-runtime/agents/([^/]+)/config-releases/(load|compile|[a-f0-9]{64})')
 
 
 def authenticate_runtime_request(request) -> bool:
     path = request.url.path
     match = _SERVICE_ROUTE.fullmatch(path)
     skill_match = _SKILL_ROUTE.fullmatch(path)
+    context_match = _CONTEXT_ROUTE.fullmatch(path)
+    release_match = _RELEASE_ROUTE.fullmatch(path)
     if path == "/api/bank-runtime/capabilities":
         if request.method != "GET":
             return False
         path_agent = None
+    elif release_match:
+        if request.method != ('POST' if release_match.group(2) in ('load','compile') else 'GET'):
+            return False
+        path_agent = release_match.group(1)
+    elif context_match:
+        if request.method != 'POST':
+            return False
+        path_agent = context_match.group(1)
     elif skill_match:
         if request.method != "GET":
             return False

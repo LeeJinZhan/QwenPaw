@@ -35,19 +35,22 @@ class ReviewRequest(BaseModel):
     input_text: str = Field(default='', max_length=65536)
     stage: Literal['input', 'output'] = 'input'
     policy_version: Literal['content-review-1'] = 'content-review-1'
+    runtime_model_capacity: dict | None = None
 
 
-def create_review_model(agent_id: str):
+def create_review_model(agent_id: str, *, config_snapshot=None, provider_snapshot=None):
     from qwenpaw.config.config import load_agent_config
     from qwenpaw.providers import ProviderManager
-    manager = ProviderManager.get_instance()
-    slot = load_agent_config(agent_id).active_model or manager.get_active_model()
+    manager = ProviderManager.get_instance() if config_snapshot is None else None
+    slot = (config_snapshot.active_model if config_snapshot is not None
+            else load_agent_config(agent_id).active_model or manager.get_active_model())
     if not slot or not slot.provider_id or not slot.model:
         raise ValueError('Review model unavailable')
-    provider = manager.get_provider(slot.provider_id)
+    provider = provider_snapshot if provider_snapshot is not None else manager.get_provider(slot.provider_id)
     if provider is None:
         raise ValueError('Review provider unavailable')
     model = copy(provider.get_chat_model_instance(slot.model))
+    model._bank_capacity_source = (slot.provider_id, slot.model, provider)
     # The SDK chooses its response parser from this attribute even when a
     # call-level stream=False overrides the outgoing HTTP body.
     model.stream = False
@@ -93,7 +96,9 @@ async def review_content(agent_id: str, payload: ReviewRequest) -> dict:
     if len(payload.text.encode()) + len(payload.input_text.encode()) > 65536:
         raise ValueError('Review input exceeds limit')
     model = create_review_model(agent_id)
-    messages = [Msg(name='review-policy', content=[{'type': 'text', 'text': _SYSTEM}], role='system'), Msg(name='review-material', content=[{'type': 'text', 'text': json.dumps(payload.model_dump(), ensure_ascii=False)}], role='user')]
+    from .helper_model_capacity import govern_helper_model
+    model = govern_helper_model(model, agent_id, 'content-review', payload.runtime_model_capacity)
+    messages = [Msg(name='review-policy', content=[{'type': 'text', 'text': _SYSTEM}], role='system'), Msg(name='review-material', content=[{'type': 'text', 'text': json.dumps(payload.model_dump(exclude={'runtime_model_capacity'}), ensure_ascii=False)}], role='user')]
     output_param = getattr(model, '_output_token_param', 'max_tokens')
     response = await model(messages, tools=None, stream=False, disable_thinking=True, **{output_param: 512})
     result = ''

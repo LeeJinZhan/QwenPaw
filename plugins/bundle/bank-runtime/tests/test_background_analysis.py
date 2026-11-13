@@ -25,7 +25,7 @@ def request_body():
 @pytest.mark.parametrize("comparison", [False, True])
 async def test_neutral_group_prompt_and_legacy_wire(monkeypatch, comparison):
     from bank_runtime import background_analysis as batch
-    async def capture(agent_id, system, data):
+    async def capture(agent_id, system, data, **kwargs):
         assert "供应商" not in system
         assert ("对比对象 | 维度" in system) is comparison
         assert data["evidence"] == [{"id": 1, "material_group": "城东分行"}]
@@ -197,7 +197,7 @@ def test_background_timeout_logs_without_changing_response(monkeypatch, caplog, 
     monkeypatch.setenv("QWENPAW_SERVICE_TOKEN", "batch-test")
     monkeypatch.setattr(batch, "require_production_readiness", lambda: None)
 
-    async def timeout(*_):
+    async def timeout(*_, **kwargs):
         raise TimeoutError("private-timeout-message")
 
     monkeypatch.setattr(batch, "analyze" if stage == "analysis" else "_reply", timeout)

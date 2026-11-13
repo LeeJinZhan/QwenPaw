@@ -143,13 +143,19 @@ class AgentBuilder:
         # Final pass: cover workspace + extras + memory in one filter.
         tools = self.apply_subagent_tool_whitelist(tools, request_context)
 
-        skill_dirs = self._resolve_skill_loader_dirs(
-            effective_skills,
-            workspace_dir,
-        )
-        for extra in _bound_skill_loader_dirs(tools):
-            if extra not in skill_dirs:
-                skill_dirs.append(extra)
+        configuration = getattr(ctx, 'extras', {}).get('request_configuration')
+        if configuration is not None and configuration.skills_prepared:
+            skill_dirs = configuration.skill_directories()
+        else:
+            skill_dirs = self._resolve_skill_loader_dirs(
+                effective_skills,
+                workspace_dir,
+            )
+            for extra in _bound_skill_loader_dirs(tools):
+                if extra not in skill_dirs:
+                    skill_dirs.append(extra)
+            if configuration is not None:
+                skill_dirs = configuration.skill_directories(skill_dirs)
 
         return Toolkit(tools=tools, skills_or_loaders=skill_dirs)
 
@@ -262,7 +268,8 @@ class AgentBuilder:
         from ..providers.provider_manager import ProviderManager
 
         agent_id = getattr(ctx, "agent_id", None) or "default"
-        agent_config = load_agent_config(agent_id)
+        configuration = getattr(ctx, 'extras', {}).get('request_configuration')
+        agent_config = copy.deepcopy(configuration.config) if configuration is not None else load_agent_config(agent_id)
         request_context = self._build_request_context(ctx)
         agent_config = self._apply_request_project(
             agent_config,
@@ -283,10 +290,11 @@ class AgentBuilder:
         workspace_dir = getattr(ctx, "workspace_dir", None)
 
         # Resolve skills.
-        ensure_skills_initialized(workspace_dir or WORKING_DIR)
+        if configuration is None:
+            ensure_skills_initialized(workspace_dir or WORKING_DIR)
         channel_name = request_context.get("channel", "console")
         try:
-            effective_skills = resolve_effective_skills(
+            effective_skills = list(configuration.skills) if configuration is not None else resolve_effective_skills(
                 workspace_dir or WORKING_DIR,
                 channel_name,
             )
@@ -297,6 +305,10 @@ class AgentBuilder:
         if isinstance(subagent_skills, list):
             parent_set = set(effective_skills)
             effective_skills = [s for s in subagent_skills if s in parent_set]
+        request_skills = getattr(ctx, "extras", {}).get("request_skill_filter")
+        if isinstance(request_skills, list):
+            enabled = set(effective_skills)
+            effective_skills = [skill for skill in request_skills if skill in enabled]
 
         # Compute active modes.
         active_modes: set[str] = set()
@@ -305,6 +317,8 @@ class AgentBuilder:
             plugins = getattr(workspace, "plugins", None)
             if plugins is not None:
                 active_modes = plugins.active_mode_names(ctx)
+        if configuration is not None:
+            active_modes = set(configuration.modes)
 
         # Governor (governance policy layer).
         _project_dir = getattr(agent_config, "project_dir", None)
@@ -360,6 +374,7 @@ class AgentBuilder:
         model, _formatter = self.build_model(
             agent_config,
             model_slot_override=model_slot_override,
+            **({'provider_snapshot': configuration.provider} if configuration is not None else {}),
         )
 
         # Built once and shared: the agent's native offloader, and (when
@@ -472,6 +487,9 @@ class AgentBuilder:
         """Build the system prompt via the per-workspace
         :class:`PromptManager`.
         """
+        configuration = getattr(ctx, 'extras', {}).get('request_configuration')
+        if configuration is not None and configuration.base_prompt is not None:
+            return configuration.base_prompt
         from types import SimpleNamespace
         from ..constant import WORKING_DIR
 
@@ -516,6 +534,7 @@ class AgentBuilder:
         self,
         agent_config: Any,
         model_slot_override: Any = None,
+        provider_snapshot: Any = None,
     ) -> tuple[Any, Any]:
         """Create model and formatter using the factory method."""
         from ..agents.model_factory import create_model_and_formatter
@@ -523,6 +542,8 @@ class AgentBuilder:
         model, formatter = create_model_and_formatter(
             agent_id=agent_config.id,
             model_slot_override=model_slot_override,
+            **({'agent_config_snapshot': agent_config, 'provider_snapshot': provider_snapshot}
+               if provider_snapshot is not None else {}),
         )
         if formatter is not None:
             innermost = model
@@ -890,6 +911,9 @@ class AgentBuilder:
             if workspace is not None
             else ""
         )
+        storage = getattr(ctx, "extras", {}).get("request_context_storage", {})
+        if isinstance(storage, dict) and storage.get("scroll_workspace_dir"):
+            workspace_dir = storage["scroll_workspace_dir"]
         session_id = getattr(ctx, "session_id", None) or "local"
         agent_id = (
             getattr(agent_config, "id", None)
@@ -1067,6 +1091,9 @@ class AgentBuilder:
     @staticmethod
     def _build_offloader(ctx: Any, agent_config: Any) -> Any:
         """Build the offloader for context and tool-result persistence."""
+        storage = getattr(ctx, "extras", {}).get("request_context_storage", {})
+        if isinstance(storage, dict) and storage.get("offloader") is not None:
+            return storage["offloader"]
         workspace = getattr(ctx, "workspace", None)
         workspace_dir = (
             str(getattr(workspace, "workspace_dir", ""))
@@ -1128,6 +1155,7 @@ class AgentBuilder:
             exempt_tool_names={n.lower() for n in trc.exempt_tool_names},
             tool_results_dir=tool_results_dir,
             agent_id=getattr(agent_config, "id", "default"),
+            save_text=getattr(ctx, "extras", {}).get("request_context_storage", {}).get("save_tool_result"),
         )
 
     # pylint: disable=too-many-statements,too-many-branches

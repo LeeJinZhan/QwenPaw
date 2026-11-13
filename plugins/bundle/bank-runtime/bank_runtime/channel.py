@@ -12,6 +12,9 @@ class BankRuntimeChannel(ConsoleChannel):
     channel = "bank-runtime"
     uses_manager_queue = False
 
+    def uses_local_chat_history(self, request):
+        return getattr(request, "runtime_execution", None) is None
+
     def _apply_no_text_debounce(self, session_id, content_parts):
         # Every authenticated Runtime HTTP request is a complete submitted turn.
         # Files arrive through attachments_manifest and are prepared later by

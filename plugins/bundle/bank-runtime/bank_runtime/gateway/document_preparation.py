@@ -78,7 +78,7 @@ class DocumentSourcePreparation:
         if not isinstance(ref, str) or not ref or ref in ledger.documents:
             return arguments
         registry = file_refs.get_file_ref_registry()
-        if ref.startswith('fr1_'):
+        if ref.startswith(('fr1_','fr2_')):
             # Resolve the explicit capability BEFORE aliases or history. Never
             # renew an expired, foreign or tampered capability through file_id.
             file_id = registry.resolve(ref, expected_task_id=state.scope.task_id).file_id
